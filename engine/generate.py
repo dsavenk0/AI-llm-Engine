@@ -254,6 +254,7 @@ class Engine:
         self.persist_prefix()
         self.model = None
         self.cache, self.cache_tokens, self.snapshots = None, [], []
+        self.vision_bytes = 0
         gc.collect()
         mx.clear_cache()
         mx.set_wired_limit(0)
@@ -313,6 +314,8 @@ class Engine:
             self._drop_prefix_cache()
             self._reserve(4096)  # ~0.5 GB tower + image activations
             attach_vision(self.model, self.path, log=self.log)
+            from mlx.utils import tree_flatten
+            self.vision_bytes = sum(v.nbytes for _, v in tree_flatten(self.model.vision_tower.parameters()))
         from .vision import load_image, preprocess
         pix, grids = [], []
         for ref in images:
@@ -391,6 +394,41 @@ class Engine:
         self.cache = self.model.make_cache()
         self.cache_tokens, self.snapshots = [], []
         return 0
+
+    def memory_breakdown(self):
+        """Where this engine's memory goes, in bytes (safe to call from another thread)."""
+        from .model import KVCache
+        br = {"weights": 0 if self.sleeping else self.model_bytes, "vision": getattr(self, "vision_bytes", 0),
+              "kv": 0, "ssm": 0, "snapshots": 0}
+        seen = set()
+
+        def add(key, arr):
+            if arr is not None and id(arr) not in seen:
+                seen.add(id(arr))
+                br[key] += arr.nbytes
+        try:
+            for c in list(self.cache or []):
+                if isinstance(c, KVCache):
+                    add("kv", c.keys)
+                    add("kv", c.values)
+                else:
+                    add("ssm", c.conv)
+                    add("ssm", c.state)
+            for _, snaps in list(self.snapshots):
+                for snap in snaps:
+                    if snap is not None:
+                        add("snapshots", snap[0])
+                        add("snapshots", snap[1])
+        except Exception:  # the worker thread may be swapping caches right now
+            pass
+        active, cached = mx.get_active_memory(), mx.get_cache_memory()
+        known = br["weights"] + br["vision"] + br["kv"] + br["ssm"] + br["snapshots"]
+        br["activations"] = max(0, active - known)   # transient tensors of a running request
+        br["mlx_cache"] = cached                       # freed buffers kept for reuse
+        fp = memory.process_footprint()
+        br["process"] = max(0, fp - active - cached) if fp else None  # Python, tokenizer, HTTP
+        br["footprint"] = fp
+        return br
 
     # ───────────────────────── memory ─────────────────────────
     def _drop_prefix_cache(self):

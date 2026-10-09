@@ -40,3 +40,21 @@ def pressure_level():
 def headroom_bytes(limit):
     """Bytes that may still be allocated before the system crosses `limit` (fraction of RAM)."""
     return int(available_bytes() - (1.0 - limit) * TOTAL)
+
+
+_TASK_VM_INFO = 22
+_PHYS_FOOTPRINT_OFFSET = 144  # task_vm_info_data_t.phys_footprint
+
+
+def process_footprint():
+    """This process's physical footprint in bytes (what Activity Monitor shows as Memory),
+    including Metal/MLX allocations that RSS does not count."""
+    try:
+        task = ctypes.c_uint.in_dll(_libc, "mach_task_self_").value
+        buf = (ctypes.c_uint8 * 1024)()
+        count = ctypes.c_uint(len(buf) // 4)
+        if _libc.task_info(task, _TASK_VM_INFO, buf, ctypes.byref(count)) != 0:
+            return None
+        return int.from_bytes(bytes(buf[_PHYS_FOOTPRINT_OFFSET:_PHYS_FOOTPRINT_OFFSET + 8]), "little")
+    except (ValueError, OSError):
+        return None

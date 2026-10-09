@@ -428,9 +428,6 @@ struct EngineTab: View {
             Card {
                 Caption(text: L("Core", "Ядро"))
                 if let h = e.health {
-                    let mem = h["memory_gb"] as? [String: Any] ?? [:]
-                    Row(label: L("Model memory", "Память модели"), value: "\(num(mem["active"])) GB",
-                        hint: L("Weights + caches held by the engine (MLX active memory)", "Веса и кэши движка (активная память MLX)"))
                     Row(label: L("Context · output", "Контекст · ответ"), value: "\(num(h["context"])) · \(num(h["max_tokens"]))",
                         hint: L("Max prompt+output tokens · output cap. Larger max_tokens are clamped, never rejected.",
                                 "Максимум токенов промпта+ответа · потолок ответа. Больший max_tokens урезается, а не отклоняется."))
@@ -442,6 +439,7 @@ struct EngineTab: View {
                 }
                 guardMeter
             }
+            memoryCard
             if let last = e.health?["last"] as? [String: Any], !last.isEmpty {
                 Card(glow: HUD.phosphor) {
                     Caption(text: L("Last request", "Последний запрос"), color: HUD.phosphor)
@@ -466,6 +464,72 @@ struct EngineTab: View {
             Text(v).font(HUD.mono(20, .semibold)).foregroundColor(c).shadow(color: c.opacity(0.6), radius: 6)
             Text(label.uppercased()).font(HUD.mono(8, .medium)).tracking(1.2).foregroundColor(HUD.dim)
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Where the Mac's memory goes: the engine's parts, other apps and what is free.
+    var memoryCard: some View {
+        let b = e.health?["memory_breakdown"] as? [String: Any] ?? [:]
+        func v(_ k: String) -> Double { Double((b[k] as? Int) ?? 0) }
+        let engineTotal = Double((b["footprint"] as? Int) ?? 0)
+        let others = max(0, mon.used - engineTotal)
+        let free = max(0, mon.total - mon.used)
+        let parts: [(String, Double, Color, String)] = [
+            (L("Model weights", "Веса модели"), v("weights") + v("vision"), HUD.phosphor,
+             L("Quantized weights (+ vision tower when loaded); pinned in RAM", "Квантованные веса (+ vision-башня, если загружена); закреплены в RAM")),
+            (L("Context (KV cache)", "Контекст (KV-кэш)"), v("kv"), HUD.cyan,
+             L("Attention keys/values of the current conversation; grows ~64 KB per token", "Ключи и значения attention текущего диалога; растёт на ~64 КБ на токен")),
+            (L("Recurrent state + snapshots", "Состояние SSM + снимки"), v("ssm") + v("snapshots"), Color(red: 0.35, green: 0.55, blue: 1.0),
+             L("GatedDeltaNet state and prefix-cache restore points (fixed size, not per token)", "Состояние GatedDeltaNet и точки восстановления prefix-кэша (фиксированный размер)")),
+            (L("Engine buffers", "Буферы движка"), v("activations") + v("mlx_cache"), HUD.amber,
+             L("Activations of a running request and the MLX allocator cache", "Активации текущего запроса и кэш аллокатора MLX")),
+            (L("Engine process", "Процесс движка"), v("process"), Color.purple,
+             L("Python, tokenizer, HTTP server (CPU memory)", "Python, токенизатор, HTTP-сервер (память CPU)")),
+            (L("Other apps & macOS", "Другие приложения и macOS"), others, HUD.dim,
+             L("Everything else in use: apps, system, compressed pages", "Всё остальное: приложения, система, сжатые страницы")),
+        ]
+        let limit = (e.health?["mem_limit"] as? Double) ?? Double(e.g("mem_limit", 88)) / 100
+        return Card(glow: HUD.phosphor) {
+            Caption(text: L("Memory", "Память"), color: HUD.phosphor)
+            HStack(alignment: .firstTextBaseline) {
+                Text(e.running ? L("Engine ", "Движок ") + gb(engineTotal) : L("Engine stopped", "Движок остановлен"))
+                    .font(HUD.mono(14, .semibold)).foregroundColor(HUD.text)
+                Spacer()
+                Text("\(gb(mon.used)) / \(gb(mon.total))").font(HUD.mono(11)).foregroundColor(HUD.dim)
+            }
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    HStack(spacing: 1) {
+                        ForEach(0..<parts.count, id: \.self) { i in
+                            let w = mon.total > 0 ? g.size.width * CGFloat(parts[i].1 / mon.total) : 0
+                            if w >= 1 { Rectangle().fill(parts[i].2).frame(width: w) }
+                        }
+                        Rectangle().fill(HUD.track)
+                    }.clipShape(Capsule())
+                    Rectangle().fill(HUD.magenta).frame(width: 1.5, height: 12).offset(x: g.size.width * limit - 0.75)
+                        .shadow(color: HUD.magenta.opacity(HUD.glow), radius: 3)
+                }
+            }.frame(height: 9)
+            .help(L("Whole-Mac memory; the magenta tick is the RAM guard limit", "Память всего Mac; малиновая отметка — предел сторожа RAM"))
+            ForEach(0..<parts.count, id: \.self) { i in
+                if parts[i].1 > 0 || i == 0 {
+                    memRow(parts[i].0, parts[i].1, parts[i].2, parts[i].3)
+                }
+            }
+            memRow(L("Free", "Свободно"), free, HUD.track, L("Available without swapping", "Доступно без свопа"))
+        }
+    }
+
+    func memRow(_ name: String, _ bytes: Double, _ c: Color, _ hint: String) -> some View {
+        HStack {
+            RoundedRectangle(cornerRadius: 2).fill(c).frame(width: 9, height: 9)
+                .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(HUD.dim.opacity(0.5), lineWidth: 0.6))
+            Text(name).font(.system(size: 12)).foregroundColor(HUD.dim)
+            Spacer()
+            Text(bytes >= 1_073_741_824 ? gb(bytes) : String(format: "%.0f MB", bytes / 1_048_576))
+                .font(HUD.mono(12)).foregroundColor(HUD.text)
+            Text(mon.total > 0 ? String(format: "%4.1f%%", bytes / mon.total * 100) : "")
+                .font(HUD.mono(10)).foregroundColor(HUD.dim).frame(width: 44, alignment: .trailing)
+        }.help(hint)
     }
 
     var guardMeter: some View {
@@ -687,17 +751,15 @@ struct SettingsTab: View {
                 HStack {
                     Text(L("API key", "API-ключ")).font(.system(size: 12)).foregroundColor(HUD.text)
                     Spacer()
-                    SecureField(L("none", "нет"), text: Binding(get: { e.g("api_key", "") }, set: { e.setG("api_key", $0) }))
-                        .frame(width: 150).textFieldStyle(.roundedBorder)
+                    SecureField(L("not set — open access", "не задан — без ключа"), text: Binding(get: { e.g("api_key", "") }, set: { e.setG("api_key", $0) }))
+                        .frame(width: 170).textFieldStyle(.roundedBorder)
                 }
-                Picker("", selection: Binding(get: { e.g("lang", "auto") }, set: { e.setG("lang", $0); e.loadConfig() })) {
-                    Text(L("System", "Системный")).tag("auto"); Text("English").tag("en"); Text("Русский").tag("ru")
-                }.pickerStyle(.segmented).labelsHidden()
-                Hint(text: L("Interface language", "Язык интерфейса"))
-                Picker("", selection: Binding(get: { e.g("theme", "system") }, set: { e.setG("theme", $0); e.loadConfig(); e.onTheme?() })) {
-                    Text(L("System", "Системная")).tag("system"); Text(L("Dark", "Тёмная")).tag("dark"); Text(L("Light", "Светлая")).tag("light")
-                }.pickerStyle(.segmented).labelsHidden()
-                Hint(text: L("Theme", "Тема"))
+                Hint(text: L("Clients send it as Authorization: Bearer <key>", "Клиенты передают его как Authorization: Bearer <ключ>"))
+                Divider().opacity(0.3).padding(.vertical, 2)
+                labeledPicker(L("Language", "Язык"), Binding(get: { e.g("lang", "auto") }, set: { e.setG("lang", $0); e.loadConfig() }),
+                              [("auto", L("System", "Системный")), ("en", "English"), ("ru", "Русский")])
+                labeledPicker(L("Theme", "Тема"), Binding(get: { e.g("theme", "system") }, set: { e.setG("theme", $0); e.loadConfig(); e.onTheme?() }),
+                              [("system", L("System", "Системная")), ("dark", L("Dark", "Тёмная")), ("light", L("Light", "Светлая"))])
             }
             Card(glow: HUD.amber) {
                 DisclosureGroup(isExpanded: $advanced) {
@@ -722,12 +784,22 @@ struct SettingsTab: View {
             }
             Button(action: {
                 e.saveConfig()
-                if e.running { e.command(["restart"], label: "restart") }
+                e.command([e.running ? "restart" : "start"], label: e.running ? "restart" : "start")
             }) {
-                Text(e.running ? L("APPLY & RESTART", "ПРИМЕНИТЬ И ПЕРЕЗАПУСТИТЬ") : L("SAVED", "СОХРАНЕНО"))
+                Text(e.running ? L("APPLY & RESTART", "ПРИМЕНИТЬ И ПЕРЕЗАПУСТИТЬ") : L("START WITH THESE SETTINGS", "ЗАПУСТИТЬ С ЭТИМИ НАСТРОЙКАМИ"))
                     .font(HUD.mono(11, .semibold)).tracking(1.6).frame(maxWidth: .infinity).padding(.vertical, 7)
-            }.buttonStyle(NeonButton(color: HUD.cyan)).disabled(e.busy != nil || !e.running)
-            Hint(text: L("Settings are saved instantly and applied on restart", "Настройки сохраняются сразу и применяются после перезапуска"))
+            }.buttonStyle(NeonButton(color: e.running ? HUD.cyan : HUD.phosphor)).disabled(e.busy != nil)
+            Hint(text: L("Changes are saved as you edit; the engine applies them when it (re)starts",
+                         "Изменения сохраняются сразу; движок применяет их при запуске или перезапуске"))
+        }
+    }
+
+    func labeledPicker(_ label: String, _ b: Binding<String>, _ options: [(String, String)]) -> some View {
+        HStack {
+            Text(label).font(.system(size: 12)).foregroundColor(HUD.text)
+            Spacer()
+            Picker("", selection: b) { ForEach(options, id: \.0) { Text($0.1).tag($0.0) } }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 240)
         }
     }
 
@@ -1070,8 +1142,8 @@ struct ContentView: View {
             }
             RadialGradient(colors: [HUD.cyan.opacity(0.10), .clear], center: .topTrailing, startRadius: 0, endRadius: 320)
             // glass rim: a thin light edge that catches the "light" at the top
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.7 : 0.22), HUD.cyan.opacity(0.10), .clear],
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.7 : 0.22), HUD.cyan.opacity(0.10), HUD.cyan.opacity(0.06)],
                                              startPoint: .top, endPoint: .bottom), lineWidth: 1)
         }.ignoresSafeArea()
     }
@@ -1130,7 +1202,32 @@ struct VisualEffect: NSViewRepresentable {
 
 // MARK: - app shell (AppKit: status item, panel, window)
 
+/// Borderless windows refuse key status by default; the panel needs it for text fields.
+final class PanelWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    /// Menu-bar mark: a tiny CRT bezel with "Ai" and a cursor — the app icon at 16 pt, as a template
+    /// so it follows the menu bar's light/dark tint.
+    static func trayIcon() -> NSImage {
+        let img = NSImage(size: NSSize(width: 24, height: 16), flipped: false) { r in
+            NSColor.black.set()
+            let bezel = NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1.2), xRadius: 4.2, yRadius: 4.2)
+            bezel.lineWidth = 1.4
+            bezel.stroke()
+            let font = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .heavy)
+            let text = NSAttributedString(string: "Ai", attributes: [.font: font, .foregroundColor: NSColor.black])
+            let size = text.size()
+            text.draw(at: NSPoint(x: 4.2, y: (r.height - size.height) / 2 + 0.4))
+            NSBezierPath(rect: NSRect(x: 4.2 + size.width + 1.2, y: 4.2, width: 4.4, height: 1.6)).fill()
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
     let engine = EngineState()
     let monitor = SystemMonitor()
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1143,8 +1240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applyTheme()
         item.autosaveName = "AI-llm-Engine"  // keeps a ⌘-dragged position across launches
         if let b = item.button {
-            b.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "AI-llm-Engine")
-            b.image?.isTemplate = true
+            b.image = AppDelegate.trayIcon()
             b.imagePosition = .imageLeft
             b.action = #selector(toggle)
             b.target = self
@@ -1198,20 +1294,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showWindow(anchorX: CGFloat? = nil) {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 392, height: 660),
-                             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+            // borderless panel: our own rounded corners on all four sides + the system shadow
+            let w = PanelWindow(contentRect: NSRect(x: 0, y: 0, width: 392, height: 660),
+                                styleMask: [.borderless, .fullSizeContentView], backing: .buffered, defer: false)
             w.title = "AI-llm-Engine"
-            w.titlebarAppearsTransparent = true
-            w.titleVisibility = .hidden
+            w.hasShadow = true
             w.isMovableByWindowBackground = true
             w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
             w.isReleasedWhenClosed = false
             w.isOpaque = false
             w.backgroundColor = .clear  // let the vibrancy blur the desktop behind the panel
-            w.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor).ignoresSafeArea())
-            // a panel, not a document window: no traffic lights; closes on Esc or when focus leaves
-            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
-            w.delegate = self
+            w.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).ignoresSafeArea())
+            w.delegate = self  // closes on Esc or when focus leaves
             window = w
         }
         // under the icon if it is visible, else the top-right corner — always fully on screen

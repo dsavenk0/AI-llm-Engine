@@ -136,5 +136,6 @@
   "other engine": "другой движок",
   "downloaded": "скачана",
   "Number to download (Enter to cancel)": "Номер для загрузки (Enter — отмена)",
-  "Search & download models": "Поиск и загрузка моделей"
+  "Search & download models": "Поиск и загрузка моделей",
+  "weights {w:.0f} MB · context {kv:.0f} MB · SSM+snapshots {ssm:.0f} MB · buffers {buf:.0f} MB · process {p:.0f} MB": "веса {w:.0f} МБ · контекст {kv:.0f} МБ · SSM+снимки {ssm:.0f} МБ · буферы {buf:.0f} МБ · процесс {p:.0f} МБ"
 }

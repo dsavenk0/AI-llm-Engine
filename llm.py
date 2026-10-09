@@ -855,6 +855,11 @@ def status(cfg):
         print(f"{T('Memory'):8s}: " + T("model {m} GB · active {a} GB · peak {p} GB").format(
             m=mem.get("model"), a=mem.get("active"), p=mem.get("peak")))
         print(f"{T('Cache'):8s}: " + T("{n} prefix tokens · {r} requests").format(n=h.get("cached_tokens"), r=h.get("requests")))
+        br = h.get("memory_breakdown") or {}
+        if br:
+            mb = lambda *ks: sum(br.get(k) or 0 for k in ks) / 2**20
+            print(f"{'':8s}  " + T("weights {w:.0f} MB · context {kv:.0f} MB · SSM+snapshots {ssm:.0f} MB · buffers {buf:.0f} MB · process {p:.0f} MB").format(
+                w=mb("weights", "vision"), kv=mb("kv"), ssm=mb("ssm", "snapshots"), buf=mb("activations", "mlx_cache"), p=mb("process")))
         if h.get("system_ram_used") is not None:
             print(f"{T('Guard'):8s}: " + T("system RAM {u:.0%} of limit {l:.0%}").format(u=h["system_ram_used"], l=h["mem_limit"]))
         if last:
