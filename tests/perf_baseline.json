@@ -1,0 +1,15 @@
+{
+  "machine": "arm64",
+  "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
+  "date": "2026-10-09",
+  "metrics": {
+    "load_s": 2.36,
+    "decode_step_ms": 67.0,
+    "verify16_cost": 5.2,
+    "prefill_tps": 167.7,
+    "prose_tps": 13.32,
+    "code_edit_tps": 28.59,
+    "code_edit_accept": 1.0,
+    "peak_gb": 9.81
+  }
+}

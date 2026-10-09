@@ -1,0 +1,8 @@
+#!/bin/sh
+# Manager for the local MLX engine (see llm.py). Needs only a system python3 (3.9+).
+export LLM_CWD="${LLM_CWD:-$PWD}"
+cd "$(dirname "$0")" || exit 1
+for py in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  [ -x "$py" ] && exec "$py" llm.py "$@"
+done
+exec python3 llm.py "$@"

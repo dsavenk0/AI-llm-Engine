@@ -1,0 +1,222 @@
+# AI-llm-Engine
+
+![AI-llm-Engine](docs/banner.png)
+
+A small, dependency-light MLX inference engine for **Qwen3.5-family models** on Apple Silicon. It includes the
+**JANG / Prism Hadamard-rotated ternary** bundles that otherwise only run in vMLX, plus a CLI, a menu-bar app
+and integrations for Continue, Kilo Code and opencode.
+
+Built and tuned for a **MacBook Air M5, 16 GB** running
+[`dealignai/Bonsai-2-27B-CRACK-Ternary-JANG`](https://huggingface.co/dealignai/Bonsai-2-27B-CRACK-Ternary-JANG)
+(27B, ~7.6 GB).
+
+[Русская версия](README.ru.md)
+
+## Why
+
+| Same Mac, same prompts, alternating runs | vMLX 1.6.75 | **llm-engine** |
+|---|---|---|
+| Decode speed (256 tokens) | 6.80 – 6.94 tok/s | **7.61 – 9.53 tok/s** (+12 – 37 %) |
+| Code edits (prompt-lookup speculation) | — | **27 – 35 tok/s** (×2.5 vs plain decode) |
+| Prefill speed (2.3K-token prompt) | 73.5 – 88.1 tok/s | **86.7 – 119.5 tok/s** (+18 – 36 %) |
+| Cold start to first request | 19 s | **4 s** |
+| Process memory on top of the weights | 1.26 GB | **0.66 GB** |
+| Install size | 1.9 GB app | **310 MB** venv |
+| `max_tokens` above the safe limit | HTTP 413 error | clamped, request succeeds |
+
+The 413 error is what broke Kilo Code with vMLX. Kilo asks for 32,000 output tokens, and vMLX rejects anything above
+its Metal headroom estimate (~8.5K on 16 GB).
+
+## How it is fast
+
+- **One Hadamard transform per shared input.** The bundle stores one sign vector per input width, not one per
+  module. That was verified on load, and a bundle that differs is rejected. So q|k|v, gate|up and qkv|z each run as a
+  single fused quantized matmul after one transform, where vMLX does one transform per projection.
+- **Compiled layer blocks.** Decode is latency-bound by thousands of small dependent kernels, not only by weight
+  bandwidth. `mx.compile`d blocks (norm→Hadamard, gated-delta pre/post, attention pre/post, MLP + residual) bring the
+  full decode step to within ~11 % of the raw weight-read time.
+- **Pinned weights.** The wired limit keeps the weights resident, so macOS cannot compress or swap them.
+- **Hybrid-aware prefix cache.** The GatedDeltaNet state can't be rewound, so the engine snapshots it at the start of
+  the generation prompt. An agent that resends the whole conversation only prefills the new tail (310 of 340 tokens
+  reused in the tool-call test).
+- **Prompt-lookup speculative decoding.** When the output repeats text that is already in the context (code edits,
+  quotes, tool arguments), the engine drafts the continuation from an n-gram match and verifies it in one weight
+  pass. Small batches are padded to MLX's tiled-matmul size, so verifying 15 drafted tokens costs about five decode
+  steps. Acceptance is exact: the greedy output is identical to plain decoding, and sampled output keeps the same
+  distribution. The hybrid GatedDeltaNet state rolls back by re-running only the cheap recurrence on the accepted
+  tokens. It turns off by itself when nothing matches, so prose runs at plain speed.
+- **Adaptive, not tuned to one laptop.** The context length is computed at start from RAM, model size and KV cost
+  per token (about 45K on a 16 GB Mac; larger machines reach the model's native limit). The wired limit follows the
+  GPU budget of the machine, and the vision tower (~0.5 GB) loads only on the first image request.
+- **RAM guard.** The engine keeps the whole Mac under a memory ceiling, 88 % by default (`--mem-limit`, or Settings in
+  `./llm`). Above ~90 % a 16 GB Mac starts swapping and freezes. Before a request, the guard checks the headroom and
+  frees caches; it caps the output to what fits and refuses an oversized prompt with a clear error. During prefill it
+  shrinks the chunk size (1024 → 256 → 128), and during generation it checks every 32 tokens. Peak memory while
+  loading equals the weights (was +1.7 GB).
+- **Last-position logits only** during prefill, chunked prefill, GPU-side top-k/top-p/min-p sampling and a pipelined
+  (`async_eval`) decode loop.
+
+A note on numbers: a fanless MacBook Air lowers GPU/memory clocks after a few seconds of full-bandwidth load. The raw
+weight-read time goes from ~60 ms to ~95–120 ms per token regardless of engine, so expect 7–10 tok/s sustained on
+this 27B model.
+
+## Quick start
+
+```sh
+./llm setup        # creates .venv (mlx, tokenizers, jinja2, numpy, pillow)
+./llm models       # lists models found in ~/.cache/huggingface/hub
+./llm use 1        # select one
+./llm open         # new Terminal window: starts the model and opens a chat
+```
+
+Double-clicking **`LLM.command`** in Finder does the same as `./llm open`.
+
+### Models: search, download, switch
+
+```sh
+./llm search qwen3.5            # MLX models on Hugging Face: size, downloads, "engine ✓", fits RAM
+./llm pull mlx-community/Qwen3.5-4B-MLX-4bit   # resumable download into ~/.cache/huggingface/hub
+./llm use 2                      # switch the active model (restarts the engine if it runs)
+```
+
+Downloads resume if interrupted, check free disk space first and skip weights the engine does not use. Set
+`HF_ENDPOINT` to use a mirror (e.g. `https://hf-mirror.com`) and `HF_TOKEN` for gated repos. Both JANG bundles and
+regular mlx-community / lmstudio-community conversions of the dense Qwen3.5 family run on the engine, including tied
+embeddings and quantized gate projections.
+
+### Sleep and the SSD prefix cache
+
+- **Auto-sleep.** After 15 idle minutes (configurable, 0 = never) the engine unloads the weights and gives about 7 GB
+  back to macOS. The next request wakes it in about 2 s.
+- **SSD prefix cache.** The KV and recurrent state at two restore points per request (the end of the system prompt and
+  the start of the answer) is written to `~/.cache/ai-llm-engine/prefix/` after the response is sent. The budget is
+  8 GB by default, and the least recently used entries go first. A long agent system prompt is prefilled once and
+  then restored from disk across sleeps, restarts and model switches, with output identical to a cold run.
+
+### Menu-bar app (optional)
+
+```sh
+./build-app.sh && open LLMBar.app      # app with icon (~1 MB, engine + CLI bundled)
+./build-dmg.sh                         # dist/LLMBar-1.0.dmg — drag-to-Applications installer
+```
+
+LLMBar is the lightweight UI of the engine: a menu-bar panel (or a window on double-click), styled as an Apple-grade
+HUD with dark and light themes. It has five tabs:
+
+- **Engine:** status, last-request speeds, the RAM guard meter, and a token ledger for the session and all time
+  (cache hits, averages, history chart).
+- **Monitor:** E- and P-core load, thermal state, GPU load and memory, and the memory breakdown, each with graphs.
+- **Models:** installed models with one-click switching, plus hub search and download with progress.
+- **Settings:** context, output, reasoning, images, speculation, RAM limit, sleep, SSD cache, port, LAN, API key,
+  language and theme. An Advanced section holds sampling, draft length, n-gram, MLX cache, prefill chunk and image
+  size. Every setting has a hint.
+- **Tools:** chat, coding agent, connecting an editor, logs, tests and benchmarks.
+
+It polls only while visible and delegates all work to `./llm`. It calls `./llm` for everything. Built from a checkout, it uses that checkout. Installed
+from the DMG on another Mac, it runs its bundled copy and keeps its config and `.venv` in
+`~/Library/Application Support/LLMBar`. On the first Start it creates them, which needs Python 3.10+ and internet.
+
+## CLI
+
+```
+./llm                      interactive menu
+./llm open | up            new window with chat | start + chat + menu in this terminal
+./llm start|stop|restart|status|chat|bench|logs
+./llm models | use <n>     discover / select models
+./llm agent [dir]          terminal coding agent (files, search, edits, shell)
+./llm connect [client]     register the model in Continue, Kilo Code or opencode
+./llm free                 quit vMLX / oMLX / Ollama to free memory
+./llm test                 unit + integration tests
+./llm perf [--save]        performance suite vs the saved baseline
+```
+
+Language is English by default and Russian when the system locale is Russian. You can force it with `LLM_LANG=ru` or
+in Settings.
+
+## API
+
+OpenAI-compatible on `http://localhost:8090/v1`:
+
+- `POST /v1/chat/completions` supports streaming, `reasoning_content`, tool calls (the model's XML format is converted
+  to OpenAI `tool_calls`) and images (`image_url` with a data URI, http URL or file path).
+- Thinking is controlled with `chat_template_kwargs.enable_thinking`, `reasoning_effort` (`low`, `medium`, `high`→`xhigh`)
+  or `thinking: {type: "disabled"}`.
+- `GET /v1/models` and `GET /health` (memory, cache, last request speed).
+
+Any `model` name is accepted, since the server hosts exactly one model.
+
+### Coding agent
+
+`./llm agent [folder]` is a terminal coding agent that needs only this engine, with no VS Code and no Kilo. It can list,
+read and search files, write files, make exact edits and run shell commands, all scoped to the folder. Writes, edits
+and commands show a diff or the command line and ask first; `/auto` approves them for the session. It speaks the
+user's language.
+
+### Editors: Continue, Kilo Code, opencode
+
+Nothing is tied to one editor. Run `./llm connect` and pick one, or name it directly:
+
+```sh
+./llm connect continue   # ~/.continue/config.yaml — adds a managed block, keeps your other models
+./llm connect kilo       # ~/.config/kilo/kilo.jsonc
+./llm connect opencode   # ~/.config/opencode/opencode.json
+```
+
+Each one gets the engine URL, tool and image capabilities, and the context and output limits of the running engine.
+A `.bak` copy is kept, and running it again only updates its own entry. Any other OpenAI-compatible client works with
+`http://localhost:8090/v1`.
+
+## Run the engine directly
+
+```sh
+.venv/bin/python -m engine.server --model <path> --port 8090 \
+    --context 32768 --max-tokens 8192 --thinking on --effort medium [--no-vision]
+```
+
+## Tests
+
+```sh
+./llm test
+# or: ENGINE_TEST_MODEL=<model path> .venv/bin/python -m unittest discover -s tests -v
+```
+
+There are 35 unit tests (engine and CLI): Hadamard against an explicit matrix, fused vs separate projections, caches, M-RoPE, the
+sampler, the drafter, speculative acceptance (it keeps the sampling distribution), SSM rollback (equal to sequential),
+the reasoning/tool-call stream parser and message normalization. There are also 6 integration tests on the real
+model: a correct answer, UTF-8 streaming detokenization, bit-exact prefix-cache reuse, speculative greedy identical to
+plain greedy, the RAM guard refusing instead of swapping, and `max_tokens` clamping.
+
+### Performance suite
+
+```sh
+./llm perf            # compare with tests/perf_baseline.json; exits 1 on >15 % regressions
+./llm perf --save     # record a new baseline after an intentional change
+```
+
+It measures load time, decode step, the cost of a 16-token verify pass, prefill, prose and code-edit speed, draft
+acceptance, peak memory and peak system RAM. Stop the server first. If memory runs short, a metric is skipped
+instead of freezing the Mac.
+
+## Supported models
+
+Quantized MLX checkpoints of the `qwen3_5` dense family, with or without the JANG Hadamard contract and with or
+without the vision tower. MoE variants, video and other architectures are not supported (yet). `./llm models` shows
+compatibility for every model it finds.
+
+## Layout
+
+```
+engine/   model.py (layers, Hadamard, fused ops) · loader.py · vision.py · gated_delta.py
+          tokenizer.py · generate.py (cache, sampling) · server.py (HTTP)
+llm.py    CLI / menu (stdlib only) — locales/ru.json for Russian
+agent.py  terminal coding agent (stdlib only)
+app/      LLMBar.swift (menu-bar app)
+tools/    icon / DMG background / banner generators (Swift)
+build-app.sh, build-dmg.sh
+tests/    unittest suite · perf.py + perf_baseline.json
+```
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). Parts are derived from vMLX and jang (Apache-2.0), and from mlx-lm and mlx-vlm
+(MIT). See [NOTICE](NOTICE) and `third_party/`. Model weights are not included and have their own licenses.

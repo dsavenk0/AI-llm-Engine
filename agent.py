@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+A small terminal coding agent for the local engine (stdlib only).
+
+    ./llm agent [workspace]        (default: current directory)
+
+The model gets file and shell tools scoped to the workspace. Writes, edits and
+commands are shown (with a diff) and need confirmation unless /auto is on.
+Commands: /auto  /clear  /think on|off  /exit
+"""
+import difflib
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+import llm
+from llm import B, CY, DIM, G, R, T, Y
+
+MAX_TOOL_OUTPUT = 12000
+MAX_STEPS = 30
+SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".llm", "dist", "build", ".build"}
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_dir", "description": "List files under a directory of the workspace (recursive, max 300 entries).",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "directory relative to the workspace, '.' for root"},
+            "pattern": {"type": "string", "description": "optional glob filter, e.g. '*.py'"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "read_file", "description": "Read a text file (optionally a line range). Lines are numbered.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "start": {"type": "integer", "description": "first line, 1-based"},
+            "end": {"type": "integer", "description": "last line, inclusive"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "search", "description": "Search file contents with a regular expression. Returns path:line: text.",
+        "parameters": {"type": "object", "properties": {
+            "pattern": {"type": "string"}, "path": {"type": "string", "description": "directory, default '.'"},
+            "glob": {"type": "string", "description": "file filter, e.g. '*.py'"}},
+            "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "write_file", "description": "Create or overwrite a file with the given content.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {
+        "name": "edit_file", "description": "Replace an exact, unique snippet of a file with new text.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "old": {"type": "string", "description": "exact text to replace (unique)"},
+            "new": {"type": "string"}}, "required": ["path", "old", "new"]}}},
+    {"type": "function", "function": {
+        "name": "run", "description": "Run a shell command in the workspace and return its output (timeout 120 s).",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+]
+
+SYSTEM = """You are a careful coding agent working in the workspace {root}.
+Use the tools to inspect files before changing them; prefer edit_file for small changes.
+Keep changes minimal and consistent with the surrounding code. Run tests or the program
+when that helps verify a change. When the task is done, reply with a short summary.
+Answer in the language the user writes in."""
+
+
+class Agent:
+    def __init__(self, cfg, root):
+        self.cfg = cfg
+        self.root = os.path.realpath(root)
+        self.url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
+        self.auto = False
+        self.think = True
+        self.messages = [{"role": "system", "content": SYSTEM.format(root=self.root)}]
+
+    # ───────────────────────── tools ─────────────────────────
+    def path(self, p):
+        full = os.path.realpath(os.path.join(self.root, p or "."))
+        if full != self.root and not full.startswith(self.root + os.sep):
+            raise ValueError(T("path is outside the workspace"))
+        return full
+
+    def rel(self, full):
+        return os.path.relpath(full, self.root)
+
+    def confirm(self, what):
+        if self.auto:
+            return True
+        return llm.ask_yn(Y(what), True)
+
+    def t_list_dir(self, path=".", pattern=None):
+        base, out = self.path(path), []
+        for d, dirs, files in os.walk(base):
+            dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
+            for f in sorted(files):
+                if not pattern or fnmatch.fnmatch(f, pattern):
+                    out.append(self.rel(os.path.join(d, f)))
+                    if len(out) >= 300:
+                        return "\n".join(out) + "\n…"
+        return "\n".join(out) or "(empty)"
+
+    def t_read_file(self, path, start=None, end=None):
+        with open(self.path(path), errors="replace") as f:
+            lines = f.read().splitlines()
+        s = max(1, int(start or 1))
+        e = min(len(lines), int(end or len(lines)))
+        return "\n".join(f"{i:5d}  {lines[i - 1]}" for i in range(s, e + 1)) or "(empty file)"
+
+    def t_search(self, pattern, path=".", glob=None):
+        rx, out = re.compile(pattern), []
+        for d, dirs, files in os.walk(self.path(path)):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not x.startswith(".")]
+            for f in files:
+                if glob and not fnmatch.fnmatch(f, glob):
+                    continue
+                full = os.path.join(d, f)
+                try:
+                    with open(full, errors="strict") as fh:
+                        for n, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                out.append(f"{self.rel(full)}:{n}: {line.rstrip()[:200]}")
+                                if len(out) >= 200:
+                                    return "\n".join(out) + "\n…"
+                except (UnicodeDecodeError, OSError):
+                    continue
+        return "\n".join(out) or "(no matches)"
+
+    def show_diff(self, path, old, new):
+        diff = difflib.unified_diff(old.splitlines(), new.splitlines(), f"a/{path}", f"b/{path}", lineterm="", n=2)
+        for line in list(diff)[:200]:
+            color = G if line.startswith("+") and not line.startswith("+++") else \
+                R if line.startswith("-") and not line.startswith("---") else DIM
+            print(color(line))
+
+    def t_write_file(self, path, content):
+        full = self.path(path)
+        old = open(full, errors="replace").read() if os.path.exists(full) else ""
+        self.show_diff(path, old, content)
+        if not self.confirm(T("Write {path}?").format(path=path)):
+            return "user declined the write"
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(content)
+        return f"wrote {path} ({len(content.splitlines())} lines)"
+
+    def t_edit_file(self, path, old, new):
+        full = self.path(path)
+        with open(full, errors="replace") as f:
+            text = f.read()
+        n = text.count(old)
+        if n != 1:
+            return f"error: the snippet occurs {n} times in {path}; give a unique exact snippet"
+        updated = text.replace(old, new, 1)
+        self.show_diff(path, text, updated)
+        if not self.confirm(T("Apply this edit to {path}?").format(path=path)):
+            return "user declined the edit"
+        with open(full, "w") as f:
+            f.write(updated)
+        return f"edited {path}"
+
+    def t_run(self, command):
+        print(CY("$ " + command))
+        if not self.confirm(T("Run this command?")):
+            return "user declined to run the command"
+        try:
+            p = subprocess.run(command, shell=True, cwd=self.root, capture_output=True, text=True, timeout=120)
+            out = (p.stdout + p.stderr).strip()
+            print(DIM(out[-2000:]))
+            return f"exit code {p.returncode}\n{out}"
+        except subprocess.TimeoutExpired:
+            return "error: timed out after 120 s"
+
+    def call_tool(self, name, args):
+        fn = getattr(self, "t_" + name, None)
+        if fn is None:
+            return f"error: unknown tool {name}"
+        try:
+            out = fn(**args)
+        except TypeError as e:
+            out = f"error: bad arguments: {e}"
+        except (OSError, ValueError, re.error) as e:
+            out = f"error: {e}"
+        if len(out) > MAX_TOOL_OUTPUT:
+            out = out[:MAX_TOOL_OUTPUT] + f"\n… [truncated, {len(out)} chars total]"
+        return out
+
+    # ───────────────────────── model ─────────────────────────
+    def complete(self):
+        body = {"model": "local", "stream": True, "stream_options": {"include_usage": True},
+                "messages": self.messages, "tools": TOOLS,
+                "chat_template_kwargs": {"enable_thinking": self.think}}
+        req = urllib.request.Request(self.url, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        content, reasoning, calls, usage, in_think = [], [], [], None, False
+        t0 = time.time()
+        with urllib.request.urlopen(req, timeout=3600) as r:
+            for raw in r:
+                raw = raw.strip()
+                if not raw.startswith(b"data:") or raw == b"data: [DONE]":
+                    continue
+                ev = json.loads(raw[5:])
+                if ev.get("error"):
+                    raise RuntimeError(ev["error"].get("message"))
+                usage = ev.get("usage") or usage
+                for ch in ev.get("choices", []):
+                    d = ch.get("delta", {})
+                    if d.get("reasoning_content"):
+                        if not in_think:
+                            print(DIM("💭 "), end="")
+                            in_think = True
+                        reasoning.append(d["reasoning_content"])
+                        print(DIM(d["reasoning_content"]), end="", flush=True)
+                    if d.get("content"):
+                        if in_think:
+                            print()
+                            in_think = False
+                        content.append(d["content"])
+                        print(d["content"], end="", flush=True)
+                    calls += d.get("tool_calls") or []
+        print()
+        if usage:
+            dt = time.time() - t0
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            print(DIM(T("— {inp} in ({cached} cached) / {out} out · {s:.1f} s").format(
+                inp=usage.get("prompt_tokens"), cached=cached, out=usage.get("completion_tokens"), s=dt)))
+        msg = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            msg["reasoning_content"] = "".join(reasoning)
+        if calls:
+            msg["tool_calls"] = [{"id": c["id"], "type": "function", "function": c["function"]} for c in calls]
+        return msg
+
+    def turn(self, user_text):
+        self.messages.append({"role": "user", "content": user_text})
+        for _ in range(MAX_STEPS):
+            msg = self.complete()
+            self.messages.append(msg)
+            if not msg.get("tool_calls"):
+                return
+            for c in msg["tool_calls"]:
+                name = c["function"]["name"]
+                try:
+                    args = json.loads(c["function"].get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                brief = ", ".join(f"{k}={str(v)[:60]!r}" for k, v in args.items() if k not in ("content", "new", "old"))
+                print(B(f"⚙ {name}") + DIM(f"({brief})"))
+                result = self.call_tool(name, args)
+                self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+        print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
+
+    def repl(self):
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /exit"))
+        while True:
+            mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
+            try:
+                line = input(CY(f"\n[agent · {mode}] › ")).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not line:
+                continue
+            if line in ("/exit", "/q"):
+                return
+            if line == "/auto":
+                self.auto = not self.auto
+                print(DIM(T("Auto-approve edits and commands: {v}").format(v=T("on") if self.auto else T("off"))))
+                continue
+            if line == "/clear":
+                self.messages = self.messages[:1]
+                print(DIM(T("History cleared.")))
+                continue
+            if line.startswith("/think"):
+                self.think = not line.endswith("off")
+                continue
+            try:
+                self.turn(line)
+            except KeyboardInterrupt:
+                print(Y("\n[" + T("interrupted") + "]"))
+            except Exception as e:  # keep the session alive
+                print(R(T("Error:") + f" {e}"))
+
+
+def main(args):
+    cfg = llm.load_cfg()
+    llm.set_lang(cfg["lang"])
+    cwd = os.environ.get("LLM_CWD") or os.getcwd()
+    root = os.path.abspath(os.path.join(cwd, args[0])) if args else cwd
+    if not os.path.isdir(root):
+        print(R(T("Not a directory:") + f" {root}"))
+        return False
+    if not llm.health(cfg):
+        print(Y(T("The model is not running.")) + " " + T("Starting…"))
+        if not llm.start(cfg, sys.stdin.isatty()):
+            return False
+    Agent(cfg, root).repl()
+    return True
+
+
+if __name__ == "__main__":
+    sys.exit(0 if main(sys.argv[1:]) else 1)

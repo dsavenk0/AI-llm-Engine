@@ -1,0 +1,19 @@
+# environment / runtime state
+.venv/
+.llm/
+__pycache__/
+*.pyc
+
+# build output
+LLMBar.app/
+
+# local artifacts
+chat-*.md
+*.bak
+.DS_Store
+runtime/
+*.safetensors
+runtime.tmp/
+dist/
+.dmg-stage.*/
+.LLMBar-rw.dmg

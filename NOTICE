@@ -1,0 +1,29 @@
+AI-llm-Engine
+Copyright 2026 the AI-llm-Engine authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It contains code derived from the following projects:
+
+vMLX (https://github.com/jjang-ai/vmlx) — Apache License 2.0
+  Copyright Jinho Jang.
+  engine/model.py: Hadamard activation transform contract (prism.hadamard.v1),
+  zero-centered RMSNorm handling and the Qwen3.5 hybrid layer structure follow
+  vmlx_engine/utils/jang_hadamard.py and vmlx_engine/models/qwen3_5_family.
+
+jang / jangq (https://github.com/jjang-ai/jangq) — Apache License 2.0
+  JANG bundle format (jang_config.json, hadamard.json) as read by engine/loader.py.
+
+mlx-lm (https://github.com/ml-explore/mlx-lm) — MIT License
+  Copyright © 2023 Apple Inc.
+  engine/gated_delta.py: gated delta rule Metal kernel; Qwen3.5 / Qwen3-Next
+  model structure. License text: third_party/LICENSE.mlx-lm
+
+mlx-vlm (https://github.com/Blaizzy/mlx-vlm) — MIT License
+  Copyright © 2025 Prince Canuma.
+  engine/vision.py: Qwen3-VL vision tower; M-RoPE position indexing in
+  engine/generate.py. License text: third_party/LICENSE.mlx-vlm
+
+Qwen2-VL image processor (Hugging Face transformers) — Apache License 2.0
+  engine/vision.py: smart_resize and patch layout algorithm.
+
+Model weights are not part of this repository and carry their own licenses.
