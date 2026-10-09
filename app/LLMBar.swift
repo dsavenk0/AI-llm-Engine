@@ -31,7 +31,7 @@ enum HUD {
     static var text: Color { lightTheme ? Color(red: 0.05, green: 0.09, blue: 0.13) : Color(red: 0.86, green: 0.95, blue: 0.98) }
     static var dim: Color { lightTheme ? Color(red: 0.36, green: 0.43, blue: 0.48) : Color(red: 0.45, green: 0.58, blue: 0.64) }
     static var glow: Double { lightTheme ? 0.25 : 1.0 }   // neon glow is for dark glass only
-    static var panel: Color { lightTheme ? Color.white.opacity(0.62) : Color.black.opacity(0.32) }
+    static var panel: Color { lightTheme ? Color.white.opacity(0.42) : Color.black.opacity(0.20) }
     static var track: Color { lightTheme ? Color.black.opacity(0.07) : Color.white.opacity(0.06) }
 
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
@@ -1047,15 +1047,19 @@ struct ContentView: View {
         .environment(\.colorScheme, lightTheme ? .light : .dark)
         .tint(HUD.cyan)
         .onAppear { e.loadModels() }
+        .background(Button("") { NSApp.keyWindow?.orderOut(nil) }.keyboardShortcut(.cancelAction).opacity(0))
     }
 
     var background: some View {
         ZStack {
-            VisualEffect().opacity(0.96)
+            VisualEffect()
+            // light tint over the blur — the desktop should show through like frosted glass
             LinearGradient(colors: lightTheme
-                           ? [Color(red: 0.96, green: 0.98, blue: 0.99).opacity(0.90), Color(red: 0.90, green: 0.94, blue: 0.96).opacity(0.86)]
-                           : [HUD.ink.opacity(0.92), Color(red: 0.03, green: 0.07, blue: 0.10).opacity(0.88)],
+                           ? [Color(red: 0.97, green: 0.99, blue: 1.0).opacity(0.50), Color(red: 0.90, green: 0.94, blue: 0.96).opacity(0.42)]
+                           : [HUD.ink.opacity(0.55), Color(red: 0.03, green: 0.07, blue: 0.10).opacity(0.48)],
                            startPoint: .top, endPoint: .bottom)
+            // specular sheen across the top
+            LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.35 : 0.07), .clear], startPoint: .top, endPoint: .center)
             // scanlines
             Canvas { ctx, size in
                 var y: CGFloat = 0
@@ -1065,6 +1069,10 @@ struct ContentView: View {
                 }
             }
             RadialGradient(colors: [HUD.cyan.opacity(0.10), .clear], center: .topTrailing, startRadius: 0, endRadius: 320)
+            // glass rim: a thin light edge that catches the "light" at the top
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.7 : 0.22), HUD.cyan.opacity(0.10), .clear],
+                                             startPoint: .top, endPoint: .bottom), lineWidth: 1)
         }.ignoresSafeArea()
     }
 
@@ -1094,7 +1102,7 @@ struct ContentView: View {
         }
     }
 
-    /// Fit under the menu bar on small screens (a too-tall popover flips above the screen edge).
+    /// Fit under the menu bar on small screens (the panel window must stay on screen).
     static var scrollHeight: CGFloat {
         let visible = NSScreen.main?.visibleFrame.height ?? 800
         return max(260, min(520, visible - 210))
@@ -1112,7 +1120,7 @@ struct ContentView: View {
 struct VisualEffect: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
-        v.material = .hudWindow
+        v.material = lightTheme ? .popover : .hudWindow
         v.blendingMode = .behindWindow
         v.state = .active
         return v
@@ -1122,19 +1130,18 @@ struct VisualEffect: NSViewRepresentable {
 
 // MARK: - app shell (AppKit: status item, panel, window)
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let engine = EngineState()
     let monitor = SystemMonitor()
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let popover = NSPopover()
     var window: NSWindow?
     var fastTimer: Timer?
+    var hiddenAt = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        popover.behavior = .transient
         engine.onTheme = { [weak self] in self?.applyTheme() }
         applyTheme()
-        popover.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor))
+        item.autosaveName = "AI-llm-Engine"  // keeps a ⌘-dragged position across launches
         if let b = item.button {
             b.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "AI-llm-Engine")
             b.image?.isTemplate = true
@@ -1151,16 +1158,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !self.uiVisible { self.engine.poll() }
             self.refreshIcon()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.reveal() }
     }
 
     func applyTheme() {
         let a = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
-        popover.appearance = a
         window?.appearance = a
     }
 
-    var uiVisible: Bool { popover.isShown || (window?.isVisible ?? false) }
+    var uiVisible: Bool { window?.isVisible ?? false }
 
     func refreshIcon() {
         let busy = (engine.health?["busy"] as? Bool) ?? false
@@ -1181,28 +1186,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// True only when the status item really sits on a screen. Items hidden behind the notch
-    /// (full menu bar) report as "visible" but their window is moved above the screen edge,
-    /// and a popover anchored there opens off-screen.
-    var iconOnScreen: Bool {
-        guard let w = item.button?.window, w.occlusionState.contains(.visible) else { return false }
-        let f = w.frame
-        return NSScreen.screens.contains { s in
-            f.minX >= s.frame.minX - 1 && f.maxX <= s.frame.maxX + 1 && f.maxY <= s.frame.maxY + 1 && f.minY >= s.visibleFrame.maxY - 2
-        }
-    }
-
+    /// Status-icon click: toggle the panel window (no NSPopover — it cannot be kept on screen
+    /// when the icon is hidden by the notch).
     @objc func toggle() {
-        if popover.isShown { popover.performClose(nil); return }
-        guard iconOnScreen else { showWindow(); return }
-        guard let b = item.button else { return }
-        engine.loadConfig()
-        popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
-        startFastSampling()
+        if let w = window, w.isVisible { w.orderOut(nil); return }
+        // a click on the icon first takes focus from the panel (which hides it) — don't reopen
+        if Date().timeIntervalSince(hiddenAt) < 0.3 { return }
+        // the user just clicked the icon, so it is visible: open the panel right under it
+        showWindow(anchorX: item.button?.window?.frame.midX)
     }
 
-    func showWindow() {
+    func showWindow(anchorX: CGFloat? = nil) {
         if window == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 392, height: 660),
                              styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -1212,15 +1206,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.isMovableByWindowBackground = true
             w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
             w.isReleasedWhenClosed = false
-            w.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor).padding(.top, 14))
+            w.isOpaque = false
+            w.backgroundColor = .clear  // let the vibrancy blur the desktop behind the panel
+            w.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor).ignoresSafeArea())
+            // a panel, not a document window: no traffic lights; closes on Esc or when focus leaves
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
+            w.delegate = self
             window = w
         }
-        // top-right corner, right under the menu bar — always fully on screen
-        if let w = window, !w.isVisible, let screen = NSScreen.main {
+        // under the icon if it is visible, else the top-right corner — always fully on screen
+        if let w = window, !w.isVisible || anchorX != nil, let screen = NSScreen.main {
             let v = screen.visibleFrame
-            let size = w.frame.size
+            // the frame is still empty before SwiftUI lays out — size from the content instead
+            var size = w.contentViewController?.view.fittingSize ?? .zero
+            if size.width < 100 || size.height < 100 { size = NSSize(width: 392, height: 680) }
             let h = min(size.height, v.height - 8)
-            w.setFrame(NSRect(x: v.maxX - size.width - 12, y: v.maxY - h - 6, width: size.width, height: h), display: true)
+            // Under the icon when opened by a click on it; otherwise (launch, double-click) the
+            // top-right corner like Control Center — a status item can be covered by the notch or
+            // the active app's menus while macOS still reports it visible.
+            var x = anchorX.map { $0 - size.width / 2 } ?? (v.maxX - size.width - 12)
+            x = min(max(x, v.minX + 8), v.maxX - size.width - 8)
+            w.setFrame(NSRect(x: x, y: v.maxY - h - 6, width: size.width, height: h), display: true)
         }
         engine.loadConfig()
         NSApp.activate(ignoringOtherApps: true)
@@ -1229,12 +1235,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// First launch / icon hidden by the notch: show a window; otherwise open the panel.
+    /// Double-click on the app while it runs: open the panel under its icon.
     func reveal() {
-        iconOnScreen ? toggle() : showWindow()
+        showWindow(anchorX: item.button?.window?.frame.midX)
+    }
+
+    func windowDidResignKey(_ n: Notification) {
+        // like Control Center: clicking anywhere else hides the panel (the model keeps running)
+        window?.orderOut(nil)
+        hiddenAt = Date()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        showWindow()
+        reveal()
         return false
     }
 }
