@@ -96,15 +96,19 @@ embeddings and quantized gate projections.
 ### Menu-bar app (optional)
 
 ```sh
-./build-app.sh && open LLMBar.app      # app with icon (~1 MB, engine + CLI bundled)
+./build-app.sh && open LLMBar.app      # app with icon (~2.5 MB, engine + CLI bundled)
 ./build-dmg.sh                         # dist/LLMBar-1.0.dmg — drag-to-Applications installer
 ```
 
-LLMBar is the lightweight UI of the engine: a menu-bar panel (or a window on double-click), styled as an Apple-grade
-HUD with dark and light themes. It has five tabs:
+LLMBar is the lightweight UI of the engine. It lives in the menu bar as a small `Ai_` icon. Click the icon to open a
+frosted-glass panel right under it; click again, press Esc or click elsewhere to hide it (the model keeps running).
+Double-clicking the app opens the same panel. If the icon is hidden behind the notch or another app's menus, ⌘-drag it
+closer to the clock; its position is remembered. The panel follows a dark or light theme. It has five tabs:
 
-- **Engine:** status, last-request speeds, the RAM guard meter, and a token ledger for the session and all time
-  (cache hits, averages, history chart).
+- **Engine:** status, last-request speeds, the RAM guard meter, a token ledger for the session and all time (cache
+  hits, averages, history chart), and a **memory card**. The card is one bar for the whole Mac: model weights, context
+  (KV cache), recurrent state with prefix snapshots, engine buffers, the engine process, other apps and free memory,
+  with the RAM-guard limit marked.
 - **Monitor:** E- and P-core load, thermal state, GPU load and memory, and the memory breakdown, each with graphs.
 - **Models:** installed models with one-click switching, plus hub search and download with progress.
 - **Settings:** context, output, reasoning, images, speculation, RAM limit, sleep, SSD cache, port, LAN, API key,
@@ -112,7 +116,7 @@ HUD with dark and light themes. It has five tabs:
   size. Every setting has a hint.
 - **Tools:** chat, coding agent, connecting an editor, logs, tests and benchmarks.
 
-It polls only while visible and delegates all work to `./llm`. It calls `./llm` for everything. Built from a checkout, it uses that checkout. Installed
+It polls only while the panel is open and does all its work through `./llm`. Built from a checkout, it uses that checkout. Installed
 from the DMG on another Mac, it runs its bundled copy and keeps its config and `.venv` in
 `~/Library/Application Support/LLMBar`. On the first Start it creates them, which needs Python 3.10+ and internet.
 
@@ -141,7 +145,10 @@ OpenAI-compatible on `http://localhost:8090/v1`:
   to OpenAI `tool_calls`) and images (`image_url` with a data URI, http URL or file path).
 - Thinking is controlled with `chat_template_kwargs.enable_thinking`, `reasoning_effort` (`low`, `medium`, `high`→`xhigh`)
   or `thinking: {type: "disabled"}`.
-- `GET /v1/models` and `GET /health` (memory, cache, last request speed).
+- `GET /v1/models`, `GET /health` (state, memory breakdown, cache, last request speed) and `GET /v1/stats` (token
+  statistics for the session, all time and recent requests).
+- The memory breakdown is also printed by `./llm status`. The engine's own footprint is measured like Activity
+  Monitor does (`phys_footprint`, which includes Metal memory that RSS misses).
 
 Any `model` name is accepted, since the server hosts exactly one model.
 
@@ -182,9 +189,10 @@ A `.bak` copy is kept, and running it again only updates its own entry. Any othe
 
 There are 35 unit tests (engine and CLI): Hadamard against an explicit matrix, fused vs separate projections, caches, M-RoPE, the
 sampler, the drafter, speculative acceptance (it keeps the sampling distribution), SSM rollback (equal to sequential),
-the reasoning/tool-call stream parser and message normalization. There are also 6 integration tests on the real
+the reasoning/tool-call stream parser and message normalization. There are also 8 integration tests on the real
 model: a correct answer, UTF-8 streaming detokenization, bit-exact prefix-cache reuse, speculative greedy identical to
-plain greedy, the RAM guard refusing instead of swapping, and `max_tokens` clamping.
+plain greedy, the RAM guard refusing instead of swapping, the SSD prefix cache surviving a restart with identical
+output, sleep and wake, and `max_tokens` clamping.
 
 ### Performance suite
 
