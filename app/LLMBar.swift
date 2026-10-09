@@ -1181,8 +1181,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// True only when the status item really sits on a screen. Items hidden behind the notch
+    /// (full menu bar) report as "visible" but their window is moved above the screen edge,
+    /// and a popover anchored there opens off-screen.
+    var iconOnScreen: Bool {
+        guard let w = item.button?.window, w.occlusionState.contains(.visible) else { return false }
+        let f = w.frame
+        return NSScreen.screens.contains { s in
+            f.minX >= s.frame.minX - 1 && f.maxX <= s.frame.maxX + 1 && f.maxY <= s.frame.maxY + 1 && f.minY >= s.visibleFrame.maxY - 2
+        }
+    }
+
     @objc func toggle() {
         if popover.isShown { popover.performClose(nil); return }
+        guard iconOnScreen else { showWindow(); return }
         guard let b = item.button else { return }
         engine.loadConfig()
         popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
@@ -1201,8 +1213,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
             w.isReleasedWhenClosed = false
             w.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor).padding(.top, 14))
-            w.center()
             window = w
+        }
+        // top-right corner, right under the menu bar — always fully on screen
+        if let w = window, !w.isVisible, let screen = NSScreen.main {
+            let v = screen.visibleFrame
+            let size = w.frame.size
+            let h = min(size.height, v.height - 8)
+            w.setFrame(NSRect(x: v.maxX - size.width - 12, y: v.maxY - h - 6, width: size.width, height: h), display: true)
         }
         engine.loadConfig()
         NSApp.activate(ignoringOtherApps: true)
@@ -1212,8 +1230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// First launch / icon hidden by the notch: show a window; otherwise open the panel.
     func reveal() {
-        let visible = item.button?.window?.occlusionState.contains(.visible) ?? false
-        visible ? toggle() : showWindow()
+        iconOnScreen ? toggle() : showWindow()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
