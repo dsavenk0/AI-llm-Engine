@@ -1,0 +1,29 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": true,
+  "outputDirectory": "docs",
+  "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/(.*).dmg",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "application/x-apple-diskimage"
+        },
+        {
+          "key": "Content-Disposition",
+          "value": "attachment; filename=\"LLMBar-1.0.dmg\""
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1097 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="cyberpunk-dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-llm-Engine & LLMBar — Apple Silicon Cyberpunk HUD</title>
+  <meta name="description" content="Precision MLX inference engine with Hadamard ternary quantization, 35 tok/s speculative decoding, and native LLMBar HUD. Designed for Apple Silicon with cyberpunk aesthetics.">
+  <meta name="keywords" content="Apple Silicon, M1, M2, M3, M4, M5, MLX, LLM, macOS, Qwen3.5, JANG, Ternary, Speculative Decoding, Menu Bar, LLMBar, Local AI, Cyberpunk">
+  
+  <!-- Open Graph / Social Cards -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="AI-llm-Engine & LLMBar — Apple Silicon Cyberpunk HUD">
+  <meta property="og:description" content="Run 27B models at 35 tok/s on a fanless MacBook Air. Zero swapping, instant 4s cold starts, and native HUD.">
+  <meta property="og:image" content="assets/screenshot-engine.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="AI-llm-Engine & LLMBar for macOS">
+  <meta name="twitter:description" content="Extreme intelligence. Minus the overhead. Precision MLX inference for Apple Silicon.">
+  <meta name="twitter:image" content="assets/screenshot-engine.png">
+
+  <!-- Favicons -->
+  <link rel="icon" type="image/png" sizes="64x64" href="assets/favicon.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/app-icon-256.png">
+
+  <!-- Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="apple-experience">
+  <!-- Cyberpunk HUD Ambient Isometric Grid & Glows -->
+  <div class="cyber-ambient" aria-hidden="true">
+    <div class="ambient-glow glow-cyan"></div>
+    <div class="ambient-glow glow-magenta"></div>
+    <div class="ambient-glow glow-phosphor"></div>
+    <div class="cyber-grid-overlay"></div>
+    <div class="cyber-scanlines"></div>
+  </div>
+
+  <!-- Wide Top Navigation Bar (Fixed height, no vertical wrapping) -->
+  <header class="apple-nav-header">
+    <nav class="apple-nav" aria-label="Global Navigation">
+      <div class="nav-left">
+        <a href="#hero" class="nav-apple-brand" aria-label="AI-llm-Engine">
+          <img src="assets/app-icon-128.png" alt="LLMBar Logo" class="nav-logo" width="28" height="28">
+          <span class="nav-title">AI-llm-Engine</span>
+          <span class="nav-version">v1.0</span>
+        </a>
+      </div>
+
+      <div class="nav-center">
+        <a href="#overview" class="apple-nav-link" data-i18n="nav_overview">Overview</a>
+        <a href="#demo" class="apple-nav-link" data-i18n="nav_llmbar">LLMBar HUD</a>
+        <a href="#screenshots" class="apple-nav-link" data-i18n="nav_gallery">Screenshots</a>
+        <a href="#architecture" class="apple-nav-link" data-i18n="nav_architecture">Architecture</a>
+        <a href="#benchmarks" class="apple-nav-link" data-i18n="nav_benchmarks">Benchmarks</a>
+        <a href="#models" class="apple-nav-link" data-i18n="nav_models">Models</a>
+        <a href="#install" class="apple-nav-link" data-i18n="nav_install">Install</a>
+      </div>
+
+      <div class="nav-right">
+        <!-- Theme Switcher (Single Icon) -->
+        <button type="button" class="theme-icon-btn" id="theme-toggle" aria-label="Toggle Theme" title="Toggle Theme (⚡ Dark HUD / ☼ Light Glass)">
+          <span class="theme-icon" id="theme-icon">⚡</span>
+        </button>
+
+        <!-- Horizontal Language Switcher -->
+        <div class="apple-lang-toggle" role="group" aria-label="Language">
+          <button type="button" class="lang-pill active" id="lang-en" data-lang="en">EN</button>
+          <button type="button" class="lang-pill" id="lang-ru" data-lang="ru">RU</button>
+        </div>
+
+        <a href="https://github.com/dsavenk0/AI-llm-Engine" target="_blank" rel="noopener noreferrer" class="apple-icon-btn" aria-label="GitHub Repository" title="GitHub">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+          </svg>
+        </a>
+
+        <a href="https://github.com/dsavenk0/AI-llm-Engine/releases" target="_blank" rel="noopener noreferrer" class="apple-btn-primary apple-btn-nav">
+          <span data-i18n="nav_download">Download</span>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <!-- HERO SECTION (Apple Hardware + Cyberpunk HUD) -->
+    <section id="hero" class="apple-hero">
+      <div class="apple-container hero-inner">
+        <!-- High-tech Chip Eyebrow -->
+        <div class="cyber-eyebrow">
+          <span class="cyber-chip-tag">// SECTION 9</span>
+          <span class="cyber-chip-text" data-i18n="hero_eyebrow">Apple Silicon M1–M5 Native · Hadamard Ternary · HUD Telemetry</span>
+          <span class="cyber-chip-pulse"></span>
+        </div>
+
+        <!-- Main Headline -->
+        <h1 class="apple-headline">
+          <span data-i18n="hero_title_1">Extreme intelligence.</span><br>
+          <span class="cyber-gradient-cyan" data-i18n="hero_title_2">Minus the overhead.</span>
+        </h1>
+
+        <!-- Subheading -->
+        <p class="apple-subhead">
+          <span data-i18n="hero_sub">A dependency-light MLX inference engine with Hadamard ternary quantization, prompt-lookup speculative decoding, and a native menu bar companion. Run 27B parameters on a fanless 16 GB MacBook Air at up to 35 tokens per second.</span>
+        </p>
+
+        <!-- Action Buttons -->
+        <div class="apple-hero-actions">
+          <a href="https://github.com/dsavenk0/AI-llm-Engine/releases" target="_blank" rel="noopener noreferrer" class="apple-btn-primary apple-btn-hero neon-glow-cyan">
+            <svg class="apple-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+              <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.66-.82 1.11-1.96.99-3.1-.96.04-2.13.65-2.81 1.45-.59.69-1.12 1.83-.98 2.94 1.08.08 2.15-.49 2.8-1.29z"/>
+            </svg>
+            <span class="btn-text" data-i18n="hero_download_dmg">Download LLMBar (.dmg)</span>
+          </a>
+
+          <a href="#install" class="apple-btn-secondary">
+            <span data-i18n="hero_cli">Terminal Quickstart</span>
+            <span class="arrow-glyph">›</span>
+          </a>
+        </div>
+
+        <div class="apple-hero-specs">
+          <span>macOS Sonoma (14.0+) &amp; Sequoia (15.0+)</span>
+          <span class="spec-dot">•</span>
+          <span>Apple Silicon Native</span>
+          <span class="spec-dot">•</span>
+          <span>1.7 MB Installer</span>
+          <span class="spec-dot">•</span>
+          <span>Apache 2.0 Open Source</span>
+        </div>
+
+        <!-- Terminal Command Pill -->
+        <div class="apple-terminal-pill">
+          <div class="term-prompt-symbol">$</div>
+          <code class="term-snippet" id="quick-cmd">git clone https://github.com/dsavenk0/AI-llm-Engine.git &amp;&amp; cd AI-llm-Engine &amp;&amp; ./llm setup</code>
+          <button type="button" class="apple-copy-btn" id="copy-quick-cmd" aria-label="Copy to clipboard" title="Copy command">
+            <svg class="copy-svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span class="copy-hint" data-i18n="copied">Copied</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- KEYNOTE STATS BAR -->
+      <div class="apple-container" id="overview">
+        <div class="apple-stats-strip">
+          <div class="stat-card">
+            <div class="stat-number cyber-gradient-cyan">35 tok/s</div>
+            <div class="stat-title" data-i18n="stat_spec_title">Speculative Decoding</div>
+            <div class="stat-desc" data-i18n="stat_spec_desc">2.5× faster code edits and tool calls via exact prompt-lookup verification.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-number cyber-gradient-phosphor">4.0s</div>
+            <div class="stat-title" data-i18n="stat_cold_title">Instant Cold Start</div>
+            <div class="stat-desc" data-i18n="stat_cold_desc">From zero to first token in 4 seconds. 4.7× faster than standard vMLX.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-number cyber-gradient-magenta">7.6 GB</div>
+            <div class="stat-title" data-i18n="stat_ram_title">27B in Unified Memory</div>
+            <div class="stat-desc" data-i18n="stat_ram_desc">Hadamard ternary weights stay pinned. Zero disk swapping.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-number cyber-gradient-amber">0.66 GB</div>
+            <div class="stat-title" data-i18n="stat_proc_title">Featherweight Runtime</div>
+            <div class="stat-desc" data-i18n="stat_proc_desc">48% less process overhead than competing engines.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- INTERACTIVE MACOS PRO APP WINDOW (LLMBAR SHOWCASE) -->
+    <section id="demo" class="apple-section app-showcase-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="showcase_kicker">// NATIVE HUD COMPANION</span>
+          <h2 class="apple-section-headline" data-i18n="showcase_headline">A precision instrument in your menu bar.</h2>
+          <p class="apple-section-subhead" data-i18n="showcase_sub">
+            Built entirely in Swift with zero third-party dependencies. Telemetry, RAM protection, model switching, and local OpenAI API orchestration — right under your notch.
+          </p>
+        </div>
+
+        <div class="macos-desktop-frame">
+          <!-- Top Menu Bar -->
+          <div class="macos-top-bar">
+            <div class="bar-left">
+              <span class="apple-glyph"></span>
+              <span class="app-name">LLMBar</span>
+              <span class="menu-item hide-small">Model</span>
+              <span class="menu-item hide-small">Engine</span>
+              <span class="menu-item hide-small">Window</span>
+              <span class="menu-item hide-small">Help</span>
+            </div>
+            <div class="bar-right">
+              <div class="llmbar-status-pill" id="tray-pill">
+                <span class="tray-dot"></span>
+                <span class="tray-mono">34.8 tok/s</span>
+                <span class="tray-divider">|</span>
+                <span class="tray-mono">RAM 88%</span>
+              </div>
+              <span class="bar-icon hide-small">🔋 100%</span>
+              <span class="bar-icon hide-small">Wi-Fi</span>
+              <span class="bar-date hide-small">Fri 11:04</span>
+            </div>
+          </div>
+
+          <!-- macOS Pro Window -->
+          <div class="macos-pro-window">
+            <div class="macos-window-header">
+              <div class="window-traffic-lights">
+                <span class="traffic-dot dot-red"></span>
+                <span class="traffic-dot dot-yellow"></span>
+                <span class="traffic-dot dot-green"></span>
+              </div>
+              <div class="window-center-title">
+                <span class="title-primary">LLMBar</span>
+                <span class="title-secondary">Bonsai-2-27B-CRACK-Ternary-JANG (27B)</span>
+              </div>
+              <div class="window-engine-badge">
+                <span class="engine-pulse"></span>
+                <span data-i18n="engine_active">ACTIVE</span>
+              </div>
+            </div>
+
+            <!-- Segmented Control -->
+            <div class="macos-segmented-bar" role="tablist">
+              <button class="seg-btn active" role="tab" id="tab-engine" aria-selected="true" data-tab="engine" data-i18n="tab_telemetry">
+                Telemetry
+              </button>
+              <button class="seg-btn" role="tab" id="tab-speculation" aria-selected="false" data-tab="speculation" data-i18n="tab_speculation">
+                Speculation (35 tok/s)
+              </button>
+              <button class="seg-btn" role="tab" id="tab-monitor" aria-selected="false" data-tab="monitor" data-i18n="tab_activity">
+                Activity &amp; Memory
+              </button>
+              <button class="seg-btn" role="tab" id="tab-terminal" aria-selected="false" data-tab="terminal" data-i18n="tab_terminal">
+                Terminal Chat
+              </button>
+              <button class="seg-btn" role="tab" id="tab-integrations" aria-selected="false" data-tab="integrations" data-i18n="tab_integrations">
+                Integrations
+              </button>
+            </div>
+
+            <!-- Window Content -->
+            <div class="macos-window-body">
+              <!-- PANE 1: TELEMETRY -->
+              <div class="window-pane active" id="pane-engine">
+                <div class="telemetry-grid">
+                  <div class="telemetry-card sparkline-card">
+                    <div class="card-meta">
+                      <span class="card-label" data-i18n="hud_throughput">DECODE THROUGHPUT</span>
+                      <span class="card-fps">METAL PIPELINE · 60 FPS</span>
+                    </div>
+                    <div class="metric-highlight">
+                      <span class="metric-num cyber-gradient-cyan" id="live-decode-val">34.8</span>
+                      <span class="metric-suffix">tok/s</span>
+                      <span class="metric-caption" data-i18n="hud_spec_active">PROMPT-LOOKUP DRAFTING (×2.5)</span>
+                    </div>
+                    
+                    <div class="sparkline-canvas-container">
+                      <canvas id="sparklineCanvas" width="560" height="90"></canvas>
+                    </div>
+
+                    <div class="card-bottom-stats">
+                      <div class="sub-stat">
+                        <span class="sub-stat-label" data-i18n="hud_prefill">Prefill Speed</span>
+                        <span class="sub-stat-val text-phosphor" id="live-prefill-val">119.5 tok/s</span>
+                      </div>
+                      <div class="sub-stat">
+                        <span class="sub-stat-label" data-i18n="hud_cold_start">Cold to First Token</span>
+                        <span class="sub-stat-val">4.0 s</span>
+                      </div>
+                      <div class="sub-stat">
+                        <span class="sub-stat-label" data-i18n="hud_prefix_cache">SSD Prefix Reused</span>
+                        <span class="sub-stat-val text-cyan">310 / 340 tok</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Unified Memory Card -->
+                  <div class="telemetry-card memory-card">
+                    <div class="card-meta">
+                      <span class="card-label" data-i18n="hud_memory_guard">RAM GUARD &amp; WIRED MEMORY</span>
+                      <span class="card-chip-tag">16 GB MAC</span>
+                    </div>
+
+                    <div class="apple-mem-meter">
+                      <div class="mem-label-row">
+                        <span class="mem-heading" data-i18n="hud_unified_status">Unified Memory Pressure: <strong>Nominal</strong></span>
+                        <span class="mem-count">8.8 GB / 16.0 GB (55%)</span>
+                      </div>
+                      <div class="apple-bar-track">
+                        <div class="apple-seg seg-weights" style="width: 48%" title="Model Weights (7.6 GB - Pinned wired)"></div>
+                        <div class="apple-seg seg-ssm" style="width: 4%" title="Recurrent SSM State (0.4 GB)"></div>
+                        <div class="apple-seg seg-process" style="width: 4%" title="Engine Process (0.6 GB)"></div>
+                        <div class="apple-seg seg-headroom" style="width: 22%" title="Headroom (3.5 GB)"></div>
+                        <div class="apple-seg seg-free" style="width: 22%" title="Free Memory (3.9 GB)"></div>
+                      </div>
+                      <div class="apple-mem-legend">
+                        <div class="leg-item"><span class="leg-swatch seg-weights"></span><span data-i18n="hud_weights">Weights (7.6G)</span></div>
+                        <div class="leg-item"><span class="leg-swatch seg-ssm"></span><span data-i18n="hud_ssm">SSM (0.4G)</span></div>
+                        <div class="leg-item"><span class="leg-swatch seg-process"></span><span data-i18n="hud_proc">Process (0.6G)</span></div>
+                        <div class="leg-item"><span class="leg-swatch seg-headroom"></span><span data-i18n="hud_headroom">Headroom (3.5G)</span></div>
+                      </div>
+                    </div>
+
+                    <div class="sys-detail-list">
+                      <div class="sys-row">
+                        <span class="sys-label" data-i18n="hud_model_name">Active Model</span>
+                        <span class="sys-value font-mono">Bonsai-2-27B-CRACK-Ternary-JANG</span>
+                      </div>
+                      <div class="sys-row">
+                        <span class="sys-label" data-i18n="hud_quant">Quantization</span>
+                        <span class="sys-value font-mono text-phosphor">Hadamard Ternary (Fused Matmuls)</span>
+                      </div>
+                      <div class="sys-row">
+                        <span class="sys-label" data-i18n="hud_guard_ceiling">Memory Ceiling</span>
+                        <span class="sys-value font-mono text-cyan">88% (Enforced · Zero Swapping)</span>
+                      </div>
+                      <div class="sys-row">
+                        <span class="sys-label" data-i18n="hud_sleep_status">Auto-Sleep</span>
+                        <span class="sys-value font-mono">15m idle → Frees 7.6 GB</span>
+                      </div>
+                    </div>
+
+                    <div class="app-quick-actions">
+                      <button type="button" class="apple-pill-btn" id="btn-demo-chat">
+                        <span>Terminal Chat</span>
+                      </button>
+                      <button type="button" class="apple-pill-btn" id="btn-copy-api">
+                        <span>Copy API URL</span>
+                      </button>
+                      <button type="button" class="apple-pill-btn" id="btn-sleep-test">
+                        <span>Sleep Engine</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PANE 2: SPECULATION -->
+              <div class="window-pane" id="pane-speculation">
+                <div class="speculation-workbench">
+                  <div class="bench-header">
+                    <div>
+                      <h3 class="bench-title" data-i18n="spec_title">Prompt-Lookup Speculative Decoding</h3>
+                      <p class="bench-sub" data-i18n="spec_sub">
+                        When code edits repeat context, the engine drafts 15-gram continuations and verifies them in a single weight pass. Identical greedy output, 2.5× the speed.
+                      </p>
+                    </div>
+                    <div class="bench-action">
+                      <span class="speed-badge cyber-gradient-phosphor" id="spec-speed-meter">35.2 tok/s (×2.5)</span>
+                      <button type="button" class="apple-btn-primary apple-btn-sm" id="btn-run-spec">
+                        <span data-i18n="spec_run">Run Speculation Test</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="code-editor-mock">
+                    <div class="editor-header">
+                      <span class="file-tag">engine/hadamard.py</span>
+                      <span class="status-tag" id="streamer-status-tag">READY</span>
+                    </div>
+                    <pre class="editor-body" id="streamer-output"><code><span class="tk-comment"># Click "Run Speculation Test" to stream tokens with speculative n-gram verification.</span>
+<span class="tk-keyword">def</span> <span class="tk-function">fused_hadamard_gemm</span>(x, weights, signs):
+    <span class="tk-string">"""Single transform per shared input width with exact verification."""</span>
+    h = apply_hadamard_transform(x, signs)
+    <span class="tk-keyword">return</span> mx.quantized_matmul(h, weights)</code></pre>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PANE 3: MONITOR & RAM -->
+              <div class="window-pane" id="pane-monitor">
+                <div class="activity-pane">
+                  <div class="activity-cards">
+                    <div class="activity-card">
+                      <span class="act-title" data-i18n="act_thermal">THERMAL STATE</span>
+                      <span class="act-val text-phosphor">Nominal</span>
+                      <span class="act-desc">MacBook Air fanless chassis</span>
+                    </div>
+                    <div class="activity-card">
+                      <span class="act-title" data-i18n="act_swap">DISK SWAPPING</span>
+                      <span class="act-val text-phosphor">0 Bytes</span>
+                      <span class="act-desc">Pinned unified memory limit</span>
+                    </div>
+                    <div class="activity-card">
+                      <span class="act-title" data-i18n="act_ssd">SSD KV SNAPSHOTS</span>
+                      <span class="act-val text-cyan">8 GB Budget</span>
+                      <span class="act-desc">Instant system prompt restore</span>
+                    </div>
+                    <div class="activity-card">
+                      <span class="act-title" data-i18n="act_context">COMPUTED CONTEXT</span>
+                      <span class="act-val font-mono">45,056</span>
+                      <span class="act-desc">Dynamic context based on RAM</span>
+                    </div>
+                  </div>
+
+                  <div class="activity-table-wrapper">
+                    <table class="activity-table">
+                      <thead>
+                        <tr>
+                          <th>Component</th>
+                          <th>Allocation</th>
+                          <th>Policy</th>
+                          <th>Behavior Under Pressure</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td><strong>Model Weights</strong></td>
+                          <td><code>7.61 GB</code></td>
+                          <td><span class="apple-tag tag-green">Wired Pinned</span></td>
+                          <td>macOS is barred from swapping or compressing weights.</td>
+                        </tr>
+                        <tr>
+                          <td><strong>GatedDeltaNet State</strong></td>
+                          <td><code>0.41 GB</code></td>
+                          <td><span class="apple-tag tag-blue">Snapshotted</span></td>
+                          <td>Snapshots state at generation start; rolls back recurrence.</td>
+                        </tr>
+                        <tr>
+                          <td><strong>Prefill Chunking</strong></td>
+                          <td><code>Dynamic</code></td>
+                          <td><span class="apple-tag tag-blue">Adaptive</span></td>
+                          <td>Shrinks chunk size (1024 → 256 → 128) if memory ceiling is reached.</td>
+                        </tr>
+                        <tr>
+                          <td><strong>RAM Ceiling Guard</strong></td>
+                          <td><code>88% Threshold</code></td>
+                          <td><span class="apple-tag tag-purple">Protected</span></td>
+                          <td>Rejects oversized requests with a clean error; zero system freezes.</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PANE 4: TERMINAL CHAT -->
+              <div class="window-pane" id="pane-terminal">
+                <div class="terminal-view">
+                  <div class="term-chrome">
+                    <span class="term-title-text">zsh — ./llm open</span>
+                  </div>
+                  <div class="term-console">
+                    <div class="term-log"><span class="dim">$</span> ./llm open</div>
+                    <div class="term-log text-cyan">▸ Model: dealignai/Bonsai-2-27B-CRACK-Ternary-JANG (27B, ~7.6 GB)</div>
+                    <div class="term-log dim">▸ Metal wired budget: 11.2 GB | Context limit: 45,056 tokens</div>
+                    <div class="term-log dim">▸ Loaded weights in 3.8s | OpenAI server running on http://127.0.0.1:8000/v1</div>
+                    <div class="term-log"><br></div>
+                    <div class="term-log"><span class="prompt-symbol">&gt;&gt;&gt;</span> <span class="user-input">Optimize speculative decode loop for Apple Silicon.</span></div>
+                    <div class="term-log"><br></div>
+                    <div class="term-log text-phosphor">Generating with prompt-lookup speculation (exact verification):</div>
+                    <div class="term-snippet-box">
+                      <span class="dim"># Padded to MLX tiled-matmul size</span><br>
+                      <span class="kw">def</span> <span class="fn">verify_draft_batch</span>(engine, drafts):<br>
+                      &nbsp;&nbsp;&nbsp;&nbsp;accepted = engine.step_verify(drafts)<br>
+                      &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">return</span> accepted
+                    </div>
+                    <div class="term-telemetry-line">[Prefill: 119.5 tok/s | Decode: 34.8 tok/s | Cache reuse: 91% | Memory: 55%]</div>
+                    <div class="term-log"><span class="prompt-symbol">&gt;&gt;&gt;</span> <span class="cursor-block"></span></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PANE 5: INTEGRATIONS -->
+              <div class="window-pane" id="pane-integrations">
+                <div class="integrations-view">
+                  <div class="integ-intro">
+                    <h3 class="integ-head" data-i18n="integ_head">Seamless OpenAI API Compatibility</h3>
+                    <p class="integ-sub" data-i18n="integ_sub_desc">
+                      AI-llm-Engine serves on <code>http://127.0.0.1:8000/v1</code>. Drop-in ready for Continue, Kilo Code, OpenCode, Claude Code, and Cursor with automatic <code>max_tokens</code> clamping.
+                    </p>
+                  </div>
+
+                  <div class="integ-grid">
+                    <div class="integ-box">
+                      <div class="integ-box-header">
+                        <span class="integ-app-title">Continue (VS Code / JetBrains)</span>
+                        <span class="apple-tag tag-green">Tested</span>
+                      </div>
+                      <p class="integ-box-note">Add to <code>~/.continue/config.json</code>:</p>
+                      <pre class="integ-code"><code>{
+  "models": [{
+    "title": "Bonsai 27B",
+    "provider": "openai",
+    "model": "bonsai-27b",
+    "apiBase": "http://127.0.0.1:8000/v1",
+    "apiKey": "none"
+  }]
+}</code></pre>
+                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet='{"models":[{"title":"Bonsai 27B","provider":"openai","model":"bonsai-27b","apiBase":"http://127.0.0.1:8000/v1","apiKey":"none"}]}'>
+                        <span data-i18n="copy_config">Copy Configuration</span>
+                      </button>
+                    </div>
+
+                    <div class="integ-box">
+                      <div class="integ-box-header">
+                        <span class="integ-app-title">Kilo Code &amp; OpenCode</span>
+                        <span class="apple-tag tag-blue">Safe Headroom</span>
+                      </div>
+                      <p class="integ-box-note">No HTTP 413 errors on oversized token requests:</p>
+                      <pre class="integ-code"><code>Base URL: http://127.0.0.1:8000/v1
+Model: default
+Max Tokens: 32,000 (auto-clamped)
+Streaming: Enabled</code></pre>
+                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet="http://127.0.0.1:8000/v1">
+                        <span data-i18n="copy_url">Copy Base URL</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- NEW SCREENSHOTS GALLERY (RETINA APP CAPTURES) -->
+    <section id="screenshots" class="apple-section gallery-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="gallery_kicker">// SECTION 9 // NATIVE APP SCREENSHOTS</span>
+          <h2 class="apple-section-headline" data-i18n="gallery_headline">Built for macOS. Inside and out.</h2>
+          <p class="apple-section-subhead" data-i18n="gallery_sub">
+            High-resolution captures of LLMBar running on macOS Sonoma &amp; Sequoia. Cyberpunk HUD styling, real-time memory telemetry, and instant model orchestration.
+          </p>
+        </div>
+
+        <!-- Screenshots Showcase Grid -->
+        <div class="gallery-grid">
+          <!-- Screenshot 1: Engine HUD -->
+          <div class="gallery-card">
+            <div class="gallery-image-wrapper">
+              <img src="assets/screenshot-engine.png" alt="LLMBar Engine Telemetry Screenshot" class="gallery-img" loading="lazy">
+              <div class="gallery-badge" data-i18n="shot_1_badge">ENGINE TAB · 35 TOK/S</div>
+            </div>
+            <div class="gallery-card-info">
+              <h3 class="gallery-card-title" data-i18n="shot_1_title">Core Telemetry &amp; Throughput</h3>
+              <p class="gallery-card-desc" data-i18n="shot_1_desc">
+                Live decode speed (34.8 tok/s), prefill rate (119.5 tok/s), unified memory guard, and single-pass Hadamard verification.
+              </p>
+            </div>
+          </div>
+
+          <!-- Screenshot 2: System Monitor -->
+          <div class="gallery-card">
+            <div class="gallery-image-wrapper">
+              <img src="assets/screenshot-monitor.png" alt="LLMBar System Monitor Screenshot" class="gallery-img" loading="lazy">
+              <div class="gallery-badge badge-amber" data-i18n="shot_2_badge">MONITOR TAB · RAM GUARD</div>
+            </div>
+            <div class="gallery-card-info">
+              <h3 class="gallery-card-title" data-i18n="shot_2_title">Hardware &amp; Unified Memory Pressure</h3>
+              <p class="gallery-card-desc" data-i18n="shot_2_desc">
+                Detailed Activity Monitor breakdown (Weights, SSM, Process, Headroom), 0-byte swap guarantee, and nominal thermal tracking.
+              </p>
+            </div>
+          </div>
+
+          <!-- Screenshot 3: Models Hub -->
+          <div class="gallery-card">
+            <div class="gallery-image-wrapper">
+              <img src="assets/screenshot-models.png" alt="LLMBar Models Directory Screenshot" class="gallery-img" loading="lazy">
+              <div class="gallery-badge badge-cyan" data-i18n="shot_3_badge">MODELS TAB · HUGGING FACE</div>
+            </div>
+            <div class="gallery-card-info">
+              <h3 class="gallery-card-title" data-i18n="shot_3_title">Hugging Face Model Manager</h3>
+              <p class="gallery-card-desc" data-i18n="shot_3_desc">
+                Search, pull, and switch models with 1 click. Immediate RAM suitability check and auto-engine restart.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ARCHITECTURE SECTION -->
+    <section id="architecture" class="apple-section architecture-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="arch_kicker">// SILICON ARCHITECTURE</span>
+          <h2 class="apple-section-headline" data-i18n="arch_headline">Why it’s so fast on Apple Silicon.</h2>
+          <p class="apple-section-subhead" data-i18n="arch_sub">
+            Built from the ground up to take advantage of Apple Unified Memory Architecture and Metal compilation.
+          </p>
+        </div>
+
+        <div class="arch-matrix-grid">
+          <!-- Card 1: Hadamard Transform -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 01 · COMPILATION</span>
+              <span class="arch-pill-tag tag-cyan">1-SIGN GEMM</span>
+            </div>
+            <div class="arch-icon-wrap">
+              <span class="arch-icon">⚡</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat1_title">One Hadamard Transform per Shared Input</h3>
+            <p class="arch-desc" data-i18n="feat1_desc">
+              The bundle stores one sign vector per input width. Projections q|k|v, gate|up and qkv|z execute in a single fused quantized matmul rather than repeating transforms per layer.
+            </p>
+            <div class="arch-code-snippet">
+              <code>norm → Hadamard(signs) → fused_quantized_matmul</code>
+            </div>
+          </div>
+
+          <!-- Card 2: Speculative Decoding -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 02 · SPECULATION</span>
+              <span class="arch-pill-tag tag-phosphor">2.5× SPEEDUP</span>
+            </div>
+            <div class="arch-icon-wrap icon-phosphor">
+              <span class="arch-icon">⏱</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat2_title">Prompt-Lookup Speculation</h3>
+            <p class="arch-desc" data-i18n="feat2_desc">
+              Drafts continuation n-grams during code edits and verifies up to 15 drafted tokens in one weight pass. Re-runs cheap recurrence on accepted tokens and shuts off on prose.
+            </p>
+            <div class="arch-code-snippet">
+              <code>draft_ngrams(15) → single_pass_verify → 35 tok/s</code>
+            </div>
+          </div>
+
+          <!-- Card 3: Pinned Memory -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 03 · RESIDENCY</span>
+              <span class="arch-pill-tag tag-amber">ZERO SWAP</span>
+            </div>
+            <div class="arch-icon-wrap icon-amber">
+              <span class="arch-icon">🔒</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat3_title">Pinned Wired Weights</h3>
+            <p class="arch-desc" data-i18n="feat3_desc">
+              The wired memory limit keeps model weights resident in physical RAM. macOS is barred from compressing or swapping them to disk, eliminating system stutter.
+            </p>
+            <div class="arch-code-snippet">
+              <code>wired_limit keeps 7.6 GB resident (0 B swapped)</code>
+            </div>
+          </div>
+
+          <!-- Card 4: SSD Prefix Cache -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 04 · PERSISTENCE</span>
+              <span class="arch-pill-tag tag-cyan">NVME CACHE</span>
+            </div>
+            <div class="arch-icon-wrap icon-cyan">
+              <span class="arch-icon">💾</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat4_title">Hybrid SSD Prefix Cache</h3>
+            <p class="arch-desc" data-i18n="feat4_desc">
+              GatedDeltaNet recurrence states and KV caches are snapshotted to NVMe SSD at prompt completion. Subsequent agent requests restore instantly without recomputing.
+            </p>
+            <div class="arch-code-snippet">
+              <code>~/.cache/ai-llm-engine/prefix/ (8 GB LRU budget)</code>
+            </div>
+          </div>
+
+          <!-- Card 5: RAM Guard -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 05 · PROTECTION</span>
+              <span class="arch-pill-tag tag-magenta">88% CEILING</span>
+            </div>
+            <div class="arch-icon-wrap icon-magenta">
+              <span class="arch-icon">🛡</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat5_title">Adaptive RAM Guard</h3>
+            <p class="arch-desc" data-i18n="feat5_desc">
+              Computes safe context length dynamically. Caps prefill chunk sizes (1024 → 256 → 128) and enforces an 88% system memory ceiling so other apps run smoothly.
+            </p>
+            <div class="arch-code-snippet">
+              <code>adaptive_chunking: 1024 → 256 → 128 under load</code>
+            </div>
+          </div>
+
+          <!-- Card 6: Auto-Sleep -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 06 · EFFICIENCY</span>
+              <span class="arch-pill-tag tag-phosphor">2S RE-WAKE</span>
+            </div>
+            <div class="arch-icon-wrap icon-phosphor">
+              <span class="arch-icon">🌙</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat6_title">15-Minute Zero-Footprint Sleep</h3>
+            <p class="arch-desc" data-i18n="feat6_desc">
+              After 15 minutes of idle time, the engine unloads model weights and returns ~7.6 GB of unified memory back to macOS. Wakes up in 2 seconds on the next request.
+            </p>
+            <div class="arch-code-snippet">
+              <code>idle_timeout(15m) → free(7.6 GB) → wake(2.0s)</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- BENCHMARKS SECTION -->
+    <section id="benchmarks" class="apple-section benchmarks-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="perf_kicker">// VERIFIED BENCHMARKS</span>
+          <h2 class="apple-section-headline" data-i18n="perf_headline">Real numbers. No cherry-picking.</h2>
+          <p class="apple-section-subhead" data-i18n="perf_sub">
+            Benchmarked on a fanless MacBook Air M5 with 16 GB unified RAM running dealignai/Bonsai-2-27B-CRACK-Ternary-JANG (27B, ~7.6 GB). Alternating runs with identical prompts.
+          </p>
+        </div>
+
+        <div class="apple-table-card">
+          <table class="apple-perf-table">
+            <thead>
+              <tr>
+                <th data-i18n="perf_metric">Benchmark Metric</th>
+                <th>vMLX 1.6.75</th>
+                <th class="col-highlight">AI-llm-Engine</th>
+                <th data-i18n="perf_diff">Performance Delta</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <div class="tbl-name" data-i18n="p_decode">Decode Speed (256 tokens)</div>
+                  <div class="tbl-sub" data-i18n="p_decode_sub">Pure autoregressive decoding</div>
+                </td>
+                <td class="tbl-standard">6.80 – 6.94 tok/s</td>
+                <td class="col-highlight"><strong>7.61 – 9.53 tok/s</strong></td>
+                <td><span class="delta-pill text-phosphor">+12% to +37% faster</span></td>
+              </tr>
+              <tr class="tbl-row-featured">
+                <td>
+                  <div class="tbl-name" data-i18n="p_spec">Code Edits (Speculative Decoding)</div>
+                  <div class="tbl-sub" data-i18n="p_spec_sub">Prompt-lookup n-gram matches</div>
+                </td>
+                <td class="tbl-standard dim">— (Not supported)</td>
+                <td class="col-highlight"><strong class="cyber-gradient-cyan">27 – 35 tok/s</strong></td>
+                <td><span class="delta-pill text-cyan">2.5× faster</span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="tbl-name" data-i18n="p_prefill">Prefill Speed (2.3K prompt)</div>
+                  <div class="tbl-sub" data-i18n="p_prefill_sub">Prompt ingestion rate</div>
+                </td>
+                <td class="tbl-standard">73.5 – 88.1 tok/s</td>
+                <td class="col-highlight"><strong>86.7 – 119.5 tok/s</strong></td>
+                <td><span class="delta-pill text-phosphor">+18% to +36% faster</span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="tbl-name" data-i18n="p_cold">Cold Start to First Request</div>
+                  <div class="tbl-sub" data-i18n="p_cold_sub">Load, compile &amp; generate</div>
+                </td>
+                <td class="tbl-standard">19.0 s</td>
+                <td class="col-highlight"><strong class="text-phosphor">4.0 s</strong></td>
+                <td><span class="delta-pill text-phosphor">4.7× faster</span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="tbl-name" data-i18n="p_overhead">Process Memory Overhead</div>
+                  <div class="tbl-sub" data-i18n="p_overhead_sub">RAM used above the weights</div>
+                </td>
+                <td class="tbl-standard">1.26 GB</td>
+                <td class="col-highlight"><strong>0.66 GB</strong></td>
+                <td><span class="delta-pill text-phosphor">48% less RAM</span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="tbl-name" data-i18n="p_size">Install Footprint</div>
+                  <div class="tbl-sub" data-i18n="p_size_sub">Application / environment size</div>
+                </td>
+                <td class="tbl-standard">1.9 GB app bundle</td>
+                <td class="col-highlight"><strong>310 MB venv · 1.7 MB DMG</strong></td>
+                <td><span class="delta-pill text-phosphor">6× smaller</span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="tbl-name" data-i18n="p_tokens">Large max_tokens (e.g. 32K)</div>
+                  <div class="tbl-sub" data-i18n="p_tokens_sub">Agent requests from Kilo / Continue</div>
+                </td>
+                <td class="tbl-standard text-magenta">HTTP 413 Error</td>
+                <td class="col-highlight"><strong class="text-cyan">Clamped, succeeds ✓</strong></td>
+                <td><span class="delta-pill text-cyan">No crashes</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- MODEL DIRECTORY & RAM CALCULATOR -->
+    <section id="models" class="apple-section models-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="mod_kicker">// HARDWARE SELECTOR</span>
+          <h2 class="apple-section-headline" data-i18n="mod_headline">Choose your model. Match your Mac.</h2>
+          <p class="apple-section-subhead" data-i18n="mod_sub">
+            Pick your Mac’s unified memory configuration to see recommended models and expected throughput.
+          </p>
+        </div>
+
+        <div class="ram-picker-row">
+          <span class="ram-picker-label" data-i18n="ram_label">Unified Memory:</span>
+          <div class="ram-pill-group">
+            <button type="button" class="ram-pill" data-ram="8">8 GB</button>
+            <button type="button" class="ram-pill active" data-ram="16">16 GB (Air M2–M5)</button>
+            <button type="button" class="ram-pill" data-ram="24">24 GB</button>
+            <button type="button" class="ram-pill" data-ram="36">36 GB (Pro M3–M4)</button>
+            <button type="button" class="ram-pill" data-ram="64">64 GB+</button>
+          </div>
+        </div>
+
+        <div class="apple-models-grid" id="model-list">
+          <div class="apple-model-card" data-min-ram="16">
+            <div class="model-badge-top">
+              <span class="apple-tag tag-cyan">CRACK Ternary (JANG)</span>
+              <span class="model-recommendation" data-i18n="mod_best_16">Recommended for 16GB</span>
+            </div>
+            <h3 class="model-title">dealignai/Bonsai-2-27B-CRACK-Ternary-JANG</h3>
+            <p class="model-description" data-i18n="mod_bonsai_desc">
+              27B parameter hybrid dense/SSM model. Quantized with Hadamard rotation. Runs comfortably inside 7.6 GB RAM.
+            </p>
+            <div class="model-metrics-row">
+              <div class="mod-metric">
+                <span class="mod-metric-val">27B</span>
+                <span class="mod-metric-lbl">Parameters</span>
+              </div>
+              <div class="mod-metric">
+                <span class="mod-metric-val">7.6 GB</span>
+                <span class="mod-metric-lbl">RAM Usage</span>
+              </div>
+              <div class="mod-metric">
+                <span class="mod-metric-val text-phosphor">35 tok/s</span>
+                <span class="mod-metric-lbl">Speculative</span>
+              </div>
+            </div>
+            <div class="model-cmd-box">
+              <code>./llm pull dealignai/Bonsai-2-27B-CRACK-Ternary-JANG</code>
+            </div>
+          </div>
+
+          <div class="apple-model-card" data-min-ram="24">
+            <div class="model-badge-top">
+              <span class="apple-tag tag-magenta">Ternary JANG</span>
+              <span class="model-recommendation text-muted" data-i18n="mod_pro_tier">Requires 24GB+</span>
+            </div>
+            <h3 class="model-title">Qwen3.5-35B-A3B-Ternary-JANG</h3>
+            <p class="model-description" data-i18n="mod_35b_desc">
+              MoE architecture with Hadamard ternary rotation. Highest reasoning capability for large-context programming agents.
+            </p>
+            <div class="model-metrics-row">
+              <div class="mod-metric">
+                <span class="mod-metric-val">35B</span>
+                <span class="mod-metric-lbl">Parameters</span>
+              </div>
+              <div class="mod-metric">
+                <span class="mod-metric-val">12.2 GB</span>
+                <span class="mod-metric-lbl">RAM Usage</span>
+              </div>
+              <div class="mod-metric">
+                <span class="mod-metric-val text-phosphor">26 tok/s</span>
+                <span class="mod-metric-lbl">Decode</span>
+              </div>
+            </div>
+            <div class="model-cmd-box">
+              <code>./llm pull mlx-community/Qwen3.5-35B-A3B-Ternary-JANG</code>
+            </div>
+          </div>
+
+          <div class="apple-model-card" data-min-ram="8">
+            <div class="model-badge-top">
+              <span class="apple-tag tag-amber">MLX 4-bit</span>
+              <span class="model-recommendation text-muted" data-i18n="mod_entry">Entry Tier</span>
+            </div>
+            <h3 class="model-title">mlx-community/Qwen3.5-4B-MLX-4bit</h3>
+            <p class="model-description" data-i18n="mod_4b_desc">
+              Ultra-lightweight model ideal for quick chats, summary tasks, and 8 GB Macs. Loads in under one second.
+            </p>
+            <div class="model-metrics-row">
+              <div class="mod-metric">
+                <span class="mod-metric-val">4B</span>
+                <span class="mod-metric-lbl">Parameters</span>
+              </div>
+              <div class="mod-metric">
+                <span class="mod-metric-val">2.4 GB</span>
+                <span class="mod-metric-lbl">RAM Usage</span>
+              </div>
+              <div class="mod-metric">
+                <span class="mod-metric-val text-phosphor">55+ tok/s</span>
+                <span class="mod-metric-lbl">Decode</span>
+              </div>
+            </div>
+            <div class="model-cmd-box">
+              <code>./llm pull mlx-community/Qwen3.5-4B-MLX-4bit</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- INSTALLATION SECTION -->
+    <section id="install" class="apple-section install-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="inst_kicker">// DEPLOYMENT</span>
+          <h2 class="apple-section-headline" data-i18n="inst_headline">Ready in minutes.</h2>
+          <p class="apple-section-subhead" data-i18n="inst_sub">
+            Download the native DMG installer or setup with the standalone CLI.
+          </p>
+        </div>
+
+        <div class="apple-install-grid">
+          <div class="install-tile featured-tile">
+            <div class="install-tile-tag" data-i18n="inst_rec">RECOMMENDED</div>
+            <h3 class="install-tile-title" data-i18n="inst_dmg_title">macOS Installer DMG</h3>
+            <p class="install-tile-desc" data-i18n="inst_dmg_desc">
+              Drag-and-drop installer containing LLMBar.app, bundled CLI binaries, and menu bar daemon.
+            </p>
+
+            <div class="install-steps-list">
+              <div class="step-row">
+                <span class="step-index">1</span>
+                <span class="step-detail" data-i18n="step1">Download <strong>LLMBar-1.0.dmg</strong> from GitHub Releases.</span>
+              </div>
+              <div class="step-row">
+                <span class="step-index">2</span>
+                <span class="step-detail" data-i18n="step2">Drag <strong>LLMBar.app</strong> to your Applications folder.</span>
+              </div>
+              <div class="step-row">
+                <span class="step-index">3</span>
+                <span class="step-detail" data-i18n="step3">Launch from Applications or Menu Bar. Done!</span>
+              </div>
+            </div>
+
+            <a href="https://github.com/dsavenk0/AI-llm-Engine/releases" target="_blank" rel="noopener noreferrer" class="apple-btn-primary apple-btn-full neon-glow-cyan">
+              <svg class="apple-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+              <span data-i18n="btn_download_now">Download from GitHub Releases</span>
+            </a>
+
+            <div class="checksum-line">
+              <span class="checksum-label">SHA-256:</span>
+              <code class="checksum-value">bf13451a4a90fa39eb6e18a9fe4b60f91bc44453a0ae50f53037663afb5806d2</code>
+            </div>
+          </div>
+
+          <div class="install-tile">
+            <div class="install-tile-tag text-muted" data-i18n="inst_cli_tag">DEVELOPER CLI</div>
+            <h3 class="install-tile-title" data-i18n="inst_cli_title">Terminal &amp; Python CLI</h3>
+            <p class="install-tile-desc" data-i18n="inst_cli_desc">
+              For developers who prefer direct terminal access, script automation, and isolated venvs.
+            </p>
+
+            <div class="terminal-steps-box">
+              <div class="t-step">
+                <div class="t-comment"># 1. Clone &amp; setup venv (mlx, numpy, etc.)</div>
+                <div class="t-cmd">git clone https://github.com/dsavenk0/AI-llm-Engine.git</div>
+                <div class="t-cmd">cd AI-llm-Engine &amp;&amp; ./llm setup</div>
+              </div>
+              <div class="t-step">
+                <div class="t-comment"># 2. Select model</div>
+                <div class="t-cmd">./llm search qwen3.5</div>
+                <div class="t-cmd">./llm use 1</div>
+              </div>
+              <div class="t-step">
+                <div class="t-comment"># 3. Open interactive chat</div>
+                <div class="t-cmd">./llm open</div>
+              </div>
+            </div>
+
+            <button type="button" class="apple-btn-secondary apple-btn-full copy-snippet-btn" data-snippet="git clone https://github.com/dsavenk0/AI-llm-Engine.git && cd AI-llm-Engine && ./llm setup">
+              <span data-i18n="copy_cli">Copy Terminal Setup Command</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ SECTION -->
+    <section class="apple-section faq-section">
+      <div class="apple-container">
+        <div class="section-header text-center">
+          <span class="cyber-kicker" data-i18n="faq_kicker">// INTEL DATABASE</span>
+          <h2 class="apple-section-headline" data-i18n="faq_headline">Frequently Asked Questions</h2>
+        </div>
+
+        <div class="apple-faq-accordion">
+          <details class="apple-faq-item" open>
+            <summary class="faq-summary" data-i18n="faq_q1">What makes AI-llm-Engine faster than Ollama or vMLX?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a1">
+                AI-llm-Engine applies Hadamard sign vectors once per shared input dimension rather than per projection, fusing them into Metal matmuls. In addition, prompt-lookup speculative decoding drafts n-grams to achieve 27–35 tok/s on code repetitions, and cold-start compile caches drop startup time from 19 seconds down to 4 seconds.
+              </p>
+            </div>
+          </details>
+
+          <details class="apple-faq-item">
+            <summary class="faq-summary" data-i18n="faq_q2">Can a 16 GB MacBook Air really run a 27-billion parameter model?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a2">
+                Yes. With Hadamard ternary quantization (JANG / Prism), the 27B weights require only ~7.6 GB of unified memory. Process overhead is capped at 0.66 GB, and the RAM Guard ceiling keeps total system memory under 88%, preventing macOS from swapping to disk or stuttering.
+              </p>
+            </div>
+          </details>
+
+          <details class="apple-faq-item">
+            <summary class="faq-summary" data-i18n="faq_q3">How do I connect this to Continue.dev or Cursor?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a3">
+                The engine runs a standard OpenAI-compatible HTTP server at <code>http://127.0.0.1:8000/v1</code>. In Continue.dev, configure provider as "openai" with model "default" and apiBase pointing to this address. Any OpenAI client works out of the box.
+              </p>
+            </div>
+          </details>
+
+          <details class="apple-faq-item">
+            <summary class="faq-summary" data-i18n="faq_q4">What are the macOS system requirements?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a4">
+                Any Mac with Apple Silicon (M1, M2, M3, M4, or M5) running macOS 14.0 (Sonoma) or macOS 15.0+ (Sequoia). Works with as little as 8 GB RAM (for 4B models) up to 16 GB, 24 GB, 36 GB, 64 GB, 128 GB+.
+              </p>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- CALL TO ACTION BANNER -->
+    <section class="apple-section cta-section">
+      <div class="apple-container">
+        <div class="apple-cta-card">
+          <img src="assets/app-icon-256.png" alt="LLMBar App Icon" class="cta-icon" width="88" height="88">
+          <h2 class="cta-headline" data-i18n="cta_title">Run intelligence at the speed of silicon.</h2>
+          <p class="cta-subhead" data-i18n="cta_sub">
+            Download LLMBar.app today. 100% on-device, private, and open source under Apache 2.0.
+          </p>
+          <div class="cta-btn-group">
+            <a href="https://github.com/dsavenk0/AI-llm-Engine/releases" target="_blank" rel="noopener noreferrer" class="apple-btn-primary apple-btn-large neon-glow-cyan">
+              <svg class="apple-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.66-.82 1.11-1.96.99-3.1-.96.04-2.13.65-2.81 1.45-.59.69-1.12 1.83-.98 2.94 1.08.08 2.15-.49 2.8-1.29z"/>
+              </svg>
+              <span data-i18n="cta_download">Download on GitHub Releases</span>
+            </a>
+            <a href="https://github.com/dsavenk0/AI-llm-Engine" target="_blank" rel="noopener noreferrer" class="apple-btn-secondary apple-btn-large">
+              <span data-i18n="cta_github">GitHub Repository</span>
+            </a>
+          </div>
+          <div class="cta-footnote">
+            Universal DMG (1.7 MB) · macOS Sonoma &amp; Sequoia · M1 / M2 / M3 / M4 / M5
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="apple-footer">
+    <div class="apple-container footer-inner">
+      <div class="footer-meta">
+        <div class="footer-brand-row">
+          <img src="assets/app-icon-128.png" alt="LLMBar Logo" width="22" height="22">
+          <span class="footer-brand-name">AI-llm-Engine · LLMBar</span>
+        </div>
+        <p class="footer-copy">
+          Designed and engineered by Denis Savenko (<a href="https://github.com/dsavenk0" target="_blank" rel="noopener noreferrer">@dsavenk0</a>). Released under the Apache 2.0 License.
+        </p>
+      </div>
+
+      <div class="footer-nav">
+        <div class="footer-col">
+          <span class="footer-col-title">Product</span>
+          <a href="#overview">Overview</a>
+          <a href="#demo">LLMBar App</a>
+          <a href="#screenshots">Screenshots</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#benchmarks">Benchmarks</a>
+          <a href="https://github.com/dsavenk0/AI-llm-Engine/releases" target="_blank" rel="noopener noreferrer">Releases (.dmg)</a>
+        </div>
+        <div class="footer-col">
+          <span class="footer-col-title">Open Source</span>
+          <a href="https://github.com/dsavenk0/AI-llm-Engine" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+          <a href="https://github.com/dsavenk0/AI-llm-Engine/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://huggingface.co/dealignai/Bonsai-2-27B-CRACK-Ternary-JANG" target="_blank" rel="noopener noreferrer">Hugging Face Model</a>
+          <a href="https://github.com/dsavenk0/AI-llm-Engine/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License (Apache 2.0)</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
