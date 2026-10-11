@@ -6,6 +6,8 @@ A small terminal coding agent for the local engine (stdlib only).
 
 The model gets file and shell tools scoped to the workspace. Writes, edits and
 commands are shown (with a diff) and need confirmation unless /auto is on.
+Hard-to-reverse or outward-facing commands (git push, rm -rf, sudo, ...) always
+ask, even with /auto on — see DANGEROUS_PATTERNS.
 Commands: /auto  /clear  /think on|off  /exit
 """
 import difflib
@@ -24,6 +26,28 @@ from llm import B, CY, DIM, G, R, T, Y
 MAX_TOOL_OUTPUT = 12000
 MAX_STEPS = 30
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".llm", "dist", "build", ".build"}
+
+# Commands that stay hard-to-reverse or outward-facing even with /auto on — these always ask,
+# so "stop asking about every edit" never silently extends to "push to origin" or "rm -rf".
+DANGEROUS_PATTERNS = [
+    (r"\bgit\s+push\b", "pushes to a remote"),
+    (r"\bgit\s+reset\s+--hard\b", "discards uncommitted work"),
+    (r"\bgit\s+clean\s+-[a-z]*f", "deletes untracked files"),
+    (r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r", "recursive force-delete"),
+    (r"\bsudo\b", "runs as root"),
+    (r"\bdd\s+if=", "raw disk write"),
+    (r">\s*/dev/(disk|r?disk)", "writes directly to a disk device"),
+    (r"\bnpm\s+publish\b|\bpip\s+upload\b|\btwine\s+upload\b", "publishes a package"),
+    (r"\bcurl\b[^|&;]*\|\s*(sh|bash|zsh)\b", "pipes a download straight into a shell"),
+]
+
+
+def dangerous_reason(command):
+    """None if `command` looks safe to run under /auto; otherwise why it doesn't."""
+    for pattern, why in DANGEROUS_PATTERNS:
+        if re.search(pattern, command):
+            return why
+    return None
 
 TOOLS = [
     {"type": "function", "function": {
@@ -85,10 +109,10 @@ class Agent:
     def rel(self, full):
         return os.path.relpath(full, self.root)
 
-    def confirm(self, what):
-        if self.auto:
+    def confirm(self, what, force=False):
+        if self.auto and not force:
             return True
-        return llm.ask_yn(Y(what), True)
+        return llm.ask_yn((R if force else Y)(what), not force)
 
     def t_list_dir(self, path=".", pattern=None):
         base, out = self.path(path), []
@@ -162,7 +186,12 @@ class Agent:
 
     def t_run(self, command):
         print(CY("$ " + command))
-        if not self.confirm(T("Run this command?")):
+        why = dangerous_reason(command)
+        if why:
+            ok = self.confirm(T("⚠ This {why} — run it anyway?").format(why=why), force=True)
+        else:
+            ok = self.confirm(T("Run this command?"))
+        if not ok:
             return "user declined to run the command"
         try:
             p = subprocess.run(command, shell=True, cwd=self.root, capture_output=True, text=True, timeout=120)

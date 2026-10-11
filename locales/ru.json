@@ -112,6 +112,7 @@
   "Write {path}?": "Записать {path}?",
   "Apply this edit to {path}?": "Применить правку к {path}?",
   "Run this command?": "Выполнить команду?",
+  "⚠ This {why} — run it anyway?": "⚠ Эта команда {why} — всё равно выполнить?",
   "— {inp} in ({cached} cached) / {out} out · {s:.1f} s": "— {inp} вх ({cached} из кэша) / {out} вых · {s:.1f} с",
   "Stopped after {n} steps.": "Остановлено после {n} шагов.",
   "Agent in {root}": "Агент в {root}",
