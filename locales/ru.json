@@ -180,5 +180,6 @@
   "This model is loaded. Stop the engine first (./llm stop).": "Модель загружена. Сначала остановите движок (./llm stop).",
   "Delete {name} ({size:.1f} GB) from disk?": "Удалить {name} ({size:.1f} ГБ) с диска?",
   "Deleted: {name} — {size:.1f} GB freed": "Удалено: {name} — освобождено {size:.1f} ГБ",
-  "Model number to delete (Enter to cancel)": "Номер модели для удаления (Enter — отмена)"
+  "Model number to delete (Enter to cancel)": "Номер модели для удаления (Enter — отмена)",
+  "The editor is not built yet. Build it once with:  ./build-editor.sh": "Редактор ещё не собран. Соберите его один раз:  ./build-editor.sh"
 }

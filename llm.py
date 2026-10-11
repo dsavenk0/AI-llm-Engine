@@ -13,6 +13,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
+  ./llm ui [dir]             native code editor with the assistant (build it once: ./build-editor.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
@@ -730,6 +731,26 @@ def run_tests():
     return subprocess.run([VENV_PY, "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=BASE, env=env).returncode == 0
 
 
+def find_editor():
+    """LLMEditor.app: next to LLMBar's bundled resources, or built in this folder (./build-editor.sh)."""
+    for p in (os.path.join(BASE, "LLMEditor.app"), os.path.join(os.path.dirname(BASE), "LLMEditor.app")):
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def run_ui(args=()):
+    """Open the editor on a project (default: the folder `./llm ui` was started from)."""
+    app = find_editor()
+    if not app:
+        print(R(T("The editor is not built yet. Build it once with:  ./build-editor.sh"))); return False
+    cmd = ["open", "-n", app, "--args", "--llm-root", BASE, "--engine-port", str(load_cfg()["port"])]
+    if "--choose" not in args:   # without --root the app reopens its last project, or asks
+        root = next((a for a in args if not a.startswith("--")), None) or os.environ.get("LLM_CWD") or os.getcwd()
+        cmd += ["--root", os.path.abspath(os.path.join(os.environ.get("LLM_CWD") or os.getcwd(), root))]
+    return subprocess.run(cmd).returncode == 0
+
+
 def run_perf(args=()):
     if read_pid(ENGINE_PID):
         print(Y(T("Stop the engine first: two model copies won't fit."))); return False
@@ -1304,6 +1325,7 @@ def main():
         "eval": lambda: run_eval(sys.argv[2:]),
         "calibrate": lambda: run_calibrate(sys.argv[2:]),
         "agent": lambda: __import__("agent").main(sys.argv[2:]),
+        "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if a != "--json"), "--json" in sys.argv),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__), "": menu, "menu": menu,

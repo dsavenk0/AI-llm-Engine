@@ -870,7 +870,18 @@ struct SettingsTab: View {
                 }
             }
             Card(glow: HUD.amber) {
-                DisclosureGroup(isExpanded: $advanced) {
+                // the whole header row is the button — a stock DisclosureGroup only reacts to its tiny chevron
+                Button(action: { withAnimation(.easeOut(duration: 0.15)) { advanced.toggle() } }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: advanced ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 11, weight: .bold)).foregroundColor(HUD.amber).frame(width: 14)
+                        Text(L("ADVANCED", "ДОПОЛНИТЕЛЬНО")).font(HUD.mono(10, .semibold)).tracking(2.2).foregroundColor(HUD.amber)
+                        Spacer()
+                    }
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                if advanced {
                     VStack(alignment: .leading, spacing: 7) {
                         Hint(text: L("Fine tuning. Empty = model / engine default.", "Тонкая настройка. Пусто = значение модели или движка."))
                         adv("temperature", "Temperature", L("Randomness · presets 1.0 (reasoning) / 0.7 · 0 = greedy", "Случайность · пресеты 1.0 (рассуждения) / 0.7 · 0 = greedy"))
@@ -885,9 +896,7 @@ struct SettingsTab: View {
                               hint: L("1024 is fastest; the guard shrinks it when RAM is tight", "1024 быстрее всего; сторож уменьшает при нехватке RAM"))
                         field(L("Image max pixels", "Макс. пикселей"), int({ e.m("max_pixels", 1_048_576) }, { e.setM("max_pixels", $0) }),
                               hint: L("Bigger images are downscaled; ~1 token per 32×32 px", "Большие картинки уменьшаются; ~1 токен на 32×32 px"))
-                    }.padding(.top, 6)
-                } label: {
-                    Text(L("ADVANCED", "ДОПОЛНИТЕЛЬНО")).font(HUD.mono(10, .semibold)).tracking(2.2).foregroundColor(HUD.amber)
+                    }.padding(.top, 4)
                 }
             }
             Button(action: {

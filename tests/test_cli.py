@@ -330,3 +330,38 @@ class TestConfigKeepsAppSettings(unittest.TestCase):
             again = llm.load_cfg()
         self.assertEqual((again["theme"], again["glass"], again["glass_transparency"]), ("light", True, 0.3))
         self.assertEqual((llm.DEFAULTS["theme"], llm.DEFAULTS["glass"]), ("system", False))
+
+
+class TestEditorLauncher(unittest.TestCase):
+    def test_find_editor_prefers_the_folder_next_to_the_code(self):
+        from unittest import mock
+        base = tempfile.mkdtemp()
+        res = os.path.dirname(base)
+        with mock.patch.object(llm, "BASE", base):
+            self.assertIsNone(llm.find_editor() if not os.path.isdir(os.path.join(res, "LLMEditor.app")) else None)
+            os.makedirs(os.path.join(base, "LLMEditor.app"))
+            self.assertEqual(llm.find_editor(), os.path.join(base, "LLMEditor.app"))
+
+    def test_ui_command_opens_the_app_with_root_and_ports(self):
+        from unittest import mock
+        calls = []
+        base = tempfile.mkdtemp()
+        os.makedirs(os.path.join(base, "LLMEditor.app"))
+        proj = tempfile.mkdtemp()
+        fake = mock.Mock(returncode=0)
+        with mock.patch.object(llm, "BASE", base), mock.patch.object(llm.subprocess, "run",
+                                                                      lambda cmd, **k: calls.append(cmd) or fake):
+            self.assertTrue(llm.run_ui([proj]))
+            self.assertTrue(llm.run_ui(["--choose"]))
+        first, second = calls
+        self.assertEqual(first[:4], ["open", "-n", os.path.join(base, "LLMEditor.app"), "--args"])
+        self.assertEqual(first[first.index("--root") + 1], os.path.abspath(proj))
+        self.assertEqual(first[first.index("--llm-root") + 1], base)
+        self.assertIn("--engine-port", first)
+        self.assertNotIn("--root", second)
+
+    def test_missing_editor_is_explained_not_launched(self):
+        from unittest import mock
+        with mock.patch.object(llm, "BASE", tempfile.mkdtemp()), mock.patch.object(llm, "find_editor", lambda: None):
+            ok = llm.run_ui([])
+        self.assertFalse(ok)

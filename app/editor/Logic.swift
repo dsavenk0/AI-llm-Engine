@@ -50,7 +50,7 @@ enum AgentEvent: Equatable {
 
 // MARK: - "Explored 3 searches, read 2 files, ran 1 command"
 
-struct ActivityCounts: Equatable {
+struct ActivityCounts: Equatable, Codable {
     var searches = 0, explores = 0, reads = 0, edits = 0, commands = 0, questions = 0
 
     mutating func add(category: String) {

@@ -13,9 +13,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/llm"
 swiftc -O -o "$APP/Contents/MacOS/LLMBar" "$ROOT/app/LLMBar.swift"
 
+echo "▸ Editor (on demand, separate app)…"
+VERSION="$VERSION" "$ROOT/build-editor.sh" "$APP/Contents/Resources" | sed 's/^/  /'
+
 echo "▸ Bundling engine + CLI…"
 for f in llm llm.py agent.py requirements.txt LICENSE NOTICE; do cp "$ROOT/$f" "$APP/Contents/Resources/llm/"; done
-for d in engine harness locales third_party; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
+for d in engine harness ui locales third_party; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
 find "$APP/Contents/Resources/llm" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 cat > "$APP/Contents/Info.plist" <<PLIST

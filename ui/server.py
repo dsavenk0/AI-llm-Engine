@@ -101,6 +101,18 @@ class Project:
                         "size": st.st_size})
         return out
 
+    def list_files(self, limit=5000):
+        """Every file path under the project (for quick-open), respecting the skip list."""
+        out = []
+        for d, dirs, files in os.walk(self.root):
+            dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
+            for f in sorted(files):
+                if not f.startswith("."):
+                    out.append(self.rel(os.path.join(d, f)))
+                    if len(out) >= limit:
+                        return out
+        return out
+
     def read(self, rel):
         full = self.resolve(rel)
         if os.path.isdir(full):
@@ -353,6 +365,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_tree(self, P, q, body):
         return self._json(200, {"path": q.get("path", ""), "entries": P.tree(q.get("path", ""))})
+
+    def api_files(self, P, q, body):
+        return self._json(200, {"files": P.list_files()})
 
     def api_file(self, P, q, body):
         if self.command == "GET":
