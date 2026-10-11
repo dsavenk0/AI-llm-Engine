@@ -30,9 +30,13 @@ def _call(name, args):
 def parse_xml(text, tools):
     """Qwen3.5's <function=name><parameter=p>v</parameter></function>, typed by the tool's schema."""
     schemas = {}
-    for t in tools or []:
-        f = t.get("function", t)
-        schemas[f.get("name")] = (f.get("parameters") or {}).get("properties", {})
+    for t in tools if isinstance(tools, list) else []:
+        f = t.get("function", t) if isinstance(t, dict) else None
+        if not isinstance(f, dict):
+            continue
+        params = f.get("parameters")
+        props = params.get("properties") if isinstance(params, dict) else None
+        schemas[f.get("name")] = props if isinstance(props, dict) else {}
     calls = []
     for name, body in FUNC_RE.findall(text or ""):
         name = name.strip()
@@ -40,7 +44,8 @@ def parse_xml(text, tools):
         args = {}
         for p, raw in PARAM_RE.findall(body):
             p = p.strip()
-            typ = (props.get(p) or {}).get("type")
+            spec = props.get(p)
+            typ = spec.get("type") if isinstance(spec, dict) else None
             val = raw
             if typ and typ != "string":
                 try:

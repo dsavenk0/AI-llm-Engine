@@ -99,5 +99,16 @@ class TestEndToEndWithTheOutputParser(unittest.TestCase):
         self.assertEqual(json.loads(parse(tool, TOOLS)[0]["function"]["arguments"]), {"city": "Oslo"})
 
 
+    def test_odd_tool_definitions_do_not_break_the_xml_parser(self):
+        text = "<tool_call><function=f><parameter=a>1</parameter><parameter=b>x</parameter></function></tool_call>"
+        for tools in (None, "x", [5, None, "f"], [{"function": "str"}], [{"function": {"name": "f", "parameters": 3}}],
+                      [{"function": {"name": "f", "parameters": {"properties": {"a": True, "b": "s"}}}}]):
+            calls = parsers.parse_xml(text, tools)
+            self.assertEqual(len(calls), 1, tools)
+            self.assertEqual(json.loads(calls[0]["function"]["arguments"])["b"], "x")
+        typed = [{"function": {"name": "f", "parameters": {"properties": {"a": {"type": "integer"}}}}}]
+        self.assertEqual(json.loads(parsers.parse_xml(text, typed)[0]["function"]["arguments"])["a"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

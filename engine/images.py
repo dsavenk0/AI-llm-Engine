@@ -61,7 +61,8 @@ def command(tool, prompt, out, model=DEFAULT_MODEL, steps=None, size=None, seed=
     if not NAME_RE.match(model):
         raise ImageError(f"not a model name: {model!r}")
     w, h = parse_size(size)
-    cmd = [tool, "--model", model, "--prompt", prompt, "--width", str(w), "--height", str(h), "--output", out]
+    # --prompt=<text> is one argument whatever the text starts with (a bare "--foo" would be read as an option)
+    cmd = [tool, "--model", model, f"--prompt={prompt}", "--width", str(w), "--height", str(h), "--output", out]
     if steps is not None:
         if not (1 <= int(steps) <= 100):
             raise ImageError("steps must be between 1 and 100")

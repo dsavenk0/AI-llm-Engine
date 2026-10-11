@@ -48,7 +48,7 @@ class TestCommand(unittest.TestCase):
     def test_arguments(self):
         cmd = images.command("/bin/t", "a red fox", "/tmp/o.png", model="z-image-turbo", steps=6, size="1024x768", seed=7)
         self.assertEqual(cmd[:3], ["/bin/t", "--model", "z-image-turbo"])
-        self.assertIn("a red fox", cmd)
+        self.assertIn("--prompt=a red fox", cmd)
         self.assertEqual(cmd[cmd.index("--width") + 1], "1024")
         self.assertEqual(cmd[cmd.index("--height") + 1], "768")
         self.assertEqual(cmd[cmd.index("--steps") + 1], "6")
@@ -57,8 +57,9 @@ class TestCommand(unittest.TestCase):
 
     def test_the_prompt_is_one_argument_and_never_an_option_or_shell(self):
         cmd = images.command("/bin/t", "--output /etc/passwd; rm -rf ~", "/tmp/o.png")
-        self.assertEqual(cmd[cmd.index("--prompt") + 1], "--output /etc/passwd; rm -rf ~")
+        self.assertIn("--prompt=--output /etc/passwd; rm -rf ~", cmd)
         self.assertEqual(cmd.count("--output"), 1)
+        self.assertIn("--prompt=--seed", images.command("/bin/t", "--seed", "/tmp/o.png"))   # no bare option-like value
 
     def test_bad_input_is_refused(self):
         for kw in ({"prompt": ""}, {"prompt": "x" * 4001}, {"prompt": "x", "model": "../../bin/sh"},
