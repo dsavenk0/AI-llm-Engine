@@ -170,5 +170,15 @@
   "No workers configured — .llm/workers.json": "Исполнители не настроены — .llm/workers.json",
   "Could not save notes:": "Не удалось сохранить заметки:",
   "Notes saved to {p}": "Заметки сохранены в {p}",
-  "Project map: {n} files → {p}": "Карта проекта: {n} файлов → {p}"
+  "Project map: {n} files → {p}": "Карта проекта: {n} файлов → {p}",
+  "✓ engine (PTQ1, experimental)": "✓ движок (PTQ1, экспериментально)",
+  "via mlx-lm": "через mlx-lm",
+  "This model runs on the optional mlx-lm backend. Install it into .venv now?": "Эта модель работает через необязательный бэкенд mlx-lm. Установить его в .venv сейчас?",
+  "This model runs on the optional mlx-lm backend. Install it with:  ./llm setup --compat": "Эта модель работает через необязательный бэкенд mlx-lm. Установите:  ./llm setup --compat",
+  "Installing mlx-lm…": "Устанавливаю mlx-lm…",
+  "Refusing to delete a folder outside the model directories:": "Отказ: папка вне каталогов моделей:",
+  "This model is loaded. Stop the engine first (./llm stop).": "Модель загружена. Сначала остановите движок (./llm stop).",
+  "Delete {name} ({size:.1f} GB) from disk?": "Удалить {name} ({size:.1f} ГБ) с диска?",
+  "Deleted: {name} — {size:.1f} GB freed": "Удалено: {name} — освобождено {size:.1f} ГБ",
+  "Model number to delete (Enter to cancel)": "Номер модели для удаления (Enter — отмена)"
 }

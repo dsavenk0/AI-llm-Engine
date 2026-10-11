@@ -5,11 +5,12 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm                      interactive menu
   ./llm open                 new Terminal window: start the model and open chat (= LLM.command)
   ./llm up                   start (if needed), chat right away, then the menu
-  ./llm setup                create .venv and install dependencies
+  ./llm setup [--compat]     create .venv and install dependencies (--compat adds mlx-lm for other model families)
   ./llm models               discovered models and compatibility
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
   ./llm use <#|name part>    select a model (restarts it if running)
+  ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
@@ -313,6 +314,60 @@ def choose_model(cfg, arg=None):
     return True
 
 
+def model_root(path):
+    """The folder that holds a model on disk: models--org--name for the HF cache layout (path is a
+    snapshot inside it), else the model folder itself."""
+    parts = path.rstrip(os.sep).split(os.sep)
+    if "snapshots" in parts:
+        return os.sep.join(parts[:parts.index("snapshots")])
+    return path
+
+
+def delete_model(cfg, m, assume_yes=False):
+    """Remove a downloaded model from disk. Refuses anything outside the configured model folders,
+    and the model the running engine has loaded."""
+    root = os.path.realpath(model_root(m["path"]))
+    homes = [os.path.realpath(os.path.expanduser(d)) for d in cfg["dirs"]]
+    if root in homes or not any(root.startswith(h + os.sep) for h in homes) or not os.path.isdir(root):
+        print(R(T("Refusing to delete a folder outside the model directories:") + f" {root}"))
+        return False
+    if m["path"] == cfg["model"] and read_pid(ENGINE_PID) and health(cfg):
+        print(R(T("This model is loaded. Stop the engine first (./llm stop).")))
+        return False
+    size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(root) for f in fs
+               if os.path.isfile(os.path.join(d, f))) / 2**30
+    if not assume_yes and not ask_yn(R(T("Delete {name} ({size:.1f} GB) from disk?").format(name=m["name"], size=size)), False):
+        return False
+    shutil.rmtree(root)
+    if cfg["model"] == m["path"]:
+        cfg["model"] = ""
+    cfg["models"].pop(m["path"], None)
+    save_cfg(cfg)
+    print(G(T("Deleted: {name} — {size:.1f} GB freed").format(name=m["name"], size=size)))
+    return True
+
+
+def remove_cmd(cfg, args):
+    assume_yes = "--yes" in args or "-y" in args
+    arg = " ".join(a for a in args if a not in ("--yes", "-y")).strip()
+    models = scan_models(cfg)
+    if not arg:
+        list_models(cfg, models)
+        if not models or not sys.stdin.isatty():
+            return False
+        arg = input(T("Model number to delete (Enter to cancel)") + " › ").strip()
+        if not arg:
+            return False
+    if arg.isdigit() and 1 <= int(arg) <= len(models):
+        hits = [models[int(arg) - 1]]
+    else:
+        hits = [m for m in models if arg == m["path"] or arg.lower() in m["name"].lower()]
+    if len(hits) != 1:
+        print(R(T("Model not found.")) if not hits else Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
+        return False
+    return delete_model(cfg, hits[0], assume_yes)
+
+
 # ─────────────────────────── processes ───────────────────────────
 def read_pid(path):
     try:
@@ -390,7 +445,9 @@ def find_python():
     raise SystemExit(T("Python 3.10+ is required for the engine (e.g. brew install python)."))
 
 
-def setup():
+def setup(compat=False):
+    """Create/refresh the engine environment; `compat` also installs mlx-lm (the optional backend
+    for architectures the native engine lacks — Qwen2/3, GLM, Llama, Gemma, MoE…)."""
     if os.path.exists(VENV_PY):
         print(DIM(T("Environment already exists: .venv")))
     else:
@@ -398,6 +455,9 @@ def setup():
         os.makedirs(DATA, exist_ok=True)
         subprocess.run([find_python(), "-m", "venv", os.path.join(DATA, ".venv")], check=True)
     r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "-r", os.path.join(BASE, "requirements.txt")])
+    if r.returncode == 0 and compat:
+        print(T("Installing mlx-lm…"))
+        r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-lm"])
     if r.returncode == 0:
         print(G(T("Dependencies installed.")))
     return r.returncode == 0
@@ -412,6 +472,8 @@ def engine_cmd(cfg, m):
            "--mem-limit", str(cfg["mem_limit"] / 100),
            "--stats-file", os.path.join(STATE, "stats.jsonl"),
            "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--disk-cache-gb", str(cfg.get("disk_cache_gb", 8))]
+    if m.get("route") == "ptq1":  # picking an experimental-format model is the opt-in; no separate switch
+        cmd += ["--ptq1", "on"]
     if mc["thinking"] is not None:
         cmd += ["--thinking", "on" if mc["thinking"] else "off"]
     if cfg.get("disk_cache_dir"):
@@ -426,6 +488,18 @@ def engine_cmd(cfg, m):
     if not mc["vision"]:
         cmd.append("--no-vision")
     return cmd
+
+
+def route_blocker(cfg, m, interactive):
+    """None when the model's route is ready; else a message (after offering the fix, if interactive).
+    Only the optional mlx-lm backend needs anything installed; PTQ1 is enabled by the model itself."""
+    route = m.get("route", "native")
+    if route == "mlxlm" and not mlxlm_installed():
+        if interactive and ask_yn(Y(T("This model runs on the optional mlx-lm backend. Install it into .venv now?")), True):
+            if setup(compat=True):
+                return None
+        return T("This model runs on the optional mlx-lm backend. Install it with:  ./llm setup --compat")
+    return None
 
 
 def start(cfg, interactive=True):
@@ -443,6 +517,9 @@ def start(cfg, interactive=True):
         m = current_model(cfg)
     if read_pid(ENGINE_PID) and health(cfg):
         print(Y(T("Engine is already running."))); return True
+    why = route_blocker(cfg, m, interactive)
+    if why:
+        print(R(why)); return False
     if cfg["auto_free"]:
         free_memory(interactive=False, quiet=True)
     if port_busy(cfg["port"]):
@@ -839,9 +916,13 @@ def _hf(path, timeout=20):
         return json.loads(r.read())
 
 
-def _engine_compatible(tags):
+def hub_route(tags):
+    """Engine route for a hub repo from its tags: native / ptq1 / mlxlm, or "none" for what no
+    backend here can read (GGUF, non-MLX weights)."""
     t = set(tags or [])
-    return "qwen3_5" in t and "qwen3_5_moe" not in t and not any(x in t for x in ("gguf", "bf16", "fp16"))
+    if "gguf" in t or not (t & {"mlx", "safetensors"}):
+        return "none"
+    return engine_route({}, t)
 
 
 def _pull_dest(repo):
@@ -874,7 +955,9 @@ def hf_search(query, limit=20):
         probes = list(ex.map(probe, [m["id"] for m in found]))
     sizes = [p_[0] for p_ in probes]
     return [{"id": m["id"], "downloads": m.get("downloads", 0), "likes": m.get("likes", 0), "size": sz,
-             "compatible": _engine_compatible(m.get("tags")) and not pr[1], "local": os.path.isdir(_pull_dest(m["id"])),
+             "route": "none" if pr[1] else hub_route(m.get("tags")),
+             "compatible": hub_route(m.get("tags")) != "none" and not pr[1],
+             "local": os.path.isdir(_pull_dest(m["id"])),
              "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz, pr in zip(found, sizes, probes)]
 
 
@@ -1008,7 +1091,8 @@ def search_cmd(query, as_json=False):
         print(json.dumps(res, ensure_ascii=False)); return True
     for i, m in enumerate(res, 1):
         size = f"{m['size']:.1f} GB" if m["size"] is not None else "?"
-        ok = G(T("✓ engine")) if m["compatible"] else DIM(T("other engine"))
+        ok = {"native": G(T("✓ engine")), "ptq1": Y(T("✓ engine (PTQ1, experimental)")),
+              "mlxlm": CY(T("via mlx-lm"))}.get(m["route"], DIM(T("not supported")))
         print(f" {i:>2}) {B(m['id'])}  {size}  ⬇{m['downloads']}  {ok}" + (G("  " + T("downloaded")) if m["local"] else ""))
     if sys.stdin.isatty() and res:
         ch = input(T("Number to download (Enter to cancel)") + " › ").strip()
@@ -1180,12 +1264,13 @@ def main():
     cfg, tty = load_cfg(), sys.stdin.isatty()
     set_lang(cfg["lang"])
     actions = {
-        "setup": setup, "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
+        "setup": lambda: setup(compat="--compat" in sys.argv), "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),
         "models": lambda: print(json.dumps(scan_models(cfg), ensure_ascii=False)) if arg == "--json"
         else list_models(cfg, scan_models(cfg)), "use": lambda: choose_model(cfg, arg or None),
         "chat": lambda: chat(cfg), "bench": lambda: bench(cfg), "logs": logs,
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,
+        "rm": lambda: remove_cmd(cfg, sys.argv[2:]),
         "perf": lambda: run_perf(sys.argv[2:]),
         "eval": lambda: run_eval(sys.argv[2:]),
         "calibrate": lambda: run_calibrate(sys.argv[2:]),

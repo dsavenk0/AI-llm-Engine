@@ -206,3 +206,107 @@ class TestDownloadFile(unittest.TestCase):
             f.write(self.data)
         llm.download_file(self.url, self.path, len(self.data), self.sha)
         self.assertEqual(self.H.log, [])  # nothing fetched
+
+
+class TestModelRoutes(unittest.TestCase):
+    """Which engine a model needs — from a local config.json or from a hub repo's tags."""
+
+    def test_local_configs(self):
+        r = llm.engine_route
+        self.assertEqual(r({"model_type": "qwen3_5", "text_config": {"model_type": "qwen3_5_text"}}), "native")
+        self.assertEqual(r({"model_type": "prism_hadamard_qwen35"}), "native")
+        self.assertEqual(r({"model_type": "prism_hadamard_qwen35_ptq1", "schema": "prism_hadamard_qwen35_ptq1_v1"}), "ptq1")
+        self.assertEqual(r({"model_type": "qwen3"}), "mlxlm")
+        self.assertEqual(r({"model_type": "glm4_moe"}), "mlxlm")
+        self.assertEqual(r({"model_type": "qwen3_5", "text_config": {"num_experts": 8}}), "mlxlm")  # MoE → not native
+
+    def test_hub_tags(self):
+        h = llm.hub_route
+        self.assertEqual(h(["mlx", "safetensors", "prism_hadamard_qwen35", "ternary"]), "native")
+        self.assertEqual(h(["custom", "safetensors", "prism_hadamard_qwen35_ptq1", "mlx"]), "ptq1")
+        self.assertEqual(h(["mlx", "safetensors", "qwen3"]), "mlxlm")
+        self.assertEqual(h(["mlx", "safetensors", "qwen3_5_moe"]), "mlxlm")
+        self.assertEqual(h(["gguf", "qwen3_5"]), "none")
+        self.assertEqual(h(["pytorch", "llama"]), "none")
+
+
+class TestRouteBlockers(unittest.TestCase):
+    def setUp(self):
+        self.cfg = cfg()
+        self.cfg["advanced"] = {}
+        from unittest import mock
+        self.save = mock.patch.object(llm, "save_cfg", lambda c: None)
+        self.save.start()
+        self.addCleanup(self.save.stop)
+
+    def test_native_is_never_blocked(self):
+        self.assertIsNone(llm.route_blocker(self.cfg, {"route": "native"}, False))
+
+    def test_ptq1_is_not_blocked_the_model_is_the_opt_in(self):
+        self.assertIsNone(llm.route_blocker(self.cfg, {"route": "ptq1"}, False))
+
+    def test_engine_command_enables_ptq1_by_itself_and_only_for_ptq1(self):
+        base = {"name": "m", "path": "/tmp/m", "thinking_default": False, "efforts": []}
+        on = llm.engine_cmd(self.cfg, dict(base, route="ptq1"))
+        self.assertEqual(on[on.index("--ptq1") + 1], "on")
+        self.assertNotIn("--ptq1", llm.engine_cmd(self.cfg, dict(base, route="native")))
+
+    def test_mlxlm_points_at_the_installer_when_missing(self):
+        from unittest import mock
+        with mock.patch.object(llm, "mlxlm_installed", lambda: False):
+            self.assertIn("setup --compat", llm.route_blocker(self.cfg, {"route": "mlxlm"}, False))
+        with mock.patch.object(llm, "mlxlm_installed", lambda: True):
+            self.assertIsNone(llm.route_blocker(self.cfg, {"route": "mlxlm"}, False))
+
+
+class TestDeleteModel(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.home = os.path.realpath(tempfile.mkdtemp())
+        self.cfg = cfg()
+        self.cfg.update(dirs=[self.home], model="", models={})
+        p = mock.patch.object(llm, "save_cfg", lambda c: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def make(self, *parts, size=1000):
+        d = os.path.join(self.home, *parts)
+        os.makedirs(d)
+        with open(os.path.join(d, "model.safetensors"), "wb") as f:
+            f.write(b"\0" * size)
+        return d
+
+    def test_cache_layout_removes_the_whole_models_folder(self):
+        snap = self.make("models--org--demo", "snapshots", "abc123")
+        os.makedirs(os.path.join(self.home, "models--org--demo", "blobs"))
+        self.cfg["models"][snap] = {"context": 4096}
+        self.assertTrue(llm.delete_model(self.cfg, {"path": snap, "name": "demo"}, assume_yes=True))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "models--org--demo")))
+        self.assertTrue(os.path.isdir(self.home))
+        self.assertNotIn(snap, self.cfg["models"])
+
+    def test_pull_layout_and_selected_model_is_cleared(self):
+        d = self.make("org", "demo")
+        self.cfg["model"] = d
+        self.assertTrue(llm.delete_model(self.cfg, {"path": d, "name": "demo"}, assume_yes=True))
+        self.assertFalse(os.path.exists(d))
+        self.assertEqual(self.cfg["model"], "")
+        self.assertTrue(os.path.isdir(os.path.join(self.home, "org")))   # siblings untouched
+
+    def test_refuses_outside_model_dirs_and_the_dir_itself(self):
+        outside = tempfile.mkdtemp()
+        self.assertFalse(llm.delete_model(self.cfg, {"path": outside, "name": "x"}, assume_yes=True))
+        self.assertTrue(os.path.isdir(outside))
+        self.assertFalse(llm.delete_model(self.cfg, {"path": self.home, "name": "x"}, assume_yes=True))
+        self.assertTrue(os.path.isdir(self.home))
+
+    def test_refuses_the_loaded_model_and_asks_otherwise(self):
+        from unittest import mock
+        d = self.make("org", "demo")
+        self.cfg["model"] = d
+        with mock.patch.object(llm, "read_pid", lambda p: 1), mock.patch.object(llm, "health", lambda c: {"ok": 1}):
+            self.assertFalse(llm.delete_model(self.cfg, {"path": d, "name": "demo"}, assume_yes=True))
+        self.assertTrue(os.path.isdir(d))
+        with mock.patch.object(llm, "ask_yn", lambda *a, **k: False):
+            self.assertFalse(llm.delete_model(self.cfg, {"path": d, "name": "demo"}))
+        self.assertTrue(os.path.isdir(d))
