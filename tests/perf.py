@@ -1,16 +1,26 @@
 """Performance suite with a saved baseline — run before/after every optimization.
 
-    .venv/bin/python -m tests.perf                 # measure and compare to tests/perf_baseline.json
-    .venv/bin/python -m tests.perf --save          # measure and store as the new baseline
-    .venv/bin/python -m tests.perf --tolerance 0.1 # fail on >10 % regressions (default 0.15)
-    ./llm perf [--save]
+    .venv/bin/python -m tests.perf                       # measure and compare to tests/perf_baseline.json
+    .venv/bin/python -m tests.perf --save                 # measure and store as the new baseline
+    .venv/bin/python -m tests.perf --tolerance 0.1        # fail on >10 % regressions (default 0.15)
+    .venv/bin/python -m tests.perf --model A --model B    # compare several models in one run
+    ./llm perf [--save] [--model PATH ...]
 
-Uses the model from ENGINE_TEST_MODEL or the one selected in ./llm. Stop the
-server first (two copies of a 27B model will not fit in 16 GB).
+Uses the model from ENGINE_TEST_MODEL or the one selected in ./llm, unless --model is given
+(repeat it to benchmark several models — e.g. a clean Qwen3.5 checkpoint, Bonsai JANG, and a
+light model — in one pass). Stop the server first (two copies of a model will not fit in 16 GB).
 
-A fanless MacBook lowers clocks after a few seconds of full load, so each
-metric is measured after a warm-up and reported as the best of several runs;
-compare numbers taken on the same machine in the same state (on power, idle).
+Prefill is measured at three prompt sizes (~128 / 1024 / 4096 tokens, built to that exact
+token count for *each* model's own tokenizer): prefill is compute-bound and roughly linear in
+prompt length, so a single prompt size hides how it actually scales with context — see e.g. the
+NVIDIA TensorRT-LLM benchmarking guide and the AWS Neuron LLM inference benchmarking guide,
+which both sweep input length rather than fixing it. Decode (prose, code-edit) is measured
+separately since it is bandwidth-bound, not compute-bound, and responds to prompt size very
+differently from prefill — conflating the two is the most common mistake in these numbers.
+
+A fanless MacBook lowers clocks after a few seconds of full load, so each metric is measured
+after a warm-up and reported as the best of several runs; compare numbers taken on the same
+machine in the same state (on power, idle).
 """
 import argparse
 import json
@@ -25,11 +35,12 @@ sys.path.insert(0, ROOT)
 BASELINE = os.path.join(ROOT, "tests", "perf_baseline.json")
 
 # name -> (unit, direction): +1 higher is better, -1 lower is better
-METRICS = {
+PREFILL_SIZES = [("short", 128), ("medium", 1024), ("long", 4096)]
+METRIC_UNITS = {
     "load_s": ("s", -1),
     "decode_step_ms": ("ms", -1),
     "verify16_cost": ("× step", -1),
-    "prefill_tps": ("tok/s", +1),
+    **{f"prefill_tps_{label}": ("tok/s", +1) for label, _ in PREFILL_SIZES},
     "prose_tps": ("tok/s", +1),
     "code_edit_tps": ("tok/s", +1),
     "code_edit_accept": ("ratio", +1),
@@ -38,15 +49,21 @@ METRICS = {
 }
 
 
-def model_path():
+def model_paths(args):
+    if args.model:
+        return [os.path.expanduser(p) for p in args.model]
     p = os.environ.get("ENGINE_TEST_MODEL")
     if p:
-        return os.path.expanduser(p)
+        return [os.path.expanduser(p)]
     try:
         with open(os.path.join(os.environ.get("LLM_HOME", ROOT), ".llm", "config.json")) as f:
-            return json.load(f)["model"]
+            return [json.load(f)["model"]]
     except (OSError, ValueError, KeyError):
-        sys.exit("set ENGINE_TEST_MODEL or select a model with ./llm use")
+        sys.exit("set ENGINE_TEST_MODEL, pass --model, or select a model with ./llm use")
+
+
+def model_key(path):
+    return os.path.basename(path.rstrip("/")) or path
 
 
 SYS_PEAK = [0.0]
@@ -63,19 +80,37 @@ def generate(eng, msgs, max_tokens, speculative):
             return item
 
 
-def measure():
+BASE_PARA = "A Japanese garden balances stone, water, moss and trees; every element is a symbol. "
+
+
+def prompt_of_size(eng, target_tokens):
+    """A filler prompt of (at least) `target_tokens` for *this* model's own tokenizer — different
+    tokenizers need a different number of repeats to reach the same token count, so the repeat
+    count can't be a fixed constant shared across models."""
+    reps = max(1, target_tokens // 20)
+    for _ in range(6):  # a couple of proportional corrections always converge
+        text = BASE_PARA * reps
+        n = len(eng.tok.encode(text))
+        if n >= target_tokens:
+            return text
+        reps = max(reps + 1, int(reps * target_tokens / max(n, 1)) + 1)
+    return BASE_PARA * reps
+
+
+def measure_one(path):
     import mlx.core as mx
     from engine import memory
     from engine.generate import Engine, MemoryLimitError
+    from engine.model import Positions
 
     used = memory.used_fraction()
     print(f"system RAM in use before loading: {used:.0%}")
     if used > 0.45:
         print("warning: other apps already use a lot of memory; numbers may be throttled or skipped")
-    from engine.model import Positions
 
     t0 = time.time()
-    eng = Engine(model_path(), vision=False, max_context=8192, max_tokens=512, log=lambda *a: None)
+    eng = Engine(path, vision=False, max_context=max(8192, PREFILL_SIZES[-1][1] * 2), max_tokens=512,
+                log=lambda *a: None)
     res = {"load_s": round(time.time() - t0, 2)}
     model = eng.model
 
@@ -106,13 +141,15 @@ def measure():
             res[name] = None
             print(f"{name}: skipped — {e}")
 
-    # prefill throughput on a ~2K-token prompt
-    para = ("A Japanese garden balances stone, water, moss and trees; every element is a symbol. " * 120)
-    msgs = [{"role": "user", "content": para + "\nSummarize in one sentence."}]
-    def prefill_run():
-        generate(eng, msgs, 4, False)
-        res["prefill_tps"] = generate(eng, msgs, 4, False)["prefill_tps"]
-    guarded("prefill_tps", prefill_run)
+    # prefill throughput across short/medium/long prompts — see the module docstring for why
+    # a single prompt size isn't enough to compare prefill speed between engines or models.
+    for label, size in PREFILL_SIZES:
+        prompt = prompt_of_size(eng, size)
+        msgs = [{"role": "user", "content": prompt + "\nSummarize in one sentence."}]
+        def prefill_run(msgs=msgs, label=label):
+            generate(eng, msgs, 4, False)  # warm-up against this exact prompt, then measure
+            res[f"prefill_tps_{label}"] = generate(eng, msgs, 4, False)["prefill_tps"]
+        guarded(f"prefill_tps_{label}", prefill_run)
 
     prose = [{"role": "user", "content": "Write a detailed story about a bonsai garden in Kyoto."}]
     def prose_run():
@@ -136,35 +173,45 @@ def measure():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model", action="append",
+                    help="model path to benchmark (repeat to compare several models in one run); "
+                         "default: ENGINE_TEST_MODEL or the model selected in ./llm")
     ap.add_argument("--save", action="store_true", help="store results as the new baseline")
     ap.add_argument("--tolerance", type=float, default=0.15, help="allowed relative regression (default 0.15)")
     args = ap.parse_args()
 
-    res = measure()
-    base = {}
+    paths = model_paths(args)
+    base_all = {}
     if os.path.exists(BASELINE):
         with open(BASELINE) as f:
-            base = json.load(f).get("metrics", {})
+            base_all = json.load(f).get("models", {})
 
-    failed = []
-    print(f"\n{'metric':18s} {'value':>10s} {'baseline':>10s} {'change':>9s}")
-    for k, (unit, sign) in METRICS.items():
-        v, b = res.get(k), base.get(k)
-        change, flag = "", ""
-        if isinstance(v, (int, float)) and isinstance(b, (int, float)) and b:
-            rel = (v - b) / b
-            change = f"{rel * 100:+.1f}%"
-            if sign * rel < -args.tolerance:
-                flag = "  ✗ regression"
-                failed.append(k)
-            elif sign * rel > args.tolerance:
-                flag = "  ✓ better"
-        print(f"{k:18s} {v!s:>10s} {b if b is not None else '—'!s:>10s} {change:>9s} {unit}{flag}")
+    results, failed = {}, []
+    for path in paths:
+        key = model_key(path)
+        print(f"\n=== {key} ===")
+        SYS_PEAK[0] = 0.0
+        res = measure_one(path)
+        results[key] = res
+        base = base_all.get(key, {})
+        print(f"\n{'metric':20s} {'value':>10s} {'baseline':>10s} {'change':>9s}")
+        for k, (unit, sign) in METRIC_UNITS.items():
+            v, b = res.get(k), base.get(k)
+            change, flag = "", ""
+            if isinstance(v, (int, float)) and isinstance(b, (int, float)) and b:
+                rel = (v - b) / b
+                change = f"{rel * 100:+.1f}%"
+                if sign * rel < -args.tolerance:
+                    flag = "  ✗ regression"
+                    failed.append(f"{key}/{k}")
+                elif sign * rel > args.tolerance:
+                    flag = "  ✓ better"
+            print(f"{k:20s} {v!s:>10s} {b if b is not None else '—'!s:>10s} {change:>9s} {unit}{flag}")
 
     if args.save:
         with open(BASELINE, "w") as f:
             json.dump({"machine": platform.machine(), "platform": platform.platform(),
-                       "date": time.strftime("%Y-%m-%d"), "metrics": res}, f, indent=2)
+                       "date": time.strftime("%Y-%m-%d"), "models": results}, f, indent=2)
         print(f"\nbaseline saved: {BASELINE}")
     if failed and not args.save:
         print(f"\nregressions beyond {args.tolerance:.0%}: {', '.join(failed)}")

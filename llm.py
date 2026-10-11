@@ -55,6 +55,7 @@ DEFAULTS = {
     "speculative": True,         # prompt-lookup speculative decoding
     "idle_sleep": 15,            # minutes of inactivity before the model is unloaded (0 = never)
     "disk_cache_gb": 8,          # SSD prefix cache budget (0 = off)
+    "disk_cache_dir": "",        # where it lives (empty = ~/.cache/ai-llm-engine/prefix) — e.g. an external SSD
     "advanced": {},              # fine tuning: temperature, top_p, top_k, min_p, presence_penalty,
                                  # draft_max, ngram_min, cache_limit_mb (missing/null = engine default)
     "mem_limit": 88,             # % of system RAM the whole Mac may use; the engine trims/stops above it
@@ -366,6 +367,8 @@ def engine_cmd(cfg, m):
            "--mem-limit", str(cfg["mem_limit"] / 100),
            "--stats-file", os.path.join(STATE, "stats.jsonl"),
            "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--disk-cache-gb", str(cfg.get("disk_cache_gb", 8))]
+    if cfg.get("disk_cache_dir"):
+        cmd += ["--disk-cache-dir", cfg["disk_cache_dir"]]
     if not cfg.get("speculative", True):
         cmd.append("--no-speculative")
     for k, v in (cfg.get("advanced") or {}).items():

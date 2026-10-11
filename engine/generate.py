@@ -189,7 +189,7 @@ class Engine:
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
                  max_pixels=1024 * 1024, thinking=True, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
-                 disk_cache_gb=8.0, think_frac=0.6, log=print):
+                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, log=print):
         self.path, self.log = path, log
         self.max_context, self.max_tokens, self.prefill_step = max_context, max_tokens, prefill_step  # 0 = auto
         self.max_pixels = max_pixels
@@ -252,8 +252,9 @@ class Engine:
             from .prefix_store import PrefixStore
             with open(os.path.join(path, "config.json"), "rb") as f:
                 mid = os.path.basename(path.rstrip("/")) + "-" + hashlib.sha1(f.read()).hexdigest()[:8]
-            self.store = PrefixStore(os.path.join(os.path.expanduser("~/.cache/ai-llm-engine/prefix"), mid),
-                                     int(disk_cache_gb * GiB), log=log)
+            root = os.path.expanduser(disk_cache_dir) if disk_cache_dir else \
+                os.path.expanduser("~/.cache/ai-llm-engine/prefix")
+            self.store = PrefixStore(os.path.join(root, mid), int(disk_cache_gb * GiB), log=log)
         self._warmup()
 
     # ───────────────────────── sleep / wake ─────────────────────────

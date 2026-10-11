@@ -494,6 +494,8 @@ def main():
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
     ap.add_argument("--disk-cache-gb", type=float, default=8, help="SSD prefix cache budget in GB (0 = off)")
+    ap.add_argument("--disk-cache-dir", default="", help="where the SSD prefix cache lives (default: "
+                    "~/.cache/ai-llm-engine/prefix) — point it at a faster/bigger external SSD if you have one")
     tune = ap.add_argument_group("fine tuning (defaults come from the model's presets)")
     for flag in ("temperature", "top-p", "top-k", "min-p", "presence-penalty"):
         tune.add_argument(f"--{flag}", type=int if flag == "top-k" else float, default=None)
@@ -519,7 +521,8 @@ def main():
                           sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
                                              "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty},
                           draft_max=ARGS.draft_max, ngram_min=ARGS.ngram_min, cache_limit_mb=ARGS.cache_limit_mb,
-                          disk_cache_gb=ARGS.disk_cache_gb, think_frac=ARGS.think_frac,
+                          disk_cache_gb=ARGS.disk_cache_gb, disk_cache_dir=ARGS.disk_cache_dir,
+                          think_frac=ARGS.think_frac,
                           log=log)
     threading.Thread(target=worker, args=(init,), daemon=True).start()
     READY.wait()

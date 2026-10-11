@@ -755,6 +755,13 @@ struct SettingsTab: View {
                 field(L("SSD prefix cache, GB", "Кэш префиксов на SSD, ГБ"), int({ e.g("disk_cache_gb", 8) }, { e.setG("disk_cache_gb", $0) }),
                       hint: L("Long prompts (agent system prompts) are restored from disk instead of re-prefilled. 0 = off.",
                               "Длинные промпты (системные промпты агентов) восстанавливаются с диска без пересчёта. 0 = выкл."))
+                HStack {
+                    Text(L("SSD cache folder", "Папка SSD-кэша")).font(.system(size: 12)).foregroundColor(HUD.text)
+                    Spacer()
+                    TextField("~/.cache/ai-llm-engine/prefix", text: Binding(get: { e.g("disk_cache_dir", "") }, set: { e.setG("disk_cache_dir", $0) }))
+                        .font(HUD.mono(11)).frame(width: 170).multilineTextAlignment(.trailing).textFieldStyle(.roundedBorder)
+                }
+                Hint(text: L("Point it at a faster/bigger external SSD; empty = default location", "Укажите более быстрый/ёмкий внешний SSD; пусто = путь по умолчанию"))
             }
             Card {
                 Caption(text: L("Network & interface", "Сеть и интерфейс"))
