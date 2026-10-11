@@ -16,6 +16,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
   ./llm eval [--save]        accuracy suite (math/code/sanity) vs tests/eval_baseline.json
+  ./llm calibrate [--apply]  find the largest context that actually prefills on this Mac
 
 The manager itself is stdlib-only; the engine runs from ./.venv.
 Language: English by default, Russian via LLM_LANG=ru, the settings menu or a ru system locale.
@@ -620,6 +621,16 @@ def run_eval(args=()):
     return subprocess.run([VENV_PY, "-m", "tests.eval", *args], cwd=BASE, env=env).returncode == 0
 
 
+def run_calibrate(args=()):
+    if read_pid(ENGINE_PID):
+        print(Y(T("Stop the engine first: two model copies won't fit."))); return False
+    env = dict(os.environ)
+    m = current_model(load_cfg())
+    if m:
+        env["ENGINE_TEST_MODEL"] = m["path"]
+    return subprocess.run([VENV_PY, "-m", "tests.calibrate", *args], cwd=BASE, env=env).returncode == 0
+
+
 # ─────────────────────────── clients ───────────────────────────
 def show_endpoints(cfg, m=None):
     m = m or current_model(cfg)
@@ -1061,6 +1072,7 @@ def main():
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,
         "perf": lambda: run_perf(sys.argv[2:]),
         "eval": lambda: run_eval(sys.argv[2:]),
+        "calibrate": lambda: run_calibrate(sys.argv[2:]),
         "agent": lambda: __import__("agent").main(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if a != "--json"), "--json" in sys.argv),

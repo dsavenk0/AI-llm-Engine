@@ -145,6 +145,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm test                 unit + integration tests
 ./llm perf [--save]        performance suite vs the saved baseline
 ./llm eval [--save]        accuracy suite (math / code / sanity) vs the saved baseline
+./llm calibrate [--apply]  find the largest context that actually prefills on this Mac
 ```
 
 Language is English by default and Russian when the system locale is Russian. You can force it with `LLM_LANG=ru` or
@@ -224,6 +225,11 @@ word problems, function-completion problems graded by actually running the gener
 questions that must finish cleanly rather than loop — so a change that quietly breaks answers gets caught, not just
 one that slows them down. Both accept a repeated `--model PATH` to compare several models in one run. Stop the
 server first. If memory runs short, a metric is skipped instead of freezing the Mac.
+
+`./llm calibrate [--apply]` checks the auto-context formula (RAM × limit − weights, divided by KV cost per token)
+against reality instead of only trusting the math: it binary-searches real prefill attempts, each in its own fresh
+subprocess so a hard crash at one size only rules out that size. `--apply` writes the result as the model's context
+(no longer `auto`) once it's confirmed to actually fit, not just computed to.
 
 ## Supported models
 
