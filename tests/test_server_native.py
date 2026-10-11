@@ -310,6 +310,15 @@ class TestNativeServerOptions(unittest.TestCase):
         self.assertIn("[model]", l)
         self.assertIn("trace: request", l)                    # only at trace level
 
+    def test_parsers_are_reported_and_validated_at_start(self):
+        srv = self.with_server("--reasoning-parser", "tags:</reasoning>", "--tool-parser", "json")
+        self.assertEqual(srv.get("/health")["parsers"], {"reasoning": "tags:</reasoning>", "tool_call": "json"})
+        import subprocess
+        bad = subprocess.run([sys.executable, "-B", "-m", "engine.server", "--model", self.dir,
+                              "--reasoning-parser", "bogus"], cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("--reasoning-parser", bad.stderr)
+
     def test_the_prefill_guard_can_be_switched_off(self):
         srv = self.with_server("--prefill-guard", "off")
         self.assertEqual(srv.chat()[0], 200)

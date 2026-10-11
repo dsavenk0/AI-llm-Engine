@@ -968,6 +968,10 @@ struct SettingsTab: View {
                         adv("presence_penalty", "Presence", L("Penalty for repeated tokens", "Штраф за повторы"))
                         adv("repetition_penalty", "Repetition", L("1.0 = off; 1.05–1.2 divides the score of tokens already written — stops answers that cycle",
                                                                     "1.0 = выкл.; 1.05–1.2 снижает вес уже использованных токенов — против зацикливания"))
+                        adv("reasoning_parser", L("Reasoning parser", "Разбор рассуждений"),
+                            L("auto · think · none · tags:</close> — where the reasoning ends in the output", "auto · think · none · tags:</закрытие> — где в выводе кончаются рассуждения"))
+                        adv("tool_parser", L("Tool-call parser", "Разбор вызовов"),
+                            L("auto · qwen_xml · json · mlx-lm · none — the tool-call format to read", "auto · qwen_xml · json · mlx-lm · none — формат вызова инструментов"))
                         adv("draft_max", L("Draft length", "Длина черновика"), L("Longest speculative draft, 1–15 (15)", "Самый длинный черновик, 1–15 (15)"))
                         adv("ngram_min", L("N-gram min", "Мин. n-грамма"), L("Shortest match that starts a draft, 1–4 (2)", "Минимальное совпадение для черновика, 1–4 (2)"))
                         adv("cache_limit_mb", L("MLX cache, MB", "Кэш MLX, МБ"), L("Allocator cache between requests (128)", "Кэш аллокатора между запросами (128)"))

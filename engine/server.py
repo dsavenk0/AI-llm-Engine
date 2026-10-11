@@ -167,38 +167,7 @@ class OutputParser:
         return out
 
 
-FUNC_RE = re.compile(r"<function=([^>\n]+)>(.*?)(?:</function>|$)", re.S)
-PARAM_RE = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?(?:</parameter>|(?=<parameter=)|$)", re.S)
-
-
-def parse_tool_calls(text, tools):
-    schemas = {}
-    for t in tools or []:
-        f = t.get("function", t)
-        schemas[f.get("name")] = (f.get("parameters") or {}).get("properties", {})
-    calls = []
-    for name, body in FUNC_RE.findall(text or ""):
-        name = name.strip()
-        props = schemas.get(name, {})
-        args = {}
-        for p, raw in PARAM_RE.findall(body):
-            p = p.strip()
-            typ = (props.get(p) or {}).get("type")
-            val = raw
-            if typ and typ != "string":
-                try:
-                    val = json.loads(raw)
-                except ValueError:
-                    val = raw
-            elif not typ and raw.strip()[:1] in "[{":
-                try:
-                    val = json.loads(raw)
-                except ValueError:
-                    pass
-            args[p] = val
-        calls.append({"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
-                      "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
-    return calls
+from engine.parsers import FUNC_RE, PARAM_RE, parse_xml as parse_tool_calls  # noqa: E402,F401  (kept under its old name)
 
 
 # ───────────────────────────── request handling ─────────────────────────────
@@ -304,6 +273,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "vision": ("loaded" if ENGINE.model is not None and "vision_tower" in ENGINE.model else "on demand")
                 if ENGINE.vision_allowed else False,
                 "vision_capable": bool(getattr(ENGINE, "vision_capable", False)),
+                "parsers": {"reasoning": ARGS.reasoning_parser, "tool_call": ARGS.tool_parser},
                 "busy": ENGINE.lock.locked(),
                 "progress": getattr(ENGINE, "progress", None),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
@@ -414,7 +384,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         rid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
-        markers = ENGINE.parser_markers() if hasattr(ENGINE, "parser_markers") else {}
+        from engine import parsers
+        markers, parse_calls = parsers.pick(
+            ARGS.reasoning_parser, ARGS.tool_parser,
+            ENGINE.parser_markers() if hasattr(ENGINE, "parser_markers") else {},
+            ENGINE.parse_tool_calls if hasattr(ENGINE, "parse_tool_calls") else parse_tool_calls)
         parser = OutputParser(thinking_open, bool(tools), **markers)
 
         def chunk(delta, finish=None, usage=None):
@@ -478,8 +452,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 return self._error(500, str(e), "server_error")
 
-        parse = ENGINE.parse_tool_calls if hasattr(ENGINE, "parse_tool_calls") else parse_tool_calls
-        calls = parse(parser.tool_text, tools) if parser.tool_text else []
+        calls = parse_calls(parser.tool_text, tools) if parser.tool_text else []
         finish = "tool_calls" if calls else ("length" if stats.get("finish_reason") == "length" else "stop")
         usage = {"prompt_tokens": stats.get("prompt_tokens", len(ids)),
                  "completion_tokens": stats.get("completion_tokens", 0),
@@ -584,6 +557,10 @@ def main():
     ap.add_argument("--no-vision", action="store_true")
     ap.add_argument("--log-level", choices=("error", "warning", "info", "debug", "trace"), default="info",
                     help="what the engine writes to its log (each line is tagged with a group)")
+    ap.add_argument("--reasoning-parser", default="auto", metavar="auto|think|none|tags:<close>",
+                    help="where the reasoning ends in the output (auto = the model family's own)")
+    ap.add_argument("--tool-parser", default="auto", choices=("auto", "qwen_xml", "json", "mlx-lm", "none"),
+                    help="the tool-call format to read from the output (auto = the model family's own)")
     ap.add_argument("--images", choices=("on", "off"), default="off",
                     help="serve /v1/images/generations through mflux (./llm setup --images installs it)")
     ap.add_argument("--fallback-model", choices=("on", "off"), default="on",
@@ -612,6 +589,11 @@ def main():
     ap.add_argument("--max-pixels", type=int, default=1024 * 1024)
     ap.add_argument("--api-key", default=os.environ.get("ENGINE_API_KEY", ""))
     ARGS = ap.parse_args()
+    from engine import parsers
+    try:
+        parsers.validate(ARGS.reasoning_parser, ARGS.tool_parser)
+    except ValueError as e:
+        ap.error(str(e))
     ARGS.name = ARGS.name or os.path.basename(ARGS.model.rstrip("/")).lower()
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
