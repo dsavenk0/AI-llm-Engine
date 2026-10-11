@@ -12,6 +12,7 @@ import copy
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -107,12 +108,21 @@ def run_tests(cwd, targets, patterns, timeout):
     cmd = [sys.executable, "-B", "-m", "unittest", "-q", *targets]
     for p in patterns:
         cmd += ["-k", p]
+    # its own process group: tests that start helper programs (a fake MCP server…) leave them behind when a
+    # mutant makes the run hang, and their open pipes would keep us waiting past the timeout
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True,
+                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", LLM_HOME=cwd))
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", LLM_HOME=cwd))
+        proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         return "timeout"                       # a mutant that hangs is noticed too
-    return "pass" if p.returncode == 0 else "fail"
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return "pass" if proc.returncode == 0 else "fail"
 
 
 def main(argv):

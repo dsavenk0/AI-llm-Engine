@@ -110,5 +110,33 @@ class TestEndToEndWithTheOutputParser(unittest.TestCase):
         self.assertEqual(json.loads(parsers.parse_xml(text, typed)[0]["function"]["arguments"])["a"], 1)
 
 
+    def test_call_ids_arguments_and_untyped_values(self):
+        import re
+        text = ("<tool_call><function=f><parameter=s>привет</parameter><parameter=n>7</parameter>"
+                "<parameter=l>[1, 2]</parameter><parameter=o>{bad</parameter><parameter=e></parameter></function>"
+                "</tool_call>")
+        tools = [{"function": {"name": "f", "parameters": {"properties": {"s": {"type": "string"},
+                                                                          "n": {"type": "integer"}}}}}]
+        call = parsers.parse_xml(text, tools)[0]
+        self.assertRegex(call["id"], r"^call_[0-9a-f]{24}$")
+        self.assertEqual(call["type"], "function")
+        raw = call["function"]["arguments"]
+        self.assertIn("привет", raw)                                   # not \u-escaped
+        args = json.loads(raw)
+        self.assertEqual(args, {"s": "привет", "n": 7, "l": [1, 2], "o": "{bad", "e": ""})
+        # a "string" typed value that looks like JSON stays text
+        text2 = "<tool_call><function=f><parameter=s>[1]</parameter></function></tool_call>"
+        self.assertEqual(json.loads(parsers.parse_xml(text2, tools)[0]["function"]["arguments"]), {"s": "[1]"})
+
+    def test_json_calls_need_a_string_name(self):
+        for obj in ({"name": 5, "arguments": {}}, {"arguments": {}}, [1, "x"], {"name": None}):
+            text = "<tool_call>" + json.dumps(obj) + "</tool_call>"
+            self.assertEqual(parsers.parse_json(text, None), [], obj)
+        ok = parsers.parse_json('<tool_call>{"name": "f", "parameters": {"a": 1}}</tool_call>', None)
+        self.assertEqual(json.loads(ok[0]["function"]["arguments"]), {"a": 1})
+        weird = parsers.parse_json('<tool_call>{"name": "f", "arguments": "not json"}</tool_call>', None)
+        self.assertEqual(json.loads(weird[0]["function"]["arguments"]), {"input": "not json"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -251,6 +251,49 @@ class TestConfigShapes(unittest.TestCase):
         self.assertIsNone(mcp._Http._parse("{broken", "application/json", 1))
 
 
+class TestConfigLookupAndDescribe(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.home, self.root = tempfile.mkdtemp(), tempfile.mkdtemp()
+        p = mock.patch.dict(os.environ, {"HOME": self.home})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def write(self, base, servers):
+        os.makedirs(os.path.join(base, ".llm"), exist_ok=True)
+        path = os.path.join(base, ".llm", "mcp.json")
+        with open(path, "w") as f:
+            json.dump({"servers": servers}, f)
+        return path
+
+    def test_the_workspace_config_wins_over_the_home_one_and_a_missing_one_has_a_default_path(self):
+        self.assertEqual(mcp.config_path(self.root), os.path.join(self.root, ".llm", "mcp.json"))
+        home_cfg = self.write(self.home, {"h": {"url": "http://h"}})
+        self.assertEqual(mcp.config_path(self.root), home_cfg)
+        ws_cfg = self.write(self.root, {"w": {"url": "http://w"}})
+        self.assertEqual(mcp.config_path(self.root), ws_cfg)
+        self.assertEqual(list(mcp.load_config(self.root)), ["w"])
+
+    def test_describe_names_what_would_start_or_be_contacted_and_skips_what_is_off(self):
+        self.write(self.root, {
+            "web": {"url": "https://example.com/mcp", "headers": {"K": "${MY_KEY}"}},
+            "local": {"command": "npx", "args": ["-y", "srv", "."], "env": {"T": "${TOK}"}},
+            "off": {"command": "rm", "enabled": False},
+            "bare": {}})
+        lines = mcp.describe(self.root)
+        self.assertEqual(len(lines), 3)
+        self.assertIn("web: connects to https://example.com/mcp — uses $MY_KEY", lines)
+        self.assertIn("local: runs  npx -y srv . — uses $TOK", lines)
+        self.assertIn("bare: (incomplete)", lines)
+        self.assertFalse(any(l.startswith("off") for l in lines))
+
+    def test_expand_walks_lists_and_dicts_and_leaves_other_values_alone(self):
+        os.environ["MCP_T"] = "x"
+        self.addCleanup(os.environ.pop, "MCP_T", None)
+        self.assertEqual(mcp._expand({"a": ["${MCP_T}-1", 5, None], "b": {"c": "${NOPE_UNSET}"}}),
+                         {"a": ["x-1", 5, None], "b": {"c": ""}})
+
+
 class TestHttp(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

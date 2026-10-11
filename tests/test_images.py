@@ -44,6 +44,85 @@ def fake_tool(directory, fail=False):
     return path
 
 
+class TestLimits(unittest.TestCase):
+    def cmd(self, **kw):
+        return images.command("/bin/t", "x", "/tmp/o.png", **kw)
+
+    def test_size_edges_and_rounding(self):
+        self.assertEqual(images.parse_size("256x256"), (256, 256))
+        self.assertEqual(images.parse_size("1536x1536"), (1536, 1536))
+        self.assertEqual(images.parse_size("1000x777"), (992, 768))        # down to a multiple of 16
+        self.assertEqual(images.parse_size(None), (768, 768))
+        for bad in ("255x512", "512x255", "1537x512", "512x1537", "0x0", "512"):
+            with self.assertRaises(images.ImageError, msg=bad):
+                images.parse_size(bad)
+
+    def test_step_and_quantize_edges(self):
+        for steps in (1, 100):
+            self.assertEqual(self.cmd(steps=steps)[self.cmd(steps=steps).index("--steps") + 1], str(steps))
+        for steps in (0, 101, -1):
+            with self.assertRaises(images.ImageError, msg=steps):
+                self.cmd(steps=steps)
+        for q in (3, 4, 5, 6, 8):
+            c = self.cmd(quantize=q)
+            self.assertEqual(c[-2:], ["-q", str(q)])
+        for q in (1, 2, 7, 9):
+            with self.assertRaises(images.ImageError, msg=q):
+                self.cmd(quantize=q)
+        self.assertNotIn("-q", self.cmd(quantize=0))
+        self.assertEqual(images.command("/bin/t", "x" * 4000, "/o")[0], "/bin/t")    # 4000 is allowed
+
+    def test_the_tool_is_found_in_the_data_folder_the_environment_or_on_the_path(self):
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        env = {k: v for k, v in os.environ.items() if k != "LLM_IMAGES_BIN"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            os.environ["PATH"] = ""
+            self.assertIsNone(images.tool_path(d))
+            os.makedirs(os.path.join(d, ".venv-images", "bin"))
+            tool = os.path.join(d, ".venv-images", "bin", "mflux-generate")
+            with open(tool, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(tool, 0o755)
+            self.assertEqual(images.tool_path(d), tool)
+            bin2 = tempfile.mkdtemp()
+            on_path = os.path.join(bin2, "mflux-generate")
+            with open(on_path, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(on_path, 0o755)
+            os.environ["PATH"] = bin2
+            self.assertEqual(images.tool_path(None), on_path)
+            os.environ["LLM_IMAGES_BIN"] = "/no/such/tool"
+            self.assertIsNone(images.tool_path(d))                      # an explicit choice is not second-guessed
+
+    def test_failures_report_the_last_lines_and_the_timeout_default_is_half_an_hour(self):
+        import inspect
+        self.assertEqual(inspect.signature(images.generate).parameters["timeout"].default, 1800)
+        d = tempfile.mkdtemp()
+        tool = os.path.join(d, "bad")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\nfor i in 1 2 3 4 5; do echo line$i 1>&2; done\necho " + "z" * 600 + " 1>&2\nexit 3\n")
+        os.chmod(tool, 0o755)
+        from unittest import mock
+        with mock.patch.object(images, "tool_path", return_value=tool):
+            with self.assertRaises(images.ImageError) as ctx:
+                images.generate("x")
+        msg = str(ctx.exception)
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertTrue(msg.startswith("mflux failed: "))
+        self.assertNotIn("line1", msg)                                  # only the last three lines
+        self.assertIn("line5", msg)
+        self.assertLessEqual(len(msg), len("mflux failed: ") + 400)
+        slow = os.path.join(d, "slow")
+        with open(slow, "w") as f:
+            f.write("#!/bin/sh\nsleep 5\n")
+        os.chmod(slow, 0o755)
+        with mock.patch.object(images, "tool_path", return_value=slow):
+            with self.assertRaises(images.ImageError) as ctx:
+                images.generate("x", timeout=1)
+        self.assertEqual((ctx.exception.status, str(ctx.exception)), (500, "no image within 1 s"))
+
+
 class TestCommand(unittest.TestCase):
     def test_arguments(self):
         cmd = images.command("/bin/t", "a red fox", "/tmp/o.png", model="z-image-turbo", steps=6, size="1024x768", seed=7)
