@@ -157,5 +157,12 @@
   "Web search and page reading: {v}": "Поиск в интернете и чтение страниц: {v}",
   "Allow tools of the MCP server “{s}” for this session?": "Разрешить инструменты MCP-сервера «{s}» на эту сессию?",
   "Added to {p}": "Добавлено в {p}",
-  "No MCP servers configured — /mcp add context7": "MCP-серверы не настроены — /mcp add context7"
+  "No MCP servers configured — /mcp add context7": "MCP-серверы не настроены — /mcp add context7",
+  "No test command found — give one: /fix-tests <command>, or put it in .llm/test_cmd": "Команда тестов не найдена — укажите: /fix-tests <команда> или положите её в .llm/test_cmd",
+  "Run tests with: {cmd}?": "Запустить тесты командой: {cmd}?",
+  "✓ Tests pass.": "✓ Тесты проходят.",
+  "(after {n} fix rounds)": "(после {n} раундов правок)",
+  "✗ Tests fail (round {n}/{m}).": "✗ Тесты падают (раунд {n}/{m}).",
+  "Out of rounds — tests still failing.": "Раунды закончились — тесты всё ещё падают.",
+  "The same failure after two attempts — stopping; the edits are not helping.": "Та же ошибка после двух попыток — останавливаюсь, правки не помогают."
 }

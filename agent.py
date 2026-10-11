@@ -9,7 +9,7 @@ commands are shown (with a diff) and need confirmation unless /auto is on.
 Hard-to-reverse or outward-facing commands (git push, rm -rf, sudo, ...) always
 ask, even with /auto on — see DANGEROUS_PATTERNS.
 Commands: /auto  /clear  /think on|off  /web on|off  /mcp [on|off|add <preset>]  /compact
-          /memory  /remember <note>  /exit
+          /fix-tests [command]  /memory  /remember <note>  /exit
 
 Long sessions are compacted automatically before they fill the context window; standing
 project instructions are read from .llm/memory.md, AGENTS.md or CLAUDE.md (harness/).
@@ -340,6 +340,36 @@ class Agent:
         self.prompt_tokens = 0
         print(DIM(T("— compacted: {a} → {b} messages").format(a=before, b=len(self.messages))))
 
+    def fix_tests(self, command=None, max_rounds=5):
+        """Run the tests, hand the model only what failed, let it edit (each edit still confirmed),
+        re-run — until green, out of rounds, or two attempts leave the failure unchanged."""
+        from harness import fixtests
+        command = command or fixtests.detect_command(self.root)
+        if not command:
+            print(Y(T("No test command found — give one: /fix-tests <command>, or put it in .llm/test_cmd")))
+            return False
+        if not self.confirm(T("Run tests with: {cmd}?").format(cmd=command)):
+            return False
+        last, same = None, 0
+        for n in range(1, max_rounds + 1):
+            print(CY("$ " + command))
+            code, out = fixtests.run(command, self.root)
+            if code == 0:
+                print(G(T("✓ Tests pass.")) + (DIM(" " + T("(after {n} fix rounds)").format(n=n - 1)) if n > 1 else ""))
+                return True
+            excerpt = fixtests.failures(out)
+            sig = fixtests.signature(excerpt)
+            same = same + 1 if sig == last else 0
+            print(Y(T("✗ Tests fail (round {n}/{m}).").format(n=n, m=max_rounds)))
+            print(DIM(excerpt[-1500:]))
+            if same >= 2:
+                print(Y(T("The same failure after two attempts — stopping; the edits are not helping.")))
+                return False
+            last = sig
+            self.turn(fixtests.prompt(command, excerpt, n, previous=n > 1))
+        print(Y(T("Out of rounds — tests still failing.")))
+        return False
+
     def turn(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
         for _ in range(MAX_STEPS):
@@ -361,7 +391,7 @@ class Agent:
         print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
 
     def repl(self):
-        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /compact  /memory  /remember  /exit"))
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /fix-tests  /compact  /memory  /remember  /exit"))
         while True:
             mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
             try:
@@ -380,6 +410,12 @@ class Agent:
             if line == "/clear":
                 self.messages = self.messages[:1]
                 print(DIM(T("History cleared.")))
+                continue
+            if line.startswith("/fix-tests"):
+                try:
+                    self.fix_tests(line[len("/fix-tests"):].strip() or None)
+                except KeyboardInterrupt:
+                    print(Y("\n[" + T("interrupted") + "]"))
                 continue
             if line.startswith("/web"):
                 self.set_web(not line.endswith("off"))
