@@ -81,7 +81,7 @@
       copy_config: "Copy Configuration",
       copy_url: "Copy Base URL",
 
-      gallery_kicker: "// SECTION 9 // NATIVE APP SCREENSHOTS",
+      gallery_kicker: "// NATIVE APP SCREENSHOTS",
       gallery_headline: "Built for macOS. Inside and out.",
       gallery_sub: "High-resolution captures of LLMBar running on macOS Sonoma & Sequoia. Cyberpunk HUD styling, real-time memory telemetry, and instant model orchestration.",
       shot_1_badge: "ENGINE TAB · 35 TOK/S",
@@ -109,6 +109,12 @@
       feat5_desc: "Computes safe context length dynamically. Caps prefill chunk sizes (1024 → 256 → 128) and enforces an 88% system memory ceiling so other apps keep running smoothly.",
       feat6_title: "15-Minute Zero-Footprint Sleep",
       feat6_desc: "After 15 minutes of idle time, the engine unloads model weights and returns ~7.6 GB of unified memory back to macOS. Wakes up in approximately 2 seconds on the next incoming request.",
+      feat7_title: "1.75-bit Ternary on One Metal Kernel",
+      feat7_desc: "PTQ1_0, TQ1_G128 and JANG-packed ternary bundles stay packed in memory and run on a lookup-table Metal kernel. A 27B model fits in ~6 GB; everything else MLX goes through the optional mlx-lm backend.",
+      feat8_title: "A Native Code Editor, On Demand",
+      feat8_desc: "A separate Swift app — never loaded until you open it: chat-first and editor layouts, an agent that asks before it edits, git and GitHub, a branch menu, terminal, problems, a preview pane and dictation. Dark and light themes.",
+      feat9_title: "Optional Modules, Off by Default",
+      feat9_desc: "ModelScope as a second model source, image generation through mflux, another OpenAI-compatible server as the assistant's model, proxy and CA settings, leveled logs with groups. None of it runs until you ask.",
 
       perf_kicker: "// VERIFIED BENCHMARKS",
       perf_headline: "Real numbers. No cherry-picking.",
@@ -244,7 +250,7 @@
       copy_config: "Скопировать конфиг",
       copy_url: "Скопировать URL сервера",
 
-      gallery_kicker: "// РАЗДЕЛ 9 // СКРИНШОТЫ ПРИЛОЖЕНИЯ",
+      gallery_kicker: "// СКРИНШОТЫ ПРИЛОЖЕНИЯ",
       gallery_headline: "Создано для macOS. Внутри и снаружи.",
       gallery_sub: "Скриншоты LLMBar в высоком разрешении на macOS Sonoma и Sequoia. Стиль Cyberpunk HUD, детальная телеметрия памяти и управление моделями.",
       shot_1_badge: "ВКЛАДКА ДВИЖОК · 35 TOK/S",
@@ -272,6 +278,12 @@
       feat5_desc: "Динамически вычисляет безопасный размер контекста. Уменьшает чанки префилла (1024 → 256 → 128) и удерживает память ниже 88%, предотвращая блокировку других приложений.",
       feat6_title: "15-минутный авто-сон",
       feat6_desc: "После 15 минут простоя движок выгружает веса и возвращает ~7.6 GB памяти macOS. Просыпается всего за 2 секунды при новом запросе.",
+      feat7_title: "Тернарные 1.75 бит на одном Metal-ядре",
+      feat7_desc: "Бандлы PTQ1_0, TQ1_G128 и JANG packed хранятся в памяти упакованными и считаются Metal-ядром с таблицами. Модель на 27B помещается в ~6 ГБ; остальное из MLX идёт через необязательный бэкенд mlx-lm.",
+      feat8_title: "Нативный редактор кода — по требованию",
+      feat8_desc: "Отдельное Swift-приложение, которое не загружается, пока вы его не открыли: чат-вид и вид редактора, агент, который спрашивает перед правкой, git и GitHub, меню веток, терминал, проблемы, панель предпросмотра и диктовка. Тёмная и светлая темы.",
+      feat9_title: "Необязательные модули — выключены по умолчанию",
+      feat9_desc: "ModelScope как второй источник моделей, генерация изображений через mflux, другой OpenAI-совместимый сервер как модель ассистента, настройки прокси и CA, журнал с уровнями и группами. Ничего не работает, пока вы не попросите.",
 
       perf_kicker: "// ВЕРИФИЦИРОВАННЫЕ ЗАМЕРЫ",
       perf_headline: "Реальные цифры без прикрас.",

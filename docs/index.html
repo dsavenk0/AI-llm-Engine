@@ -94,7 +94,7 @@
       <div class="apple-container hero-inner">
         <!-- High-tech Chip Eyebrow -->
         <div class="cyber-eyebrow">
-          <span class="cyber-chip-tag">// SECTION 9</span>
+          <span class="cyber-chip-tag">// MLX</span>
           <span class="cyber-chip-text" data-i18n="hero_eyebrow">Apple Silicon M1–M5 Native · Hadamard Ternary · HUD Telemetry</span>
           <span class="cyber-chip-pulse"></span>
         </div>
@@ -529,7 +529,7 @@ Streaming: Enabled</code></pre>
     <section id="screenshots" class="apple-section gallery-section">
       <div class="apple-container">
         <div class="section-header text-center">
-          <span class="cyber-kicker" data-i18n="gallery_kicker">// SECTION 9 // NATIVE APP SCREENSHOTS</span>
+          <span class="cyber-kicker" data-i18n="gallery_kicker">// NATIVE APP SCREENSHOTS</span>
           <h2 class="apple-section-headline" data-i18n="gallery_headline">Built for macOS. Inside and out.</h2>
           <p class="apple-section-subhead" data-i18n="gallery_sub">
             High-resolution captures of LLMBar running on macOS Sonoma &amp; Sequoia. Cyberpunk HUD styling, real-time memory telemetry, and instant model orchestration.
@@ -700,6 +700,60 @@ Streaming: Enabled</code></pre>
             </p>
             <div class="arch-code-snippet">
               <code>idle_timeout(15m) → free(7.6 GB) → wake(2.0s)</code>
+            </div>
+          </div>
+
+          <!-- Card 7: Formats -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 07 · FORMATS</span>
+              <span class="arch-pill-tag tag-phosphor">1.75 BIT</span>
+            </div>
+            <div class="arch-icon-wrap icon-phosphor">
+              <span class="arch-icon">🧩</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat7_title">1.75-bit Ternary on One Metal Kernel</h3>
+            <p class="arch-desc" data-i18n="feat7_desc">
+              PTQ1_0, TQ1_G128 and JANG-packed ternary bundles stay packed in memory and run on a lookup-table Metal kernel. A 27B model fits in ~6 GB; everything else MLX goes through the optional mlx-lm backend.
+            </p>
+            <div class="arch-code-snippet">
+              <code>route: native | 1.75-bit | mlx-lm</code>
+            </div>
+          </div>
+
+          <!-- Card 8: Editor -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 08 · EDITOR</span>
+              <span class="arch-pill-tag tag-magenta">SWIFT</span>
+            </div>
+            <div class="arch-icon-wrap icon-magenta">
+              <span class="arch-icon">⌨</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat8_title">A Native Code Editor, On Demand</h3>
+            <p class="arch-desc" data-i18n="feat8_desc">
+              A separate Swift app — never loaded until you open it: chat-first and editor layouts, an agent that asks before it edits, git and GitHub, a branch menu, terminal, problems, a preview pane and dictation. Dark and light themes.
+            </p>
+            <div class="arch-code-snippet">
+              <code>LLMBar </> → new window → ui.server (localhost)</code>
+            </div>
+          </div>
+
+          <!-- Card 9: Modules -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 09 · MODULES</span>
+              <span class="arch-pill-tag tag-phosphor">OPTIONAL</span>
+            </div>
+            <div class="arch-icon-wrap icon-phosphor">
+              <span class="arch-icon">🔌</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat9_title">Optional Modules, Off by Default</h3>
+            <p class="arch-desc" data-i18n="feat9_desc">
+              ModelScope as a second model source, image generation through mflux, another OpenAI-compatible server as the assistant's model, proxy and CA settings, leveled logs with groups. None of it runs until you ask.
+            </p>
+            <div class="arch-code-snippet">
+              <code>./llm setup --images · --source modelscope</code>
             </div>
           </div>
         </div>

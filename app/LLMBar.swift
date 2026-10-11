@@ -303,6 +303,14 @@ final class EngineState: ObservableObject {
     var onAbout: (() -> Void)? = nil
 
     var running: Bool { health != nil }
+    /// "READING PROMPT 41%" while the engine prefills a long prompt (a 20k-token agent prompt takes minutes
+    /// on a big model) — so a quiet wait is visibly work, not a hang.
+    var prefillText: String? {
+        guard let p = health?["progress"] as? [String: Any], let done = p["done"] as? Int, let total = p["total"] as? Int,
+              total > 0 else { return nil }
+        let pct = min(100, done * 100 / total)
+        return L("READING PROMPT \(pct)% · \(done)/\(total) tok", "ЧИТАЮ ПРОМПТ \(pct)% · \(done)/\(total) ток")
+    }
     var sleeping: Bool { (health?["state"] as? String) == "sleeping" }
     var port: Int { config["port"] as? Int ?? 8090 }
     var apiURL: String { "http://localhost:\(port)/v1" }
@@ -1661,6 +1669,7 @@ struct ContentView: View {
                 Text((e.health?["model"] as? String) ?? e.models.first(where: { $0.path == e.modelPath })?.name ?? L("No model", "Нет модели"))
                     .font(.system(size: 13, weight: .semibold)).foregroundColor(HUD.text).lineLimit(1)
                 Text(e.busy.map { L("EXEC llm \($0)…", "ВЫПОЛНЯЮ llm \($0)…") }
+                     ?? e.prefillText
                      ?? (e.sleeping ? L("SLEEPING · wakes on request", "СПИТ · проснётся по запросу") : (e.running ? e.apiURL : L("OFFLINE", "НЕ В СЕТИ"))))
                     .font(HUD.mono(10)).tracking(0.6).foregroundColor(e.running ? HUD.cyan : HUD.dim)
             }
@@ -1835,7 +1844,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func refreshIcon() {
         let busy = (engine.health?["busy"] as? Bool) ?? false
         item.button?.title = engine.busy != nil ? "◌" : (engine.running ? (busy ? "◉" : "●") : "○")
-        item.button?.toolTip = engine.running ? "AI-llm-Engine · \(engine.apiURL)" : L("AI-llm-Engine · offline", "AI-llm-Engine · не в сети")
+        item.button?.toolTip = engine.running ? "AI-llm-Engine · \(engine.apiURL)" + (engine.prefillText.map { " · " + $0 } ?? "")
+                                              : L("AI-llm-Engine · offline", "AI-llm-Engine · не в сети")
     }
 
     func startFastSampling() {

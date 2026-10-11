@@ -82,7 +82,9 @@ thing you need already on the Mac is Python 3.10+.
 ```
 
 Downloads resume if interrupted, check free disk space first and skip weights the engine does not use. Set
-`HF_ENDPOINT` to use a mirror (e.g. `https://hf-mirror.com`) and `HF_TOKEN` for gated repos. Both JANG bundles and
+`HF_ENDPOINT` to use a mirror (e.g. `https://hf-mirror.com`) and `HF_TOKEN` for gated repos. **ModelScope** is a
+second source: `./llm search qwen3 --source modelscope` and `./llm pull ms:mlx-community/Qwen3-0.6B-4bit` (the same
+folder layout and checks; the Hugging Face token is never sent there; a switch in LLMBar's models tab). Both JANG bundles and
 regular mlx-community / lmstudio-community conversions of the dense Qwen3.5 family run on the engine, including tied
 embeddings and quantized gate projections.
 
@@ -174,6 +176,25 @@ OpenAI-compatible on `http://localhost:8090/v1`:
 
 Any `model` name is accepted, since the server hosts exactly one model.
 
+`POST /v1/chat/completions` also takes `repetition_penalty` (1.0 = off; 1.05–1.2 divides the score of tokens
+already written — `presence_penalty` alone cannot break a closed cycle), and an answer that visibly loops (the same
+chunk repeated back to back) is cut off by the engine itself instead of running to the token limit.
+
+Engine switches (also in LLMBar's settings): `--log-level error|warning|info|debug|trace` (every line is tagged
+`[request]`, `[memory]`, `[model]`, `[cache]`, `[sleep]`, `[quality]` or `[error]`), `--fallback-model off` (a request
+naming another model gets `404 model_not_found` instead of being answered by the loaded one),
+`--prefill-guard off` (skip the memory pre-check of long prompts). `GET /health` reports `progress` while a long
+prompt is prefilled — a 20k-token agent prompt takes minutes on a 27B model, and LLMBar shows it. Proxy settings
+(`proxy_http`, `proxy_https`, `no_proxy`, `ca_bundle`) become the variables `urllib` and `ssl` read, so downloads,
+hub search and the agent's web tools follow them; the engine on this Mac is never proxied.
+
+### Images from text (optional module)
+
+`./llm setup --images` installs [mflux](https://github.com/mflux-community/mflux) (FLUX and others on MLX) into its own
+environment, `./llm image "a lighthouse at dusk"` writes a PNG, and with the engine started `--images on` (or the
+*Image API* switch) `POST /v1/images/generations` answers with a base64 PNG. The language model is unloaded while an
+image is made, so the two never share memory.
+
 ### Coding agent
 
 `./llm agent [folder]` is a terminal coding agent that needs only this engine, with no VS Code and no Kilo. It can list,
@@ -187,11 +208,15 @@ Optional extras, each off until you ask (nothing is contacted or added to the pr
 |---|---|
 | `/web on` | `web_search` and `web_fetch`: search the internet (DuckDuckGo, no key; `LLM_SEARCH_URL` for a SearxNG) and read pages as clean text. Private/LAN addresses are refused; one question per session before anything goes out. |
 | `/mcp add context7`, `/mcp on` | MCP servers from `.llm/mcp.json` (stdio or HTTP): Context7 for current library docs, [Stitch](https://stitch.withgoogle.com/) for UI designs (`/mcp add stitch`, key in `STITCH_API_KEY`). Switch whole servers or single tools; `/mcp` shows status and what the tool definitions cost per request. |
-| `/workers on` | `delegate`: hand a self-contained sub-task to another model — any OpenAI-compatible endpoint (OpenAI, Anthropic, Gemini, a second local engine) or a CLI agent — configured in `.llm/workers.json`. Keys come from environment variables; the worker sees only the task and the files you approve, and each hand-off asks first. |
+| `/workers add openrouter`, `/workers on` | `delegate`: hand a self-contained sub-task to another model — any OpenAI-compatible endpoint (OpenAI, Anthropic, Gemini, a second local engine) or a CLI agent — configured in `.llm/workers.json`. Keys come from environment variables; the worker sees only the task and the files you approve, and each hand-off asks first. |
 | `/fix-tests [command]` | Runs the tests, gives the model only the failing tests with tracebacks, lets it edit (each edit still asks), re-runs. Stops on green, after 5 rounds, or when two attempts change nothing. |
 | `/memory`, `/remember <note>` | Standing project instructions from `.llm/memory.md`, `AGENTS.md` or `CLAUDE.md`. |
 | automatic | `.llm/map.md` — a model-free map of the project (rebuilt only when files change) and `.llm/session.md` — the agent's own notes, saved on exit and read at start, so a restart does not re-scan the project. `/map` and `/save` do it on demand. |
 | `/compact` | Long sessions are compacted automatically at 70% of the context window; this does it now. |
+
+A `.llm/mcp.json` or `.llm/workers.json` that came **with the project** is shown first (the programs it would run, the
+addresses, the environment variables that go into requests) and needs a yes — once per file content, even in `/auto`.
+Your own `~/.llm/` configs are not asked about.
 
 ### Code editor (optional, native)
 
@@ -207,7 +232,18 @@ separate Swift app that only runs while you use it, and its parts are independen
 - **Editor:** syntax colours and an outline for ~25 languages, line numbers, problems underlined as you type
   (built-in checks, plus `swiftc -parse`, `node --check`, `bash -n` … when installed), unsaved-changes protection.
 - **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click.
-- **Git:** changes, diff, commit selected files, push (always asks first; it uses your own git credentials).
+- **Git:** changes, diff, commit selected files, push (always asks first; it uses your own git credentials). The
+  branch menu in the toolbar switches or creates branches. **GitHub** (through the `gh` tool): sign-in check, open
+  pull requests, create a pull request or a repository — both ask first.
+- **Message box:** Enter sends, Shift+Enter starts a new line; attach files from anywhere (or paste/drag them), images
+  (switch *Images* on for a model with a vision tower — it restarts the model) and **dictate** with the microphone
+  button (the system speech recogniser, on-device when the language supports it).
+- **Model source:** the assistant can use another OpenAI-compatible server — another computer running this engine
+  (`https://…/v1`, an API key), OpenRouter — from the toolbar menu. The key is kept in the Keychain; messages and
+  attached files go to that server, which is why it asks.
+- **Preview** (opt-in module): a browser pane for the page you are editing — a project `.html` file reloads when you
+  save, or any `http://localhost:…` dev server.
+- **Look:** System / Light / Dark with a palette in the family of LLMBar's (opaque, for reading).
 
 The editor talks to a small local backend (`ui/server.py`, stdlib only, localhost + a random token, paths confined to
 the project) that the app starts and stops itself.
@@ -241,7 +277,9 @@ Nothing is tied to one editor. Run `./llm connect` and pick one, or name it dire
 ./llm connect opencode   # ~/.config/opencode/opencode.json
 ```
 
-Each one gets the engine URL, tool and image capabilities, and the context and output limits of the running engine.
+Each one gets the engine URL, tool and image capabilities, and the context and output limits of the running engine,
+and **every installed model** is registered (under the id it is served as and the older `org/name` id), so the
+client's model picker sees what is on disk; the entry is refreshed whenever the engine starts or a model is selected.
 A `.bak` copy is kept, and running it again only updates its own entry. Any other OpenAI-compatible client works with
 `http://localhost:8090/v1`.
 
@@ -291,9 +329,15 @@ subprocess so a hard crash at one size only rules out that size. `--apply` write
 
 ## Supported models
 
-Quantized MLX checkpoints of the `qwen3_5` dense family, with or without the JANG Hadamard contract and with or
-without the vision tower. MoE variants, video and other architectures are not supported (yet). `./llm models` shows
-compatibility for every model it finds.
+`./llm models` shows the route of every model it finds:
+
+| Route | What | State |
+|---|---|---|
+| native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
+| 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
+| mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
+
+Not supported: GGUF and non-MLX weights, 1-bit affine JANG.
 
 ## Layout
 
