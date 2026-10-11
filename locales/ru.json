@@ -208,5 +208,14 @@
   "Generating… (the first image downloads the model weights)": "Генерирую… (первый запуск скачивает веса модели)",
   "{p} came with this project. Turning it on would:": "{p} пришёл вместе с проектом. Включение сделает следующее:",
   "Trust this file and continue?": "Доверять этому файлу и продолжить?",
-  "Not enabled.": "Не включено."
+  "Not enabled.": "Не включено.",
+  "llama.cpp is already installed:": "llama.cpp уже установлен:",
+  "Installing llama.cpp (the runtime for GGUF models, one-time download)…": "Устанавливаю llama.cpp (среда для GGUF-моделей, разовая загрузка)…",
+  "Could not install llama.cpp:": "Не удалось установить llama.cpp:",
+  "llama.cpp installed:": "llama.cpp установлен:",
+  "This model runs on llama.cpp, which is not installed. Download it now (~40 MB)?": "Эта модель работает на llama.cpp, он не установлен. Скачать сейчас (~40 МБ)?",
+  "GGUF models need llama.cpp. Install it with:  ./llm setup --gguf": "Для GGUF-моделей нужен llama.cpp. Установите:  ./llm setup --gguf",
+  "Could not install llama.cpp. Try:  ./llm setup --gguf": "Не удалось установить llama.cpp. Попробуйте:  ./llm setup --gguf",
+  "GGUF quantization: {q}  (on offer: {all})": "Квантизация GGUF: {q}  (доступно: {all})",
+  "This model belongs to Ollama; remove it there:  ollama rm <name>": "Эта модель принадлежит Ollama; удалите её там:  ollama rm <имя>"
 }

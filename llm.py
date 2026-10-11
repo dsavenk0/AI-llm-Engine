@@ -40,7 +40,7 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import family  # noqa: E402  (stdlib only: no MLX needed to route a model)
+from engine import family, gguf  # noqa: E402  (stdlib only: no MLX needed to route a model)
 
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
@@ -275,11 +275,86 @@ def scan_models(cfg):
                         seen.add(key)
                         found.append(info)
                     dirnames[:] = []
+    found += scan_gguf(cfg)
     return sorted(found, key=lambda m: (not m["supported"], m["name"].lower()))
+
+
+_GGUF_CACHE = {}
+LMSTUDIO_DIRS = ("~/.lmstudio/models", "~/.cache/lm-studio/models")
+_SPLIT_RE = re.compile(r"-0*(\d+)-of-0*(\d+)\.gguf$", re.I)
+
+
+def inspect_gguf(path, name=None):
+    """A model entry (same shape as inspect_model's) for one GGUF file; None when it is not a readable GGUF."""
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+        if key not in _GGUF_CACHE:
+            _GGUF_CACHE[key] = gguf.read_header(path)
+        h = _GGUF_CACHE[key]
+    except (OSError, gguf.GGUFError):
+        return None
+    size = st.st_size
+    m = _SPLIT_RE.search(path)
+    if m:                                     # a split model: llama.cpp opens the other parts itself
+        pre, total = path[:m.start()], int(m.group(2))
+        parts = [f"{pre}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+        size = sum(os.path.getsize(p) for p in parts if os.path.exists(p))
+    tpl = h.get("chat_template") or ""
+    base = name or h["name"] or os.path.splitext(os.path.basename(path))[0]
+    if h["quant"] and h["quant"].lower() not in base.lower():
+        base = f"{base} {h['quant']}"
+    return {"path": path, "name": base, "size": size / 2**30, "format": f"GGUF {h['quant']}", "type": h["architecture"],
+            "route": "gguf", "vision": bool(gguf.projector_for(path)),
+            "thinking": "<think>" in tpl or "enable_thinking" in tpl,
+            "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
+            "efforts": [], "hadamard": False, "supported": True, "problems": [],
+            "context_length": h.get("context_length")}
+
+
+def scan_gguf(cfg):
+    """GGUF files in the model folders, LM Studio's folder and Ollama's store (read in place, never copied)."""
+    roots = [os.path.expanduser(d) for d in cfg["dirs"]] + [os.path.expanduser(d) for d in LMSTUDIO_DIRS]
+    found, seen = [], set()
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("blobs", "refs")]
+            if dirpath[len(root):].count(os.sep) > 6:
+                dirnames[:] = []
+                continue
+            for fn in sorted(filenames):
+                if not fn.lower().endswith(".gguf") or gguf.is_projector(fn):
+                    continue
+                sp = _SPLIT_RE.search(fn)
+                if sp and int(sp.group(1)) != 1:
+                    continue                      # only the first part names a split model
+                p = os.path.join(dirpath, fn)
+                real = os.path.realpath(p)
+                if real in seen:
+                    continue
+                seen.add(real)
+                info = inspect_gguf(p)
+                if info:
+                    found.append(info)
+    try:
+        for label, blob in gguf.ollama_models().items():
+            real = os.path.realpath(blob)
+            if real not in seen:
+                seen.add(real)
+                info = inspect_gguf(blob, name=f"{label} (Ollama)")
+                if info:
+                    found.append(info)
+    except OSError:
+        pass
+    return found
 
 
 def current_model(cfg):
     p = cfg["model"]
+    if p and os.path.isfile(p):
+        return inspect_gguf(p)
     return inspect_model(p) if p and os.path.isdir(p) else None
 
 
@@ -355,7 +430,9 @@ def choose_model(cfg, arg=None):
 
 def model_root(path):
     """The folder that holds a model on disk: models--org--name for the HF cache layout (path is a
-    snapshot inside it), else the model folder itself."""
+    snapshot inside it), else the model folder itself. A GGUF is a file: its own folder is not ours to remove."""
+    if os.path.isfile(path):
+        return path
     parts = path.rstrip(os.sep).split(os.sep)
     if "snapshots" in parts:
         return os.sep.join(parts[:parts.index("snapshots")])
@@ -365,6 +442,8 @@ def model_root(path):
 def delete_model(cfg, m, assume_yes=False):
     """Remove a downloaded model from disk. Refuses anything outside the configured model folders,
     and the model the running engine has loaded."""
+    if m.get("route") == "gguf" or os.path.isfile(m["path"]):
+        return delete_gguf(cfg, m, assume_yes)
     root = os.path.realpath(model_root(m["path"]))
     homes = [os.path.realpath(os.path.expanduser(d)) for d in cfg["dirs"]]
     if root in homes or not any(root.startswith(h + os.sep) for h in homes) or not os.path.isdir(root):
@@ -400,6 +479,50 @@ def set_vision(cfg, arg="on"):
     print(G(T("Images: {state} for {name}").format(state=T("on") if on else T("off"), name=m["name"])))
     if read_pid(ENGINE_PID):
         return restart(cfg, False)
+    return True
+
+
+def delete_gguf(cfg, m, assume_yes=False):
+    """Remove a GGUF file (and its projector / split parts) from a model folder or LM Studio's folder.
+    Ollama's store is not ours: it is shared by its own tool, so the person is pointed at `ollama rm`."""
+    path = os.path.realpath(m["path"])
+    ollama = os.path.realpath(os.path.expanduser("~/.ollama"))
+    if path.startswith(ollama + os.sep):
+        print(R(T("This model belongs to Ollama; remove it there:  ollama rm <name>")))
+        return False
+    homes = [os.path.realpath(os.path.expanduser(d)) for d in list(cfg["dirs"]) + list(LMSTUDIO_DIRS)]
+    if not any(path.startswith(h + os.sep) for h in homes) or not os.path.isfile(path):
+        print(R(T("Refusing to delete a folder outside the model directories:") + f" {path}"))
+        return False
+    if path == os.path.realpath(cfg["model"] or "") and read_pid(ENGINE_PID) and health(cfg):
+        print(R(T("This model is loaded. Stop the engine first (./llm stop).")))
+        return False
+    victims = [path]
+    sp = _SPLIT_RE.search(path)
+    if sp:
+        total, pre = int(sp.group(2)), path[:sp.start()]
+        victims = [f"{pre}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+    proj = gguf.projector_for(path)
+    d = os.path.dirname(path)
+    others = [n for n in os.listdir(d) if n.lower().endswith(".gguf") and not gguf.is_projector(n)
+              and os.path.join(d, n) not in victims]
+    if proj and not others:                                  # the projector belongs to this model alone
+        victims.append(proj)
+    victims = [v for v in victims if os.path.isfile(v)]
+    size = sum(os.path.getsize(v) for v in victims) / 2**30
+    if not assume_yes and not ask_yn(R(T("Delete {name} ({size:.1f} GB) from disk?").format(name=m["name"], size=size)), False):
+        return False
+    for v in victims:
+        os.remove(v)
+    try:
+        os.rmdir(d)                                          # a pulled repo's folder, once it is empty
+    except OSError:
+        pass
+    if cfg["model"] == m["path"]:
+        cfg["model"] = ""
+    cfg["models"].pop(m["path"], None)
+    save_cfg(cfg)
+    print(G(T("Deleted: {name} — {size:.1f} GB freed").format(name=m["name"], size=size)))
     return True
 
 
@@ -605,7 +728,44 @@ def image_cmd(cfg, args):
     return True
 
 
+def gguf_cmd(cfg, m):
+    """The engine for a GGUF model: engine.gguf_server in front of llama.cpp's llama-server."""
+    mc = mcfg(cfg, m["path"])
+    cmd = [VENV_PY, "-m", "engine.gguf_server", "--model", m["path"], "--name", served_name(m),
+           "--host", "0.0.0.0" if cfg["lan"] else "127.0.0.1", "--port", str(cfg["port"]),
+           "--context", str(mc["context"]), "--max-tokens", str(mc["max_output"]),
+           "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--inner-log", os.path.join(STATE, "llama-server.log"),
+           "--ram-gb", f"{RAM_GB:.1f}"]
+    srv = gguf.server_path(DATA)
+    if srv:
+        cmd += ["--llama-server", srv]
+    if cfg.get("log_level", "info") != "info":
+        cmd += ["--log-level", cfg["log_level"]]
+    if not cfg.get("fallback_model", True):
+        cmd += ["--fallback-model", "off"]
+    if not mc["vision"]:
+        cmd.append("--no-vision")
+    return cmd
+
+
+def setup_gguf():
+    """`./llm setup --gguf`: llama.cpp's own macOS build into the data folder (once, ~40 MB)."""
+    if gguf.server_path(DATA):
+        print(DIM(T("llama.cpp is already installed:") + f" {gguf.server_path(DATA)}"))
+        return True
+    print(T("Installing llama.cpp (the runtime for GGUF models, one-time download)…"))
+    try:
+        path = gguf.install(DATA, log=lambda s: print(DIM("  " + s)))
+    except (gguf.GGUFError, OSError, urllib.error.URLError, ValueError) as e:
+        print(R(T("Could not install llama.cpp:") + f" {e}"))
+        return False
+    print(G(T("llama.cpp installed:") + f" {path}"))
+    return True
+
+
 def engine_cmd(cfg, m):
+    if m.get("route") == "gguf":
+        return gguf_cmd(cfg, m)
     mc = mcfg(cfg, m["path"])
     cmd = [VENV_PY, "-m", "engine.server", "--model", m["path"], "--name", served_name(m),
            "--host", "0.0.0.0" if cfg["lan"] else "127.0.0.1", "--port", str(cfg["port"]),
@@ -644,6 +804,11 @@ def route_blocker(cfg, m, interactive):
     """None when the model's route is ready; else a message (after offering the fix, if interactive).
     Only the optional mlx-lm backend needs anything installed; PTQ1 is enabled by the model itself."""
     route = m.get("route", "native")
+    if route == "gguf" and not gguf.server_path(DATA):
+        # a GGUF model was chosen on purpose and llama.cpp is its only runtime: fetch it (printing what happens)
+        if interactive and not ask_yn(Y(T("This model runs on llama.cpp, which is not installed. Download it now (~40 MB)?")), True):
+            return T("GGUF models need llama.cpp. Install it with:  ./llm setup --gguf")
+        return None if setup_gguf() else T("Could not install llama.cpp. Try:  ./llm setup --gguf")
     if route == "mlxlm" and not mlxlm_installed():
         if interactive and ask_yn(Y(T("This model runs on the optional mlx-lm backend. Install it into .venv now?")), True):
             if setup(compat=True):
@@ -1153,9 +1318,11 @@ def hub_route(tags):
     """Engine route for a hub repo from its tags: native / ptq1 / mlxlm, or "none" for what no
     backend here can read (GGUF, non-MLX weights)."""
     t = set(tags or [])
-    if "gguf" in t or not (t & {"mlx", "safetensors"}):
-        return "none"
-    return engine_route({}, t)
+    if "mlx" in t or ("safetensors" in t and "gguf" not in t):
+        return engine_route({}, t)          # a repo that has MLX weights is pulled (and run) as MLX
+    if "gguf" in t:
+        return "gguf"                        # llama.cpp runs it
+    return "none"
 
 
 MS_ENDPOINT = os.environ.get("MODELSCOPE_ENDPOINT", "https://www.modelscope.cn").rstrip("/")
@@ -1217,6 +1384,13 @@ def install_state(repo, siblings=None):
     dest = _pull_dest(repo)
     if not os.path.isdir(dest):
         return "none"
+    if siblings and any(f["rfilename"].lower().endswith(".gguf") for f in siblings) and not any(
+            f["rfilename"].lower().endswith(".safetensors") for f in siblings):
+        files, _, _ = gguf.pick_files(siblings)
+        have = [f for f in files if os.path.isfile(os.path.join(dest, f["rfilename"]))
+                and (not f.get("size") or os.path.getsize(os.path.join(dest, f["rfilename"])) == f["size"])]
+        any_part = any(n.endswith(".part") for _, _, fs in os.walk(dest) for n in fs)
+        return "complete" if any(not gguf.is_projector(f["rfilename"]) for f in have) and not any_part else "partial"
     if siblings:
         for f in siblings:
             name = f["rfilename"]
@@ -1232,13 +1406,14 @@ def install_state(repo, siblings=None):
     return "complete" if has and not parts else "partial"
 
 
-def hf_search(query, limit=20, source="hf"):
-    """MLX models on the hub, most downloaded first, with size and engine compatibility.
-    source="modelscope" searches ModelScope instead (ids come back with the "ms:" prefix)."""
+def hf_search(query, limit=20, source="hf", fmt="mlx"):
+    """MLX (or, with fmt="gguf", GGUF) models on the hub, most downloaded first, with size and engine
+    compatibility. source="modelscope" searches ModelScope instead (ids come back with the "ms:" prefix)."""
     if source == "modelscope":
         return ms_search(query, limit)
     from concurrent.futures import ThreadPoolExecutor
-    found = _hf(f"/api/models?search={urllib.parse.quote(query)}&filter=mlx&sort=downloads&direction=-1&limit={limit}")
+    found = _hf(f"/api/models?search={urllib.parse.quote(query)}&filter={'gguf' if fmt == 'gguf' else 'mlx'}"
+                f"&sort=downloads&direction=-1&limit={limit}")
 
     def probe(repo):
         """(size in GB, storage format the engine can't read yet?, install state) for one repo."""
@@ -1333,7 +1508,9 @@ def _sha256(path):
 
 
 def hf_pull(repo, progress=False):
-    """Download a repo into ~/.cache/huggingface/hub/<org>/<name> with resume (Range) and atomic renames."""
+    """Download a repo into ~/.cache/huggingface/hub/<org>/<name> with resume (Range) and atomic renames.
+    A GGUF repo holds many quantizations: "org/name:Q4_K_M" takes one (default: the best-balanced on offer)."""
+    repo, quant = gguf.split_repo_quant(repo)
     source, rid = _split_source(repo)
     if source == "modelscope":
         try:
@@ -1343,6 +1520,13 @@ def hf_pull(repo, progress=False):
     else:
         info = _hf(f"/api/models/{repo}?blobs=true")
     files = [f for f in info.get("siblings", []) if not f["rfilename"].lower().endswith(PULL_SKIP)]
+    gg = [f for f in info.get("siblings", []) if f["rfilename"].lower().endswith(".gguf")]
+    if gg and not any(f["rfilename"].lower().endswith(".safetensors") for f in info.get("siblings", [])):
+        try:
+            files, chosen, offered = gguf.pick_files(gg, quant)
+        except gguf.GGUFError as e:
+            print(R(str(e))); return False
+        print(DIM(T("GGUF quantization: {q}  (on offer: {all})").format(q=chosen, all=", ".join(offered))), flush=True)
     total = sum(f.get("size") or 0 for f in files)
     dest = _pull_dest(repo)
     os.makedirs(dest, exist_ok=True)
@@ -1598,7 +1782,8 @@ def main():
     set_lang(cfg["lang"])
     os.environ.update(network_env(cfg))      # hub search, downloads and the agent's web tools follow the proxy
     actions = {
-        "setup": lambda: setup_images() if "--images" in sys.argv else setup(compat="--compat" in sys.argv),
+        "setup": lambda: setup_images() if "--images" in sys.argv else (
+            setup_gguf() if "--gguf" in sys.argv else setup(compat="--compat" in sys.argv)),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),
         "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),

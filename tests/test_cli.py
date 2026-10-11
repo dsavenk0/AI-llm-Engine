@@ -329,7 +329,8 @@ class TestModelRoutes(unittest.TestCase):
         self.assertEqual(h(["mlx", "safetensors", "qwen3_8b", "qwen3"]), "mlxlm")
         self.assertEqual(h(["mlx", "safetensors", "qwen3"]), "mlxlm")
         self.assertEqual(h(["mlx", "safetensors", "qwen3_5_moe"]), "mlxlm")
-        self.assertEqual(h(["gguf", "qwen3_5"]), "none")
+        self.assertEqual(h(["gguf", "qwen3_5"]), "gguf")                  # llama.cpp runs it
+        self.assertEqual(h(["mlx", "gguf", "qwen3_5"]), "native")         # MLX weights win when the repo has them
         self.assertEqual(h(["pytorch", "llama"]), "none")
 
 

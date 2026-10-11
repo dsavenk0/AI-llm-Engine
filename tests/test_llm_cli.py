@@ -622,9 +622,9 @@ class TestHub(State):
         self.assertEqual(res["org/glm-mlx"]["route"], "mlxlm")
         self.assertFalse(res["org/glm-mlx"]["local"])     # the folder exists but nothing is in it
         self.assertTrue(res["org/glm-mlx"]["partial"])
-        self.assertEqual(res["org/gguf-only"]["route"], "none")
-        self.assertEqual(res["org/mlx-and-gguf"]["route"], "none")      # a GGUF tag wins over mlx/qwen3_5
-        self.assertFalse(res["org/gguf-only"]["compatible"])
+        self.assertEqual(res["org/gguf-only"]["route"], "gguf")
+        self.assertEqual(res["org/mlx-and-gguf"]["route"], "native")    # MLX weights win when the repo has them
+        self.assertTrue(res["org/gguf-only"]["compatible"])
         self.assertTrue(res["org/packed-jang"]["compatible"])         # packed ternary runs on the ptq1 kernel
         self.assertEqual(res["org/packed-jang"]["route"], "ptq1")
         self.assertTrue(res["org/native-4bit"]["fits"])

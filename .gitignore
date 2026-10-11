@@ -19,3 +19,5 @@ dist/
 .LLMBar-rw.dmg
 docs/LLMBar-1.0.dmg
 LLMEditor.app/
+llama.cpp/
+.venv-images/
