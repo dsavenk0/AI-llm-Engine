@@ -59,12 +59,17 @@ class TestNewWindowRequest(unittest.TestCase):
         binary = TestEditorApp.binary if hasattr(TestEditorApp, "binary") else None
         if not binary or not os.path.exists(binary):
             self.skipTest("the editor binary is built by TestEditorApp")
-        proc = subprocess.Popen([binary, "--selftest-notify"], stdout=subprocess.PIPE, text=True)
+        import uuid
+        # a private notification name: the system-wide one would also open a window in the editor a person
+        # has running right now
+        name = "local.llm-engine.editor.test-" + uuid.uuid4().hex
+        proc = subprocess.Popen([binary, "--selftest-notify"], stdout=subprocess.PIPE, text=True,
+                                env=dict(os.environ, LLM_EDITOR_NEW_WINDOW_NAME=name))
         try:
             self.assertEqual(proc.stdout.readline().strip(), "READY")
             js = ('ObjC.import("Foundation");'
                   '$.NSDistributedNotificationCenter.defaultCenter.postNotificationNameObjectUserInfoDeliverImmediately('
-                  '"local.llm-engine.editor.new-window", $(), $({root: "/tmp/some-project"}), true);')
+                  '"' + name + '", $(), $({root: "/tmp/some-project"}), true);')
             subprocess.run(["osascript", "-l", "JavaScript", "-e", js], check=True, timeout=30)
             import select
             ready, _, _ = select.select([proc.stdout], [], [], 15)

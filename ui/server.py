@@ -47,8 +47,12 @@ class Project:
     def search(self, pattern, rel=".", glob=None, limit=200):
         """path:line: text for lines matching a regex (a plain substring when it is not a valid regex)."""
         import fnmatch
+        # a quantified group that itself holds a quantifier — (a+)+ , (.*)* , (\\w+\\s*)* — is the classic shape of
+        # catastrophic backtracking, and the pattern usually comes from a model: such a pattern is searched for
+        # literally instead of being able to hold this server's thread for minutes
+        nested = re.search(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})", pattern)
         try:
-            rx = re.compile(pattern)
+            rx = re.compile(re.escape(pattern) if nested else pattern)
         except re.error:
             rx = re.compile(re.escape(pattern))
         out = []
@@ -65,7 +69,7 @@ class Project:
                         continue
                     with open(full, encoding="utf-8") as fh:
                         for n, line in enumerate(fh, 1):
-                            if rx.search(line):
+                            if rx.search(line[:4000]):          # a minified file's one huge line is not scanned whole
                                 out.append(f"{self.rel(full)}:{n}: {line.rstrip()[:200]}")
                                 if len(out) >= limit:
                                     return out
@@ -216,13 +220,28 @@ class Project:
         return {"repo": True, "branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind,
                 "files": files, "remotes": remotes}
 
+    MAX_DIFF = 2_000_000
+
     def git_diff(self, rel):
         self.resolve(rel, must_exist=False)
         p = self.git("diff", "HEAD", "--", rel)
         if not p.stdout.strip():
             p = self.git("diff", "--no-index", "--", os.devnull, os.path.join(self.root, rel)) \
                 if os.path.exists(os.path.join(self.root, rel)) else p
-        return p.stdout
+        out = p.stdout
+        if len(out) > self.MAX_DIFF:
+            out = out[:self.MAX_DIFF] + f"\n… {len(out) - self.MAX_DIFF} more characters of diff not shown\n"
+        return out
+
+    @staticmethod
+    def _paths(paths):
+        """A list of non-empty path strings — a bare string would be walked character by character, and "." among
+        the characters of "a.txt" stages the whole repository."""
+        if paths is None:
+            return []
+        if not isinstance(paths, list) or not all(isinstance(x, str) and x for x in paths):
+            raise ValueError("paths must be a list of file paths")
+        return paths
 
     def git_commit(self, message, paths=None, all_changes=False):
         message = (message or "").strip()
@@ -230,6 +249,7 @@ class Project:
             raise ValueError("a commit message is required")
         if not self.is_repo():
             raise RuntimeError("not a git repository")
+        paths = self._paths(paths)
         only = []
         if all_changes:
             self.git("add", "-A", check=True)
@@ -244,6 +264,40 @@ class Project:
             raise RuntimeError("nothing staged to commit")
         self.git("commit", "-m", message, *only, check=True)
         return self.git("log", "-1", "--format=%h %s").stdout.strip()
+
+    def git_discard(self, paths=None, all_changes=False):
+        """Throw away uncommitted work: tracked files go back to HEAD (index and working tree), untracked ones
+        are deleted, files added to the index are removed. Returns the paths that were discarded.
+        Nothing here can be undone — the caller has already asked the person."""
+        st = self.git_status()
+        if not st.get("repo"):
+            raise RuntimeError("not a git repository")
+        changed = {f["path"]: f for f in st["files"]}
+        wanted = list(changed) if all_changes else self._paths(paths)
+        if not wanted:
+            raise ValueError("choose files to discard (or all changes)")
+        for rel in wanted:
+            self.resolve(rel, must_exist=False)
+            if rel not in changed:
+                raise ValueError(f"{rel} has no uncommitted changes")
+            if changed[rel]["status"] == "renamed":
+                raise ValueError(f"{rel} is a rename: undo it in the terminal (git restore --staged / git mv)")
+        restore, remove, untracked = [], [], []
+        for rel in wanted:
+            f = changed[rel]
+            if f["status"] == "untracked":
+                untracked.append(rel)
+            elif f["index"] == "A":
+                remove.append(rel)
+            else:
+                restore.append(rel)
+        if restore:
+            self.git("restore", "--source=HEAD", "--staged", "--worktree", "--", *restore, check=True)
+        if remove:
+            self.git("rm", "-f", "-q", "--", *remove, check=True)
+        if untracked:
+            self.git("clean", "-f", "-d", "-q", "--", *untracked, check=True)
+        return wanted
 
     def git_push(self, remote=None, branch=None):
         st = self.git_status()
@@ -541,7 +595,9 @@ class Handler(BaseHTTPRequestHandler):
                 with urllib.request.urlopen(ep.health_url, timeout=1.5) as r:
                     h = json.load(r)
                 eng = {"model": h.get("model"), "state": h.get("state"), "context": h.get("context"),
-                       "vision": bool(h.get("vision")), "vision_capable": bool(h.get("vision_capable"))}
+                       "vision": bool(h.get("vision")), "vision_capable": bool(h.get("vision_capable")),
+                       "efforts": [e for e in (h.get("efforts") or []) if isinstance(e, str)],
+                       "thinking_supported": h.get("thinking_supported", True) is not False}
         except (OSError, ValueError):
             pass
         return self._json(200, {"root": P.root, "name": os.path.basename(P.root), "engine": eng,
@@ -665,8 +721,11 @@ class Handler(BaseHTTPRequestHandler):
                 extra = memory.system_block(P.root)
             except Exception:
                 pass
+            effort = body.get("effort")
             finished = agentloop.run_agent(P, self.server.endpoint, msgs, emit, run, think=bool(body.get("think")),
-                                           auto_edit=bool(body.get("auto_edit")), system_extra=extra)
+                                           auto_edit=bool(body.get("auto_edit")), system_extra=extra,
+                                           web=bool(body.get("web")), mode=body.get("mode"),
+                                           effort=effort if re.fullmatch(r"[a-z]{2,10}", str(effort or "")) else None)
             if finished:
                 emit({"type": "done"})
         except RuntimeError as e:
@@ -710,11 +769,76 @@ class Handler(BaseHTTPRequestHandler):
         summary = P.git_commit(body.get("message"), body.get("paths"), bool(body.get("all")))
         return self._json(200, {"ok": True, "commit": summary, "git": P.git_status()})
 
+    def api_git_discard(self, P, q, body):
+        if body.get("confirm") is not True:           # destroys work that git cannot bring back
+            return self._error(400, "discarding changes needs an explicit confirmation")
+        done = P.git_discard(body.get("paths"), bool(body.get("all")))
+        return self._json(200, {"ok": True, "discarded": done, "git": P.git_status()})
+
+    # ---- Open VSX extensions (declarative parts only: themes, snippets; never runs their code)
+    def api_extensions_search(self, P, q, body):
+        from ui import extensions
+        query = (q.get("q") or "").strip()
+        if not query:
+            raise ValueError("a search text is required")
+        try:
+            return self._json(200, {"results": extensions.search(query)})
+        except extensions.ExtensionError as e:
+            return self._error(502, str(e))
+
+    def api_extensions_installed(self, P, q, body):
+        from ui import extensions
+        return self._json(200, {"extensions": extensions.installed()})
+
+    def api_extensions_install(self, P, q, body):
+        from ui import extensions
+        if body.get("confirm") is not True:           # downloads from the internet and writes to ~/.llm
+            return self._error(400, "installing an extension needs an explicit confirmation")
+        try:
+            m = extensions.install(body.get("namespace"), body.get("name"), body.get("version"))
+        except extensions.ExtensionError as e:
+            return self._error(502 if "open-vsx.org" in str(e) else 400, str(e))
+        return self._json(200, {"ok": True, "extension": m})
+
+    def api_extensions_remove(self, P, q, body):
+        from ui import extensions
+        try:
+            n = extensions.remove(body.get("id"))
+        except extensions.ExtensionError as e:
+            return self._error(400, str(e))
+        return self._json(200, {"ok": True, "removed": n})
+
+    def api_extensions_theme(self, P, q, body):
+        from ui import extensions
+        try:
+            return self._json(200, extensions.theme(q.get("id", ""), q.get("label", "")))
+        except extensions.ExtensionError as e:
+            return self._error(404, str(e))
+
+    def api_extensions_snippets(self, P, q, body):
+        from ui import extensions
+        return self._json(200, {"snippets": extensions.snippets(q.get("language", ""))})
+
     def api_git_push(self, P, q, body):
         if body.get("confirm") is not True:           # a push leaves the machine: never implicit
             return self._error(400, "push needs an explicit confirmation")
         out = P.git_push(body.get("remote"), body.get("branch"))
         return self._json(200, {"ok": True, "output": out, "git": P.git_status()})
+
+    def api_compact(self, P, q, body):
+        """{messages: [{role, content}…], keep_user_turns} → {summary, folded}: a note that replaces everything
+        before the last N user turns (the same two-stage logic the terminal agent uses, harness/compact.py)."""
+        from harness import compact
+        history = [{"role": m["role"], "content": str(m.get("content") or "")} for m in (body.get("messages") or [])
+                   if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+        keep = max(1, min(6, int(body.get("keep_user_turns") or compact.KEEP_USER_TURNS)))
+        msgs = [{"role": "system", "content": "-"}] + history
+        cut = compact._tail_start(msgs, keep)
+        if cut <= 1:
+            return self._json(200, {"summary": "", "folded": 0})
+        summary = agentloop.complete(self.server.endpoint, [
+            {"role": "user", "content": compact.SUMMARY_PROMPT + compact.transcript(msgs[1:cut])}], max_tokens=900)
+        return self._json(200, {"summary": summary, "folded": cut - 1})
 
     def api_chat(self, P, q, body):
         messages = body.get("messages") or []
