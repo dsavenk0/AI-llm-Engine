@@ -563,6 +563,160 @@ class TestPrefixStore(unittest.TestCase):
         self.assertIsNone(store.lookup(tokens + [1]))
 
 
+class TestPrefixStoreRules(unittest.TestCase):
+    """What is stored, when, and what is thrown out first."""
+
+    def store(self, max_bytes=1 << 30, **kw):
+        import tempfile
+        from engine.prefix_store import PrefixStore
+        return PrefixStore(tempfile.mkdtemp(), max_bytes, log=kw.pop("log", lambda *a: None), **kw)
+
+    def kv(self, n, offset=None, heads=1, dim=4):
+        import mlx.core as mx
+        from engine.model import KVCache
+        c = KVCache()
+        c.keys = mx.ones((1, heads, n, dim), mx.float16)
+        c.values = mx.ones((1, heads, n, dim), mx.float16)
+        c.offset = n if offset is None else offset
+        return c
+
+    def test_default_minimum_is_1024_tokens_and_the_boundary_is_inclusive(self):
+        st = self.store()
+        self.assertEqual(st.min_tokens, 1024)
+        st.save(list(range(1023)), [self.kv(1023)], [None])
+        self.assertEqual(st.entries, {})
+        st.save(list(range(1024)), [self.kv(1024)], [None])
+        self.assertEqual(len(st.entries), 1)
+        key = next(iter(st.entries))
+        self.assertEqual(len(key), 20)
+        self.assertTrue(all(ch in "0123456789abcdef" for ch in key))
+        self.assertEqual(st.entries[key]["n"], 1024)
+        self.assertEqual(st.total_bytes, 2 * 1 * 1 * 1024 * 4 * 2)          # K and V, float16
+
+    def test_a_disabled_budget_and_a_known_prefix_store_nothing(self):
+        off = self.store(max_bytes=0, min_tokens=4)
+        off.save([1, 2, 3, 4], [self.kv(4)], [None])
+        self.assertEqual(off.entries, {})
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4], [self.kv(4)], [None])
+        stamp = next(iter(st.entries.values()))["used"]
+        st.save([1, 2, 3, 4], [self.kv(4)], [None])
+        self.assertEqual(len(st.entries), 1)
+        self.assertEqual(next(iter(st.entries.values()))["used"], stamp)       # not rewritten
+
+    def test_an_incomplete_cache_is_not_stored(self):
+        import mlx.core as mx
+        from engine.model import KVCache
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4], [KVCache()], [None])                              # no keys yet
+        st.save([1, 2, 3, 4], [self.kv(4, offset=3)], [None])                   # shorter than the prompt
+        st.save([1, 2, 3, 4], [self.kv(4), self.kv(4)], [None, (None, mx.ones((2,)), 0)])   # an SSM layer without conv
+        st.save([1, 2, 3, 4], [self.kv(4), self.kv(4)], [None, (mx.ones((2,)), None, 0)])   # ... or without state
+        self.assertEqual(st.entries, {})
+        st.save([1, 2, 3, 4], [self.kv(4, offset=4)], [None])                   # exactly as long: fine
+        self.assertEqual(len(st.entries), 1)
+
+    def test_an_ssm_layer_is_stored_from_its_snapshot(self):
+        import mlx.core as mx
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4], [self.kv(4), self.kv(4)], [None, (mx.ones((3,)), mx.ones((5,)), 0)])
+        key = next(iter(st.entries))
+        names = set(mx.load(st._file(key)))
+        self.assertEqual(names, {"0.k", "0.v", "1.conv", "1.state"})
+
+    def test_what_does_not_fit_is_skipped_and_what_fits_exactly_is_kept(self):
+        one = 2 * 1 * 1 * 8 * 4 * 2                                            # bytes of an 8-token entry
+        st = self.store(max_bytes=one - 1, min_tokens=8)
+        st.save(list(range(8)), [self.kv(8)], [None])
+        self.assertEqual(st.entries, {})
+        st = self.store(max_bytes=one, min_tokens=8)
+        st.save(list(range(8)), [self.kv(8)], [None])
+        self.assertEqual(len(st.entries), 1)
+
+    def test_the_least_recently_used_entry_goes_first_and_only_when_needed(self):
+        one = 2 * 1 * 1 * 8 * 4 * 2
+        st = self.store(max_bytes=2 * one, min_tokens=8)
+        a, b, c = list(range(8)), list(range(100, 108)), list(range(200, 208))
+        st.save(a, [self.kv(8)], [None])
+        st.save(b, [self.kv(8)], [None])
+        self.assertEqual(len(st.entries), 2)                                   # exactly full: nothing evicted yet
+        st.entries[st._key(a)]["used"] -= 100                                  # a is the oldest
+        st.save(c, [self.kv(8)], [None])
+        self.assertTrue(st.has(b) and st.has(c) and not st.has(a))
+        self.assertFalse(os.path.exists(st._file(st._key(a))))
+        self.assertFalse(os.path.exists(st._file(st._key(a), "tokens.npy")))
+
+    def test_the_index_survives_a_restart_and_drops_rows_whose_files_vanished(self):
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4], [self.kv(4)], [None])
+        st.save([5, 6, 7, 8], [self.kv(4)], [None])
+        gone = st._key([5, 6, 7, 8])
+        os.remove(st._file(gone))
+        from engine.prefix_store import PrefixStore
+        again = PrefixStore(st.root, 1 << 30, min_tokens=4, log=lambda *a: None)
+        self.assertTrue(again.has([1, 2, 3, 4]))
+        self.assertFalse(again.has([5, 6, 7, 8]))
+        with open(os.path.join(st.root, "index.json"), "w") as f:
+            f.write("{broken")
+        self.assertEqual(PrefixStore(st.root, 1 << 30, log=lambda *a: None).entries, {})
+
+    def test_overlap_names_the_longest_shared_prefix_even_when_the_entry_is_not_a_prefix(self):
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4, 5, 6], [self.kv(6)], [None])
+        st.save([1, 2, 9, 9, 9, 9], [self.kv(6)], [None])
+        n, key = st.overlap([1, 2, 3, 4, 7, 7, 7])
+        self.assertEqual((n, key), (4, st._key([1, 2, 3, 4, 5, 6])))
+        self.assertEqual(st.overlap([9, 9, 9]), (0, None))
+        self.assertEqual(st.overlap([]), (0, None))
+        self.assertEqual(st.overlap([1, 2, 3, 4, 5, 6])[0], 6)                  # all of an entry
+
+    def test_lookup_wants_a_strictly_shorter_stored_prefix_and_takes_the_longest(self):
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4], [self.kv(4)], [None])
+        st.save([1, 2, 3, 4, 5, 6], [self.kv(6)], [None])
+        self.assertIsNone(st.lookup([1, 2, 3, 4]))
+        hit = st.lookup([1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual((hit[1], hit[2]), (6, [1, 2, 3, 4, 5, 6]))
+        self.assertEqual(st.lookup([1, 2, 3, 4, 5])[1], 4)
+
+    def test_discard_is_written_to_the_index_and_an_unknown_key_changes_nothing(self):
+        import json
+        st = self.store(min_tokens=4)
+        st.save([1, 2, 3, 4], [self.kv(4)], [None])
+        key = next(iter(st.entries))
+        index = os.path.join(st.root, "index.json")
+        with open(index) as f:
+            self.assertIn(key, json.load(f))
+        before = os.stat(index).st_mtime_ns
+        st.discard("not-a-key")
+        self.assertEqual(os.stat(index).st_mtime_ns, before)                   # nothing to forget, nothing rewritten
+        st.discard(key)
+        with open(index) as f:
+            self.assertEqual(json.load(f), {})                                 # the file, not just memory
+
+    def test_the_save_log_reports_size_and_time(self):
+        import re
+        logs = []
+        st = self.store(min_tokens=4, log=logs.append)
+        st.save([1, 2, 3, 4], [self.kv(4, heads=2, dim=2 ** 18)], [None])     # 2 x (2 x 4 x 262144 x 2 B) = 8 MB
+        self.assertEqual(len(logs), 1)
+        self.assertRegex(logs[0], r"^prefix cache: saved 4 tokens to SSD \(8 MB, [0-9]\.[0-9]s\)$")
+
+    def test_load_refreshes_the_use_time_and_reports(self):
+        import time
+        from engine.model import KVCache
+        logs = []
+        st = self.store(min_tokens=4, log=logs.append)
+        st.save([1, 2, 3, 4], [self.kv(4)], [None])
+        key = next(iter(st.entries))
+        st.entries[key]["used"] = 0
+        model = type("M", (), {"make_cache": lambda self: [KVCache()]})()
+        st.load(st.lookup([1, 2, 3, 4, 5]), model)
+        self.assertGreater(st.entries[key]["used"], time.time() - 60)
+        self.assertTrue(any(l.startswith("prefix cache: restored 4 tokens") for l in logs))
+        self.assertTrue(any(l.startswith("prefix cache: saved 4 tokens") for l in logs))
+
+
 if __name__ == "__main__":
     unittest.main()
 
