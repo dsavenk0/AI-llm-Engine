@@ -331,5 +331,31 @@ class TestOnTheRepository(unittest.TestCase):
         self.assertTrue(md and md[0]["kind"] == "heading")
 
 
+class TestPathologicalInput(unittest.TestCase):
+    """Inputs that made the markup highlighter quadratic (found by fuzzing every language)."""
+
+    def timed(self, text, language="html"):
+        import time
+        t = time.time()
+        C.highlight(text, language)
+        C.outline(text, language)
+        return time.time() - t
+
+    def test_a_base64_blob_in_html_is_linear(self):
+        self.assertLess(self.timed("<img src=\"data:image/png;base64," + "A" * 400_000 + "\">"), 2.0)
+        self.assertLess(self.timed("a" * 400_000), 2.0)
+        self.assertLess(self.timed("-" * 400_000, "xml"), 2.0)
+
+    def test_many_unclosed_tags_on_one_line_are_linear(self):
+        self.assertLess(self.timed("<a " * 100_000), 2.0)
+
+    def test_attributes_are_still_found(self):
+        spans = C.highlight('<div class="x" data-id=\'7\'>', "html")
+        kinds = [(k, '<div class="x" data-id=\'7\'>'[a:b]) for a, b, k in spans]
+        self.assertIn(("property", "class"), kinds)
+        self.assertIn(("property", "data-id"), kinds)
+        self.assertIn(("string", '"x"'), kinds)
+
+
 if __name__ == "__main__":
     unittest.main()

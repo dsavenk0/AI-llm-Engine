@@ -148,6 +148,98 @@ class TestSecurity(Base):
         self.assertEqual(self.call("GET", "/static/app.js", token=None)[0], 404)
 
 
+class TestReviewFixes(Base):
+    """Defects found reviewing the server: each of these used to be wrong."""
+
+    def test_symlinked_files_leaving_the_project_are_neither_searched_nor_listed(self):
+        outside = tempfile.mkdtemp()
+        with open(os.path.join(outside, "secret.txt"), "w") as f:
+            f.write("TOP-SECRET-TOKEN\n")
+        os.symlink(os.path.join(outside, "secret.txt"), os.path.join(self.root, "notes.txt"))
+        self.put("ok.txt", "TOP-SECRET-TOKEN lives here too\n")        # a real file in the project still matches
+        hits = self.call("GET", "/api/search?q=TOP-SECRET")[1]["hits"]
+        self.assertEqual([h["path"] for h in hits], ["ok.txt"])
+        self.assertNotIn("notes.txt", self.call("GET", "/api/files")[1]["files"])
+        # the agent's own listing and search go through the same project object
+        from ui import agentloop
+        tools = agentloop.Tools(Project(self.root), agentloop.Run(), lambda ev: None)
+        self.assertNotIn("notes.txt", tools.list_dir("."))
+        self.assertNotIn("notes.txt", tools.search("TOP-SECRET"))
+
+    def test_a_symlink_inside_the_project_is_still_fine(self):
+        self.put("real.txt", "inside\n")
+        os.symlink(os.path.join(self.root, "real.txt"), os.path.join(self.root, "alias.txt"))
+        self.assertIn("alias.txt", self.call("GET", "/api/files")[1]["files"])
+
+    def test_non_utf8_files_are_not_opened_as_text(self):
+        with open(os.path.join(self.root, "legacy.txt"), "wb") as f:
+            f.write("привет".encode("cp1251"))
+        code, r = self.call("GET", "/api/file?path=legacy.txt")
+        self.assertEqual(code, 200)
+        self.assertTrue(r.get("not_utf8"))
+        self.assertNotIn("text", r)                 # nothing the editor could save back with U+FFFD in it
+
+    def test_the_agent_does_not_edit_a_file_it_cannot_decode(self):
+        from ui import agentloop
+        with open(os.path.join(self.root, "legacy.txt"), "wb") as f:
+            f.write(b"caf\xe9 latte\n")
+        tools = agentloop.Tools(Project(self.root), agentloop.Run(), lambda ev: None, auto_edit=True)
+        out = tools.edit_file("legacy.txt", "latte", "mocha")
+        self.assertTrue(out.startswith("error:") and "UTF-8" in out, out)
+        with open(os.path.join(self.root, "legacy.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"caf\xe9 latte\n")
+
+    def test_saving_keeps_the_executable_bit_and_leaves_no_temp_file(self):
+        self.put("run.sh", "#!/bin/sh\necho 1\n")
+        os.chmod(os.path.join(self.root, "run.sh"), 0o755)
+        code, r = self.call("PUT", "/api/file", {"path": "run.sh", "text": "#!/bin/sh\necho 2\n"})
+        self.assertEqual(code, 200)
+        self.assertEqual(os.stat(os.path.join(self.root, "run.sh")).st_mode & 0o777, 0o755)
+        self.assertEqual([n for n in os.listdir(self.root) if n.endswith(".ui-tmp")], [])
+
+    def test_git_status_reads_cyrillic_and_awkward_names(self):
+        for name in ("заметки.txt", "a -> b.txt", 'quo"te.txt'):
+            self.put(name, "x\n")
+        paths = {f["path"] for f in self.call("GET", "/api/git/status")[1]["files"]}
+        self.assertEqual(paths, {"заметки.txt", "a -> b.txt", 'quo"te.txt'})
+
+    def test_a_rename_is_one_entry_with_the_new_name(self):
+        git(self.root, "mv", "README.md", "README2.md")
+        files = self.call("GET", "/api/git/status")[1]["files"]
+        self.assertEqual([f["path"] for f in files], ["README2.md"])
+        self.assertEqual(files[0]["status"], "renamed")
+
+    def test_committing_chosen_paths_leaves_other_staged_files_alone(self):
+        self.put("a.txt", "a")
+        self.put("b.txt", "b")
+        git(self.root, "add", "b.txt")                       # staged earlier, not part of this commit
+        code, r = self.call("POST", "/api/git/commit", {"message": "only a", "paths": ["a.txt"]})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(git(self.root, "show", "--name-only", "--format=", "HEAD").split(), ["a.txt"])
+        self.assertEqual(git(self.root, "diff", "--cached", "--name-only").split(), ["b.txt"])
+
+    def test_push_branch_is_a_name_not_an_option(self):
+        for bad in ("--force", "-f", "--delete", "has space", "a..b"):
+            with self.subTest(bad):
+                code, r = self.call("POST", "/api/git/push", {"confirm": True, "branch": bad})
+                self.assertEqual(code, 400, r)
+        self.assertEqual(git(self.remote, "branch", "--list").strip(), "")
+
+    def test_bad_requests_get_an_answer_not_a_dropped_connection(self):
+        # a body that parses but has the wrong shape used to raise out of the handler
+        code, r = self.call("POST", "/api/agent", {"messages": [{"role": "user"}]})
+        self.assertEqual(code, 400, r)
+        code, r = self.call("POST", "/api/chat", {"messages": ["not an object"]})
+        self.assertIn(code, (400, 500))
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=5)
+        conn.request("POST", "/api/analyze", body=b"{}", headers={"X-UI-Token": "tok123", "Content-Length": "-5",
+                                                                 "Content-Type": "application/json"})
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 400)
+        conn.close()
+
+
 class TestFiles(Base):
     def test_tree_orders_folders_first(self):
         entries = self.call("GET", "/api/tree")[1]["entries"]

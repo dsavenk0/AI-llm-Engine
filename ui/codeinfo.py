@@ -344,7 +344,9 @@ def _highlight_markup(text):
         spans.append((m.start(), m.end(), "comment"))
     for m in re.finditer(r"</?([A-Za-z][\w:-]*)", text):
         spans.append((m.start(1), m.end(1), "tag"))
-    for m in re.finditer(r'([\w:-]+)=("[^"]*"|\'[^\']*\')', text):
+    # (?<![\w:-]) starts a match only at the beginning of a word: without it a long run of word
+    # characters with no "=" — a base64 blob — was rescanned from every position, quadratically
+    for m in re.finditer(r'(?<![\w:-])([\w:-]+)=("[^"]*"|\'[^\']*\')', text):
         spans.append((m.start(1), m.end(1), "property"))
         spans.append((m.start(2), m.end(2), "string"))
     return sorted(spans)
@@ -525,9 +527,9 @@ def _outline_sections(text):
 def _outline_html(text):
     out = []
     for i, line in enumerate(text.split("\n"), 1):
-        for m in re.finditer(r"<(h[1-6])\b[^>]*>(.*?)</\1>", line, re.I):
+        for m in re.finditer(r"<(h[1-6])\b[^>]{0,300}>(.*?)</\1>", line, re.I):
             out.append(_sym("heading", re.sub(r"<[^>]+>", "", m.group(2)).strip(), i))
-        for m in re.finditer(r"<(\w+)\b[^>]*\bid=[\"']([^\"']+)[\"']", line):
+        for m in re.finditer(r"<(\w+)\b[^>]{0,300}?\bid=[\"']([^\"']+)[\"']", line):
             if not m.group(1).lower().startswith("h") or len(m.group(1)) != 2:
                 out.append(_sym("id", f"#{m.group(2)}", i))
         for m in re.finditer(r"<(script|style)\b", line, re.I):
