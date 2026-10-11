@@ -81,9 +81,12 @@ class OutputParser:
 
     THINK_END, TOOL = "</think>", "<tool_call>"
 
-    def __init__(self, thinking, tools_enabled):
-        self.mode = "reasoning" if thinking else "content"
-        self.tools_enabled = tools_enabled
+    def __init__(self, thinking, tools_enabled, think_end=None, tool_start=None, tool_end=None):
+        # a family's markers (GLM, Llama, Qwen2...) replace Qwen's; None = "this model has none"
+        self.THINK_END = think_end if think_end is not None else self.THINK_END
+        self.TOOL = tool_start if tool_start is not None else self.TOOL
+        self.mode = "reasoning" if thinking and self.THINK_END else "content"
+        self.tools_enabled = tools_enabled and bool(self.TOOL)
         self.buf = ""
         self.tool_text = None
         self.content_started = False
@@ -344,7 +347,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         rid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
-        parser = OutputParser(thinking_open, bool(tools))
+        markers = ENGINE.parser_markers() if hasattr(ENGINE, "parser_markers") else {}
+        parser = OutputParser(thinking_open, bool(tools), **markers)
 
         def chunk(delta, finish=None, usage=None):
             c = {"id": rid, "object": "chat.completion.chunk", "created": created, "model": ARGS.name,
@@ -407,7 +411,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 return self._error(500, str(e), "server_error")
 
-        calls = parse_tool_calls(parser.tool_text, tools) if parser.tool_text else []
+        parse = ENGINE.parse_tool_calls if hasattr(ENGINE, "parse_tool_calls") else parse_tool_calls
+        calls = parse(parser.tool_text, tools) if parser.tool_text else []
         finish = "tool_calls" if calls else ("length" if stats.get("finish_reason") == "length" else "stop")
         usage = {"prompt_tokens": stats.get("prompt_tokens", len(ids)),
                  "completion_tokens": stats.get("completion_tokens", 0),
@@ -504,6 +509,11 @@ def main():
                     help="reasoning mode when a request doesn't say: auto = whatever the model's own "
                          "chat template does (on for Bonsai-27B, off for the small Qwen3.5 models)")
     ap.add_argument("--effort", default="medium")
+    ap.add_argument("--backend", choices=("auto", "native", "mlxlm"), default="auto",
+                    help="auto: the native engine for Qwen3.5-hybrid bundles, the optional mlx-lm backend "
+                         "for every other MLX architecture")
+    ap.add_argument("--ptq1", choices=("on", "off"), default="off",
+                    help="experimental: run PTQ1_0 (1.75-bit ternary) bundles on the Metal lookup-table kernel")
     ap.add_argument("--no-vision", action="store_true")
     ap.add_argument("--no-speculative", action="store_true", help="disable prompt-lookup speculative decoding")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
@@ -529,17 +539,21 @@ def main():
     ARGS.name = ARGS.name or os.path.basename(ARGS.model.rstrip("/")).lower()
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from engine.compat import CompatEngine, pick_backend
     from engine.generate import Engine
-    init = lambda: Engine(ARGS.model, vision=not ARGS.no_vision, max_context=ARGS.context,
-                          max_tokens=ARGS.max_tokens, prefill_step=ARGS.prefill_step, max_pixels=ARGS.max_pixels,
-                          thinking={"auto": None, "on": True, "off": False}[ARGS.thinking], effort=ARGS.effort,
-                          speculative=not ARGS.no_speculative, mem_limit=ARGS.mem_limit,
-                          sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
-                                             "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty},
-                          draft_max=ARGS.draft_max, ngram_min=ARGS.ngram_min, cache_limit_mb=ARGS.cache_limit_mb,
-                          disk_cache_gb=ARGS.disk_cache_gb, disk_cache_dir=ARGS.disk_cache_dir,
-                          think_frac=ARGS.think_frac,
-                          log=log)
+    backend = pick_backend(ARGS.model, ARGS.backend)
+    Backend = Engine if backend == "native" else CompatEngine
+    log(f"backend: {'native engine' if backend == 'native' else 'mlx-lm'}")
+    init = lambda: Backend(ARGS.model, vision=not ARGS.no_vision, max_context=ARGS.context,
+                           max_tokens=ARGS.max_tokens, prefill_step=ARGS.prefill_step, max_pixels=ARGS.max_pixels,
+                           thinking={"auto": None, "on": True, "off": False}[ARGS.thinking], effort=ARGS.effort,
+                           speculative=not ARGS.no_speculative, mem_limit=ARGS.mem_limit,
+                           sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
+                                              "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty},
+                           draft_max=ARGS.draft_max, ngram_min=ARGS.ngram_min, cache_limit_mb=ARGS.cache_limit_mb,
+                           disk_cache_gb=ARGS.disk_cache_gb, disk_cache_dir=ARGS.disk_cache_dir,
+                           think_frac=ARGS.think_frac, ptq1=ARGS.ptq1 == "on",
+                           log=log)
     threading.Thread(target=worker, args=(init,), daemon=True).start()
     READY.wait()
 
