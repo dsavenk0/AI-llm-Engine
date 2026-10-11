@@ -50,7 +50,7 @@ def uniform(mode="affine", bits=BITS, group=GROUP):
 
 
 def make_bundle(path, template=CHATML, seed=0, generation_config=None, scheme=None, twin=False,
-                prefix="language_model.", extra_special=()):
+                prefix="language_model.", extra_special=(), attn_interval=4):
     """Write a text-only bundle into `path` and return its config dict.
 
     scheme(name) -> None (store that module as float) or (mode, bits, group_size); `name` is the
@@ -72,7 +72,7 @@ def make_bundle(path, template=CHATML, seed=0, generation_config=None, scheme=No
             "num_hidden_layers": LAYERS, "num_attention_heads": NH, "num_key_value_heads": NKV,
             "head_dim": HD, "rms_norm_eps": 1e-6, "vocab_size": vocab, "max_position_embeddings": 4096,
             "linear_num_value_heads": LNV, "linear_num_key_heads": LNK, "linear_key_head_dim": LDK,
-            "linear_value_head_dim": LDV, "linear_conv_kernel_dim": CONV_K, "full_attention_interval": 4,
+            "linear_value_head_dim": LDV, "linear_conv_kernel_dim": CONV_K, "full_attention_interval": attn_interval,
             "tie_word_embeddings": False,
             # rope_dims = HD * 0.25 = 32 -> 16 frequencies, which the sections must sum to
             "rope_parameters": {"rope_theta": 10000.0, "partial_rotary_factor": 0.25,
@@ -118,7 +118,7 @@ def make_bundle(path, template=CHATML, seed=0, generation_config=None, scheme=No
         dense(p + "mlp.gate_proj", INTER, HIDDEN)
         dense(p + "mlp.up_proj", INTER, HIDDEN)
         dense(p + "mlp.down_proj", HIDDEN, INTER)
-        if (i + 1) % 4:  # GatedDeltaNet layer
+        if (i + 1) % attn_interval:  # GatedDeltaNet layer
             conv_dim = 2 * LDK * LNK + LDV * LNV
             dense(p + "linear_attn.in_proj_qkv", conv_dim, HIDDEN)
             dense(p + "linear_attn.in_proj_z", LDV * LNV, HIDDEN)
@@ -325,3 +325,47 @@ def png_data_uri(width=48, height=40, seed=0):
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def make_qwen3_bundle(path, template=CHATML, seed=0, layers=2):
+    """A plain Qwen3 (full attention everywhere, float weights) — an architecture the native engine does
+    not run and mlx-lm does: the stand-in for 'older Qwen' / Llama-style models on the compat backend."""
+    os.makedirs(path, exist_ok=True)
+    vocab = build_tokenizer(path)
+    with open(os.path.join(path, "chat_template.jinja"), "w") as f:
+        f.write(template)
+    hid, inter, nh, nkv, hd = 64, 128, 4, 2, 16
+    cfg = {"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"], "hidden_size": hid,
+           "intermediate_size": inter, "num_hidden_layers": layers, "num_attention_heads": nh,
+           "num_key_value_heads": nkv, "head_dim": hd, "rms_norm_eps": 1e-6, "vocab_size": vocab,
+           "max_position_embeddings": 2048, "rope_theta": 10000.0, "tie_word_embeddings": False,
+           "eos_token_id": [1, 2]}
+    with open(os.path.join(path, "config.json"), "w") as f:
+        json.dump(cfg, f)
+    rng = np.random.default_rng(seed)
+    t = {}
+
+    def w(name, *shape, std=0.15):     # strong enough that the argmax has a margin fp16 noise cannot flip
+        t[name] = mx.array(rng.standard_normal(shape).astype(np.float32) * std).astype(mx.float16)
+
+    def ones(name, n):
+        t[name] = mx.ones((n,), dtype=mx.float16)
+
+    w("model.embed_tokens.weight", vocab, hid, std=0.6)
+    for i in range(layers):
+        b = f"model.layers.{i}."
+        w(b + "self_attn.q_proj.weight", nh * hd, hid)
+        w(b + "self_attn.k_proj.weight", nkv * hd, hid)
+        w(b + "self_attn.v_proj.weight", nkv * hd, hid)
+        w(b + "self_attn.o_proj.weight", hid, nh * hd)
+        ones(b + "self_attn.q_norm.weight", hd)
+        ones(b + "self_attn.k_norm.weight", hd)
+        w(b + "mlp.gate_proj.weight", inter, hid)
+        w(b + "mlp.up_proj.weight", inter, hid)
+        w(b + "mlp.down_proj.weight", hid, inter)
+        ones(b + "input_layernorm.weight", hid)
+        ones(b + "post_attention_layernorm.weight", hid)
+    ones("model.norm.weight", hid)
+    w("lm_head.weight", vocab, hid, std=0.6)
+    mx.save_safetensors(os.path.join(path, "model.safetensors"), t, metadata={"format": "mlx"})
+    return cfg

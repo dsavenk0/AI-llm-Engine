@@ -23,6 +23,7 @@ import mlx.core as mx
 from . import memory
 from .generate import (ContextError, GiB, MemoryLimitError, Sampler, is_repeating, sampling_presets,
                        summarize)  # noqa: F401  (summarize is re-exported for the server)
+from .stopfilter import StopFilter
 from .tokenizer import StreamDecoder
 
 INSTALL_HINT = ("this model's architecture isn't implemented by the native engine; it runs on the "
@@ -114,11 +115,12 @@ class CompatEngine:
         self._load()
 
         tpl = self._template_source()
-        self.supports_thinking = bool(self.tok.has_thinking or "enable_thinking" in tpl)
-        # Reasons by default unless the template itself pre-fills an empty, closed think block
-        # (Qwen3.5-0.8B does; Qwen3 leaves `<think>` to the model, so it thinks unless told not to).
+        # Reasoning is a property of the *template* (a vocabulary that happens to contain <think> says
+        # nothing). Reasons by default unless the template itself pre-fills an empty, closed think
+        # block (Qwen3.5-0.8B does; Qwen3 leaves `<think>` to the model, so it thinks unless told not to).
         self.think_tags = self._think_tags(tpl)
-        default_prompt = self._render([{"role": "user", "content": "hi"}], None, {})
+        self.supports_thinking = bool(self.think_tags or "enable_thinking" in tpl)
+        default_prompt = self._render_default([{"role": "user", "content": "hi"}])
         self.thinking_default = bool(self.supports_thinking and not (
             self.think_tags and default_prompt.rstrip().endswith(self.think_tags[1])))
         self.thinking = self.thinking_default if thinking is None else bool(thinking)
@@ -199,9 +201,23 @@ class CompatEngine:
         return self.tok.apply_chat_template(messages, tools=tools or None, add_generation_prompt=True,
                                             tokenize=False, **kw)
 
+    def _render_default(self, messages):
+        """The generation prompt with enable_thinking left UNDEFINED, which is how the model's authors
+        define its default. mlx-lm's wrapper injects enable_thinking=True whenever it can, so go to the
+        underlying HF tokenizer for this one."""
+        raw = getattr(self.tok, "_tokenizer", None)
+        if raw is not None and getattr(self.tok, "_chat_template", None) is None:
+            try:
+                return raw.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            except Exception:
+                pass
+        return self._render(messages, None, {})
+
     def _think_tags(self, tpl):
         """(start, end) of this model's reasoning block: from its tokenizer when mlx-lm detected
         one, else the Qwen-style tags when the template speaks of them (mlx-lm misses some)."""
+        if "think" not in tpl.lower():
+            return None
         if self.tok.has_thinking:
             return self.tok.think_start, self.tok.think_end
         if "</think>" in tpl and "<think>" in tpl:
@@ -337,8 +353,9 @@ class CompatEngine:
             m = min(len(self.cache_tokens), len(ids) - 1)
             while n < m and self.cache_tokens[n] == ids[n]:
                 n += 1
-        if n > 0 and can_trim_prompt_cache(self.cache):
-            extra = len(self.cache_tokens) - n
+        extra = len(self.cache_tokens) - n
+        # nothing to trim means any cache (including a hybrid model's non-trimmable state) is reusable as is
+        if n > 0 and (extra == 0 or can_trim_prompt_cache(self.cache)):
             if extra:
                 trim_prompt_cache(self.cache, extra)
             return self.cache, n
@@ -380,6 +397,7 @@ class CompatEngine:
 
         dec = StreamDecoder(self.decoder)
         out_tokens, text, finish = [], "", "length"
+        stops = StopFilter(stop)
         t1 = time.time()
         fed = list(ids)
 
@@ -391,7 +409,8 @@ class CompatEngine:
                 return True, None
             piece = dec.add(tok)
             text += piece
-            if stop and any(s in text for s in stop):
+            hit, piece = stops.feed(piece)
+            if hit:
                 finish = "stop"
                 return True, piece
             if should_stop and should_stop():
@@ -448,11 +467,14 @@ class CompatEngine:
                 mx.async_eval(y)
             else:
                 y = nxt
+        rest = stops.flush()
+        if rest:
+            yield None, rest
         tail = dec.flush()
         if tail and finish == "length":
             yield None, tail
         mx.eval([c.state for c in cache])
-        self.cache_tokens = fed[:-1] if len(fed) > len(ids) else fed   # the last sampled token isn't in the cache
+        self.cache_tokens = fed   # every fed token (the last one included) is in the cache: its forward ran before emit()
         t_dec = time.time() - t1
         n_out = len(out_tokens)
         st = {
