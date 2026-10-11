@@ -717,7 +717,7 @@ Streaming: Enabled</code></pre>
               PTQ1_0, TQ1_G128 and JANG-packed ternary bundles stay packed in memory and run on a lookup-table Metal kernel. A 27B model fits in ~6 GB; everything else MLX goes through the optional mlx-lm backend.
             </p>
             <div class="arch-code-snippet">
-              <code>route: native | 1.75-bit | mlx-lm</code>
+              <code>route: native | 1.75-bit | gguf | mlx-lm</code>
             </div>
           </div>
 
@@ -732,7 +732,7 @@ Streaming: Enabled</code></pre>
             </div>
             <h3 class="arch-title" data-i18n="feat8_title">A Native Code Editor, On Demand</h3>
             <p class="arch-desc" data-i18n="feat8_desc">
-              A separate Swift app — never loaded until you open it: chat-first and editor layouts, an agent that asks before it edits, git and GitHub, a branch menu, terminal, problems, a preview pane and dictation. Dark and light themes.
+              A separate Swift app — never loaded until you open it: chat-first and editor layouts, an agent with Manual / Edit / Plan / Auto modes and a reasoning-effort control, start and stop the model from the toolbar, git with per-file discard, GitHub, terminal, problems, a preview pane, dictation and a context ring that compacts the chat. Dark and light themes.
             </p>
             <div class="arch-code-snippet">
               <code>LLMBar </> → new window → ui.server (localhost)</code>
@@ -750,10 +750,28 @@ Streaming: Enabled</code></pre>
             </div>
             <h3 class="arch-title" data-i18n="feat9_title">Optional Modules, Off by Default</h3>
             <p class="arch-desc" data-i18n="feat9_desc">
-              ModelScope as a second model source, image generation through mflux, another OpenAI-compatible server as the assistant's model, proxy and CA settings, leveled logs with groups. None of it runs until you ask.
+              ModelScope as a second model source, pictures drawn right in the chat through mflux, web search, Open VSX themes and snippets, activation edits, another OpenAI-compatible server as the assistant's model, proxy and CA settings. None of it runs until you ask.
             </p>
             <div class="arch-code-snippet">
-              <code>./llm setup --images · --source modelscope</code>
+              <code>./llm setup --images · ./llm steer · Extensions (Open VSX)</code>
+            </div>
+          </div>
+
+          <!-- Card 10: GGUF -->
+          <div class="arch-card">
+            <div class="arch-card-top">
+              <span class="arch-index">// 10 · GGUF</span>
+              <span class="arch-pill-tag tag-cyan">NO LLAMA.CPP</span>
+            </div>
+            <div class="arch-icon-wrap icon-cyan">
+              <span class="arch-icon">📦</span>
+            </div>
+            <h3 class="arch-title" data-i18n="feat10_title">GGUF on the Engine's Own Decoder</h3>
+            <p class="arch-desc" data-i18n="feat10_desc">
+              Llama, Qwen2 and Qwen3 GGUF files are repacked into MLX quantization on load and run by the engine itself — the same server, prompt cache and speculation as everything else, with logits that match llama.cpp's. Anything else falls back to llama.cpp, downloaded only when needed.
+            </p>
+            <div class="arch-code-snippet">
+              <code>./llm pull org/name:Q4_K_M → own decoder | llama.cpp</code>
             </div>
           </div>
         </div>

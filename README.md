@@ -88,6 +88,31 @@ folder layout and checks; the Hugging Face token is never sent there; a switch i
 regular mlx-community / lmstudio-community conversions of the dense Qwen3.5 family run on the engine, including tied
 embeddings and quantized gate projections.
 
+### GGUF models
+
+GGUF is what Hugging Face, LM Studio and Ollama hand out, and it runs here too — `./llm models` lists the files in your
+model folders, in LM Studio's folder and in Ollama's store (read in place, never copied), and
+`./llm pull org/name:Q4_K_M` fetches one quantization of a repo (`ms:` for ModelScope).
+
+- **Own decoder (no llama.cpp).** A file whose architecture, quantization and tokenizer the engine implements runs on
+  its own MLX decoder: llama and Qwen2/Qwen3 families (Llama 3.x, Mistral, SmolLM2, DeepSeek-R1-Distill-Qwen, Qwen2.5…),
+  `Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K F16 BF16 F32`, byte-level BPE vocabularies. The weights are repacked
+  into MLX's affine quantization when loaded (Q4/Q5/Q8 exactly; Q6_K into 8 bits), the tokenizer and the chat template
+  are built from the file's own metadata, and it shares the server, the prompt cache, the stop handling, the reasoning
+  budget, the memory watchdog and prompt-lookup speculation with the other routes.
+- **llama.cpp for the rest.** Any other GGUF (other architectures, IQ/Q2/Q3 quantizations, Gemma, MiniCPM, MoE, files
+  with an image projector) goes to llama.cpp's `llama-server` behind the same API. It is downloaded only when such a
+  file is chosen (`./llm setup --gguf`); with `gguf_native` off every GGUF uses it.
+- **How close.** Against llama.cpp on the same files (logits on 11 prompts, 24-token greedy continuation): Qwen2.5 0.5B
+  and 3B, DeepSeek-R1-Distill-Qwen 1.5B and SmolLM2 135M agree on the top token on every prompt (log-probabilities
+  within 0.02–0.08) and on 24 of 24 greedy tokens; Llama 3.2 1B agrees on 10 of 11 prompts (≤ 0.18). Activations are
+  kept in float32 between layers, as ggml does.
+- **How fast** (M5 MacBook Air, 16 GB, Q4_K_M, a busy machine so ±10 %): small models decode on par with llama.cpp
+  (Qwen2.5 0.5B ~190–210 tok/s); on a 3B model the engine is ~13 % behind (22 ms against 19.5 ms per token — MLX's
+  4-bit format spends 5 bits per Q4_K weight where Q4_K spends 4.5). Rewriting a file, where the answer copies the
+  prompt, runs at ~145 tok/s against 46 without speculation (×3.2); llama.cpp's own `ngram-mod` is faster on pure
+  copying (~600 tok/s), without it llama.cpp does ~55.
+
 ### Sleep and the SSD prefix cache
 
 - **Auto-sleep.** After 15 idle minutes (configurable, 0 = never) the engine unloads the weights and gives about 7 GB
@@ -144,6 +169,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm agent [dir]          terminal coding agent (files, search, edits, shell)
 ./llm connect [client]     register the model in Continue, Kilo Code or opencode
 ./llm free                 quit vMLX / oMLX / Ollama to free memory
+./llm steer [repo|folder]   apply an activation edit (and fetch its base model) · `steer off`
 ./llm test                 unit + integration tests
 ./llm perf [--save]        performance suite vs the saved baseline
 ./llm eval [--save]        accuracy suite (math / code / sanity) vs the saved baseline
@@ -195,6 +221,18 @@ environment, `./llm image "a lighthouse at dusk"` writes a PNG, and with the eng
 *Image API* switch) `POST /v1/images/generations` answers with a base64 PNG. The language model is unloaded while an
 image is made, so the two never share memory.
 
+### Activation edits (optional)
+
+Some repositories ship an *edit* instead of weights: one direction in the model's hidden space and a strength, for
+example [`rariruluis/ternary-bonsai-2-27b-mlx-runtime-abliterated`](https://huggingface.co/rariruluis/ternary-bonsai-2-27b-mlx-runtime-abliterated).
+`./llm steer <repo|folder> [--alpha A]` downloads it **and the base model it was made for** (the exact revision it
+names, when that model is not installed), selects that model and applies the edit at inference:
+`y -= α · (y·d) · d` on what every layer writes into the residual stream, accumulated in float32. The quantized weights
+stay as they are; α = 0 is the unmodified model. It is per model, works on the native routes (the Qwen3.5 hybrid and
+the own GGUF decoder), `./llm steer off` removes it, `/health` shows `steer`, and a direction of the wrong size is
+refused at start (it belongs to one model). The SSD prefix cache of a steered model is kept separate. A research and
+red-teaming tool for models you own.
+
 ### Coding agent
 
 `./llm agent [folder]` is a terminal coding agent that needs only this engine, with no VS Code and no Kilo. It can list,
@@ -232,12 +270,22 @@ separate Swift app that only runs while you use it, and its parts are independen
 - **Editor:** syntax colours and an outline for ~25 languages, line numbers, problems underlined as you type
   (built-in checks, plus `swiftc -parse`, `node --check`, `bash -n` … when installed), unsaved-changes protection.
 - **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click.
-- **Git:** changes, diff, commit selected files, push (always asks first; it uses your own git credentials). The
-  branch menu in the toolbar switches or creates branches. **GitHub** (through the `gh` tool): sign-in check, open
+- **Git:** changes, diff, commit selected files, push (always asks first; it uses your own git credentials). ↶ on a
+  file (or *Discard all*) puts it back to the last commit and deletes new files — after a confirmation that says what
+  is lost. The branch menu in the toolbar switches or creates branches. **GitHub** (through the `gh` tool): sign-in check, open
   pull requests, create a pull request or a repository — both ask first.
 - **Message box:** Enter sends, Shift+Enter starts a new line; attach files from anywhere (or paste/drag them), images
   (switch *Images* on for a model with a vision tower — it restarts the model) and **dictate** with the microphone
   button (the system speech recogniser, on-device when the language supports it).
+- **Model:** the toolbar menu starts and stops the model and switches between the installed ones (the same
+  `./llm start|stop|use`).
+- **Web:** the globe button (off by default) lets the assistant search the internet and read pages; every request is
+  shown in the conversation.
+- **Pictures:** with the engine started `--images on` the assistant can draw (`generate_image`); the picture appears in
+  the message and is saved under `.llm/images/`.
+- **Extensions** (opt-in module, *Extensions (Open VSX)* in the Modules menu): search open-vsx.org and install
+  `.vsix` packages. Colour themes and snippets (type a prefix, press Tab) are used; an extension's own code is never
+  run or even unpacked, the checksum open-vsx.org publishes is required, and Microsoft's marketplace is not used.
 - **Model source:** the assistant can use another OpenAI-compatible server — another computer running this engine
   (`https://…/v1`, an API key), OpenRouter — from the toolbar menu. The key is kept in the Keychain; messages and
   attached files go to that server, which is why it asks.
@@ -336,14 +384,19 @@ subprocess so a hard crash at one size only rules out that size. `--apply` write
 | native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
 | mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
+| GGUF, own decoder | llama / Qwen2 / Qwen3 families, `Q4_0…Q8_0`, `Q4_K/Q5_K/Q6_K`, F16, byte-level BPE | the engine's own code, no llama.cpp |
+| GGUF, llama.cpp | every other GGUF (other architectures, IQ/Q2/Q3, MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
 
-Not supported: GGUF and non-MLX weights, 1-bit affine JANG.
+Not supported: non-MLX, non-GGUF weights, 1-bit affine JANG. Speculative decoding with a trained drafter (DFlash,
+DSpark) is not implemented; the engine uses prompt-lookup speculation.
 
 ## Layout
 
 ```
 engine/   model.py (layers, Hadamard, fused ops) · loader.py · vision.py · gated_delta.py
-          tokenizer.py · generate.py (cache, sampling) · server.py (HTTP)
+          tokenizer.py · generate.py (cache, sampling) · server.py (HTTP) · steering.py (activation edits)
+          gguf.py · gguf_tensors.py · gguf_tokenizer.py · dense.py · gguf_engine.py (own GGUF decoder)
+          gguf_server.py (llama.cpp behind the same API)
 llm.py    CLI / menu (stdlib only) — locales/ru.json for Russian
 agent.py  terminal coding agent (stdlib only) · harness/ optional web / MCP / memory / compaction / fix-tests modules
 app/      LLMBar.swift (menu-bar app)
