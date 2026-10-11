@@ -18,7 +18,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import mlx.core as mx  # noqa: E402
-from engine.ptq1 import TILE, dequantize, dequantize_ref, from_tq1, linear, pack, ptq1_matvec  # noqa: E402
+from engine.ptq1 import (TILE, dequantize, dequantize_ref, from_packed26, from_tq1, is_packed26,  # noqa: E402
+                         linear, pack, ptq1_matvec)
 
 
 def make_weights(n, k, seed=0):
@@ -248,6 +249,44 @@ class TestTQ1Kernels(unittest.TestCase):
                 from_tq1(mx.array(c), mx.array(scales))
         with self.assertRaises(ValueError):                # wrong slot count (a PTQ1_0 `qs` array)
             from_tq1(mx.array(np.zeros((1, 1, 24, 8), np.uint8)), mx.array(scales))
+
+
+class TestJangPacked(unittest.TestCase):
+    """JANG ternary_packed_26b: uint8 [rows, groups*26] + float16 [rows, groups]."""
+
+    def test_detection_is_by_dtype_and_shape(self):
+        u8, f16, u32 = mx.uint8, mx.float16, mx.uint32
+        self.assertTrue(is_packed26((64, 40 * 26), u8, (64, 40), f16))
+        self.assertFalse(is_packed26((64, 40 * 26 + 1), u8, (64, 40), f16))     # not exactly 26 bytes per group
+        self.assertFalse(is_packed26((64, 40 * 27), u8, (64, 40), f16))
+        self.assertFalse(is_packed26((64, 40 * 26), u8, (65, 40), f16))         # rows disagree
+        self.assertFalse(is_packed26((64, 40 * 26), u32, (64, 40), f16))        # an MLX affine weight
+        self.assertFalse(is_packed26((64, 40 * 26), u8, (64, 40), u8))          # an mx-mode (mxfp4) scale
+        self.assertFalse(is_packed26((64, 40, 26), u8, (64, 40), f16))
+
+    def test_blocks_match_the_tile_layout_of_the_same_weights(self):
+        blocks, digits = tq1_blocks(96, 384, seed=4)
+        b = blocks.reshape(96, 3, 28)
+        w = mx.array(np.ascontiguousarray(b[:, :, :26].reshape(96, 78)))
+        s = mx.array(np.ascontiguousarray(b[:, :, 26:].copy().view(np.float16).reshape(96, 3)))
+        out = from_packed26(w, s)
+        np.testing.assert_array_equal(np.asarray(out), blocks)
+        np.testing.assert_array_equal(dequantize_ref(np.asarray(out), "tq1"), tq1_truth(blocks, digits))
+
+    def test_refuses_what_is_not_a_packed_pair(self):
+        w = mx.zeros((8, 52), mx.uint8)
+        s = mx.zeros((8, 2), mx.float16)
+        from_packed26(w, s)
+        with self.assertRaises(ValueError):
+            from_packed26(mx.zeros((8, 53), mx.uint8), s)
+        with self.assertRaises(ValueError):
+            from_packed26(w, mx.zeros((8, 3), mx.float16))
+        with self.assertRaises(ValueError):
+            from_packed26(w, mx.zeros((8, 2), mx.float32))
+        bad = np.zeros((8, 52), np.uint8)
+        bad[2, 25] = 27                                   # a tail byte holds three digits: 26 at most
+        with self.assertRaises(ValueError):
+            from_packed26(mx.array(bad), s)
 
 
 if __name__ == "__main__":

@@ -79,10 +79,19 @@ TQ1_MODEL_TYPE = "ternel_hadamard_qwen35"
 
 
 def _join_tq1(shard):
-    """TQ1_G128 stores each matrix as `X.codes` (+ `X.scales`, `X.signs`). Replace every codes/scales
-    pair in this shard by one row-major `X.weight` of 28-byte blocks, the form PTQ1_0 bundles use,
-    so fusing, the repack and the kernels need no second path."""
-    from .ptq1 import from_tq1
+    """TQ1_G128 stores each matrix as `X.codes` (+ `X.scales`, `X.signs`); JANG's packed ternary as
+    uint8 `X.weight` + float16 `X.scales`. Replace every such pair in this shard by one row-major
+    `X.weight` of 28-byte blocks, the form PTQ1_0 bundles use, so fusing, the repack and the
+    kernels need no second path."""
+    from .ptq1 import from_packed26, from_tq1, is_packed26
+    for raw in [k for k in shard if k.endswith(".weight")]:
+        base = raw[:-len(".weight")]
+        s = shard.get(base + ".scales")
+        w = shard[raw]
+        if s is not None and is_packed26(w.shape, w.dtype, s.shape, s.dtype):
+            joined = from_packed26(shard.pop(raw), shard.pop(base + ".scales"))
+            mx.eval(joined)
+            shard[raw] = joined
     for raw in [k for k in shard if k.endswith(".codes")]:
         base = raw[:-len(".codes")]
         if base + ".scales" not in shard:
@@ -105,10 +114,11 @@ def load(path, vision=True, log=print, ptq1=False):
         raise ValueError("MoE Qwen3.5 variants are not supported by this engine")
     qcfg = config.get("quantization") or config.get("quantization_config") or {}
     is_tq1 = config.get("model_type") == TQ1_MODEL_TYPE
+    jang_packed = bool((jang.get("runtime") or {}).get("requires_jang_ternary_packed_expansion"))
     is_ptq1 = (qcfg.get("format") == "PTQ1_0" or str(config.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1")
-               or is_tq1)
+               or is_tq1 or jang_packed)
     if is_ptq1 and not ptq1:
-        raise ValueError("this is a 1.75-bit ternary bundle (PTQ1_0 / TQ1_G128) — supported as an experimental option: "
+        raise ValueError("this is a 1.75-bit ternary bundle (PTQ1_0 / TQ1_G128 / JANG packed) — supported as an experimental option: "
                          "enable Settings → Advanced → \"Experimental: PTQ1 models\" (or pass --ptq1 on)")
 
     files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
@@ -134,7 +144,7 @@ def load(path, vision=True, log=print, ptq1=False):
         # the Hadamard block size is listed per module in config["modules"]. A TQ1_G128 bundle is a
         # repack of a Prism MLX checkpoint: its norms keep that source's convention, so they go
         # through the same value heuristic as any unstamped Prism bundle.
-        if not is_tq1:
+        if not (is_tq1 or jang_packed):
             shift, shift_decided = False, True
         blocks = {m.get("block") for m in config.get("modules", []) if m.get("block")}
         if len(blocks) == 1:
@@ -145,7 +155,7 @@ def load(path, vision=True, log=print, ptq1=False):
     signs, pending, loaded = {}, {}, set()
     for f in files:
         shard = mx.load(f)
-        if is_tq1:
+        if is_tq1 or jang_packed:
             _join_tq1(shard)
         out = {}
         for raw in list(shard):

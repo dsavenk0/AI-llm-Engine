@@ -158,7 +158,10 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
 
     fmt="tq1" writes the TQ1_G128 layout of the inductiveML "ternel" bundles instead: plain base-3
     payload bytes stored as `.codes` [tile][group][slot][row] plus raw fp16 `.scales`, with the
-    `language_model.` key prefix and model_type ternel_hadamard_qwen35."""
+    `language_model.` key prefix and model_type ternel_hadamard_qwen35.
+    fmt="jang" writes JANG's packed ternary storage: the same payload bytes as uint8 `.weight`
+    [rows, groups*26] with fp16 `.scales` [rows, groups], under an ordinary qwen3_5 config plus a
+    jang_config.json that declares requires_jang_ternary_packed_expansion."""
     from engine.ptq1 import dequantize_ref
     os.makedirs(path, exist_ok=True)
     vocab = build_tokenizer(path)
@@ -172,7 +175,7 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
     def ptq(name, out, inp, embedding=False):
         nb = inp // 128
         w = np.zeros((out, nb, 28), np.uint8)
-        if fmt == "tq1":
+        if fmt in ("tq1", "jang"):
             digits = rng.integers(0, 3, size=(out, nb, 26, 5))
             digits[:, :, 25, 3:] = 0                      # the tail byte holds weights 125..127 only
             w[:, :, :26] = (digits * np.array([1, 3, 9, 27, 81])).sum(-1).astype(np.uint8)
@@ -184,7 +187,11 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
         rows_blocks = w.reshape(out, nb * 28)
         key = f"language_model.{name}" if fmt == "tq1" else name
         if twin:
-            t[f"{name}.weight"] = mx.array(dequantize_ref(rows_blocks, fmt)).astype(mx.float16)
+            t[f"{name}.weight"] = mx.array(dequantize_ref(rows_blocks, "ptq1" if fmt == "ptq1" else "tq1")).astype(mx.float16)
+        elif fmt == "jang":
+            t[f"{name}.weight"] = mx.array(np.ascontiguousarray(w[:, :, :26].reshape(out, nb * 26)))
+            t[f"{name}.scales"] = mx.array(d)
+            modules.append({"path": name, "block": block, "embedding": embedding, "dtype": "float16"})
         elif fmt == "tq1":
             tile = 256 if out % 256 == 0 else out        # the artifact never pads rows
             tiles = out // tile
@@ -246,6 +253,13 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
                "eos_token_id": [1, 2]}
         # float twin has no PTQ norm policy: PTQ1 norms are final-form, so declare them unshifted
         cfg["jang_norms_pre_shifted"] = True
+    elif fmt == "jang":
+        cfg = {"model_type": "qwen3_5", "text_config": text_config, "eos_token_id": [1, 2],
+               "hadamard": {"block_size": block}, "quantization": {"bits": 2, "group_size": 128, "mode": "affine"}}
+        with open(os.path.join(path, "jang_config.json"), "w") as f:
+            json.dump({"format": "jang", "profile": "JANG_AFFINE_TERNARY_PACKED",
+                       "layout": {"language_norms": "final-form"},
+                       "runtime": {"requires_jang_ternary_packed_expansion": True}}, f)
     elif fmt == "tq1":
         cfg = {"model_type": "ternel_hadamard_qwen35", "base_model_type": "qwen3_5", "schema_version": 2,
                "text_config": text_config, "eos_token_id": [1, 2], "gdn_activation_layout": "grouped",

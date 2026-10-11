@@ -536,11 +536,20 @@ class Model(nn.Module):
         hint = qcfg.get("mode")
 
         # 1.75-bit ternary storage: PTQ1_0 ships `.weight` uint8 blocks, TQ1_G128 `.codes` + `.scales`
-        scheme = "tq1" if any(k.endswith(".codes") for k in shapes) else "ptq1"
+        from .ptq1 import is_packed26
+
+        def packed26(name):
+            w, s = shapes.get(f"language_model.{name}.weight"), shapes.get(f"language_model.{name}.scales")
+            return w is not None and s is not None and is_packed26(w[0], w[1], s[0], s[1])
+
+        # (JANG's packed ternary storage — uint8 weight + float16 scales, 26 bytes per group — is
+        # the TQ1 digit order too; the loader joins it into the same blocks)
+        scheme = "tq1" if any(k.endswith(".codes") or (k.endswith(".weight") and packed26(k[len("language_model."):-7]))
+                              for k in shapes) else "ptq1"
         a["ternary_scheme"] = scheme
 
         def is_ptq1(name):
-            if f"language_model.{name}.codes" in shapes:
+            if f"language_model.{name}.codes" in shapes or packed26(name):
                 return True
             w = shapes.get(f"language_model.{name}.weight")
             return w is not None and w[1] == mx.uint8 and f"language_model.{name}.scales" not in shapes

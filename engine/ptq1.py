@@ -353,6 +353,33 @@ def dequantize_ref(w, scheme="ptq1"):
 TQ1_SLOTS = 26    # payload bytes per group: 25 of five digits + one tail byte of three
 
 
+def _check_digits(full, tail):
+    if mx.max(full).item() > 242 or mx.max(tail).item() > 26:
+        raise ValueError("TQ1 codes contain bytes outside the base-3 range (corrupt or not TQ1_G128)")
+
+
+def from_packed26(weight, scales):
+    """JANG `ternary_packed_26b` storage -> row-major 28-byte blocks (the TQ1_G128 digit order, as
+    the bundle's own bytes show). weight: uint8 [rows, groups*26]; scales: float16 [rows, groups]."""
+    if weight.ndim != 2 or weight.dtype != mx.uint8 or weight.shape[1] % TQ1_SLOTS:
+        raise ValueError(f"packed ternary weight must be uint8 [rows, groups*{TQ1_SLOTS}], got {weight.dtype} {tuple(weight.shape)}")
+    rows, g = weight.shape[0], weight.shape[1] // TQ1_SLOTS
+    if tuple(scales.shape) != (rows, g) or scales.dtype != mx.float16:
+        raise ValueError(f"packed ternary scales must be float16 {(rows, g)}, got {scales.dtype} {tuple(scales.shape)}")
+    pay = weight.reshape(rows, g, TQ1_SLOTS)
+    _check_digits(pay[:, :, :TQ1_SLOTS - 1], pay[:, :, TQ1_SLOTS - 1])
+    sc = mx.contiguous(scales).view(mx.uint8).reshape(rows, g, 2)
+    return mx.concatenate([pay, sc], axis=-1).reshape(rows, g * 28)
+
+
+def is_packed26(weight_shape, weight_dtype, scales_shape, scales_dtype):
+    """Is (weight, scales) a JANG packed ternary pair? uint8 weights are never an MLX affine/mx
+    quantization (those are uint32), so the shapes decide."""
+    return (weight_dtype == mx.uint8 and scales_dtype == mx.float16 and len(weight_shape) == 2
+            and len(scales_shape) == 2 and weight_shape[0] == scales_shape[0]
+            and weight_shape[1] == scales_shape[1] * TQ1_SLOTS)
+
+
 def from_tq1(codes, scales):
     """TQ1_G128 storage -> row-major 28-byte blocks [N, K/128*28] uint8 (what pack() takes).
 
@@ -364,8 +391,7 @@ def from_tq1(codes, scales):
     t, g, _, tile = codes.shape
     if tuple(scales.shape) != (t, g, tile) or scales.dtype not in (mx.uint16, mx.float16):
         raise ValueError(f"TQ1 scales must be uint16 {(t, g, tile)}, got {scales.dtype} {tuple(scales.shape)}")
-    if mx.max(codes[:, :, :TQ1_SLOTS - 1]).item() > 242 or mx.max(codes[:, :, TQ1_SLOTS - 1]).item() > 26:
-        raise ValueError("TQ1 codes contain bytes outside the base-3 range (corrupt or not TQ1_G128)")
+    _check_digits(codes[:, :, :TQ1_SLOTS - 1], codes[:, :, TQ1_SLOTS - 1])
     pay = codes.transpose(0, 3, 1, 2)                                  # [t, tile, g, 26]
     sc = scales.transpose(0, 2, 1)                                     # [t, tile, g]
     sc = mx.contiguous(sc).view(mx.uint8).reshape(t, tile, g, 2)       # little-endian fp16 bytes

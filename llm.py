@@ -167,16 +167,18 @@ PTQ1_SCHEMA = "prism_hadamard_qwen35_ptq1"
 TQ1_TYPE = "ternel_hadamard_qwen35"   # inductiveML 1.75-bit repacks (TQ1_G128): same engine option
 
 
-def engine_route(cfgj, tags=()):
+def engine_route(cfgj, tags=(), jang=None):
     """Which engine runs this model: "native" (Qwen3.5-hybrid dense family, incl. Prism/JANG
     Hadamard bundles), "ptq1" (the same family in an experimental 1.75-bit ternary format: PTQ1_0
     or TQ1_G128) or "mlxlm"
     (anything else MLX, through the optional mlx-lm backend). `cfgj` is the local config.json;
-    for a hub repo that has not been downloaded, pass its tags instead."""
+    for a hub repo that has not been downloaded, pass its tags instead. `jang` is the bundle's
+    jang_config.json: JANG's packed ternary storage (the "packed-trits" tag) runs as ptq1 too."""
     text = cfgj.get("text_config") or {}
     kinds = {cfgj.get("model_type"), text.get("model_type"), *tags}
     schema = str(cfgj.get("schema", ""))
-    if schema.startswith(PTQ1_SCHEMA) or PTQ1_SCHEMA in kinds or TQ1_TYPE in kinds:
+    packed = (jang or {}).get("runtime", {}).get("requires_jang_ternary_packed_expansion") or "packed-trits" in kinds
+    if schema.startswith(PTQ1_SCHEMA) or PTQ1_SCHEMA in kinds or TQ1_TYPE in kinds or packed:
         return "ptq1"   # checked before "native": a TQ1 repo also carries the qwen3_5 tag
     moe = text.get("num_experts") or cfgj.get("num_experts") or any("moe" in str(k) for k in kinds)
     if kinds & set(NATIVE_TYPES) and not moe:
@@ -203,11 +205,11 @@ def inspect_model(path):
     q = cfgj.get("quantization") or cfgj.get("quantization_config") or {}
     mtype = text.get("model_type") or cfgj.get("model_type", "?")
 
-    route = engine_route(cfgj)
+    route = engine_route(cfgj, jang=jang)
     problems = []
     rt = jang.get("runtime", {})
-    if rt.get("requires_jang_ternary_packed_expansion") or rt.get("requires_jang_affine1_expansion"):
-        problems.append(T("packed JANG storage"))  # no kernel for it yet
+    if rt.get("requires_jang_affine1_expansion"):
+        problems.append(T("packed JANG storage"))  # 1-bit affine: no kernel for it
 
     tpl = ""
     if "chat_template.jinja" in files:
@@ -221,7 +223,7 @@ def inspect_model(path):
     if "snapshots" in parts:  # standard HF cache: models--org--name/snapshots/<hash>
         name = parts[parts.index("snapshots") - 1].removeprefix("models--").split("--", 1)[-1]
     fmt = f"JANG {jang.get('profile', '')}".strip() if jang else (f"MLX {q['bits']}-bit" if q.get("bits") else "fp")
-    if route == "ptq1":
+    if route == "ptq1" and not jang:
         fmt = "TQ1" if cfgj.get("model_type") == TQ1_TYPE else "PTQ1"
     return {"path": path, "name": name, "size": size, "format": fmt, "type": mtype, "route": route,
             "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl,
@@ -999,7 +1001,7 @@ def hf_search(query, limit=20):
         if "jang_config.json" in names:  # JANG bundles may use packed storage that needs expansion
             try:
                 rt = _hf(f"/{repo}/resolve/main/jang_config.json", timeout=15).get("runtime", {})
-                unsupported = bool(rt.get("requires_jang_ternary_packed_expansion") or rt.get("requires_jang_affine1_expansion"))
+                unsupported = bool(rt.get("requires_jang_affine1_expansion"))  # packed ternary runs (ptq1)
             except Exception:
                 pass
         return size, unsupported, install_state(repo, info.get("siblings", []))

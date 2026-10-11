@@ -108,9 +108,14 @@ class TestInspect(State):
         m = llm.inspect_model(write_model(d2, config={"model_type": "glm4", "text_config": {}}))
         self.assertEqual((m["route"], m["supported"]), ("mlxlm", True))
 
-    def test_packed_jang_storage_is_reported(self):
+    def test_packed_ternary_jang_runs_as_ptq1_and_1bit_affine_is_reported(self):
         d = write_model(os.path.join(self.cfg["dirs"][0], "j"),
                         jang={"profile": "J", "runtime": {"requires_jang_ternary_packed_expansion": True}})
+        m = llm.inspect_model(d)
+        self.assertEqual((m["route"], m["supported"], m["problems"]), ("ptq1", True, []))
+        self.assertTrue(m["format"].startswith("JANG"))          # the profile stays the label
+        d = write_model(os.path.join(self.cfg["dirs"][0], "j1"),
+                        jang={"profile": "J", "runtime": {"requires_jang_affine1_expansion": True}})
         m = llm.inspect_model(d)
         self.assertFalse(m["supported"])
         self.assertTrue(m["problems"])
@@ -334,7 +339,7 @@ REPOS = {
     "org/native-4bit": {"tags": ["mlx", "safetensors", "qwen3_5"], "downloads": 500,
                         "files": {"config.json": CONFIG, "model.safetensors": WEIGHTS, "preview.png": b"png",
                                   "tokenizer.json": b"{}"}},
-    "org/packed-jang": {"tags": ["mlx", "safetensors", "qwen3_5"], "downloads": 90,
+    "org/packed-jang": {"tags": ["mlx", "safetensors", "qwen3_5", "packed-trits"], "downloads": 90,
                         "files": {"config.json": CONFIG, "jang_config.json": json.dumps(
                             {"runtime": {"requires_jang_ternary_packed_expansion": True}}).encode(),
                             "model.safetensors": WEIGHTS}},
@@ -416,7 +421,8 @@ class TestHub(State):
         self.assertEqual(res["org/gguf-only"]["route"], "none")
         self.assertEqual(res["org/mlx-and-gguf"]["route"], "none")      # a GGUF tag wins over mlx/qwen3_5
         self.assertFalse(res["org/gguf-only"]["compatible"])
-        self.assertFalse(res["org/packed-jang"]["compatible"])        # needs storage expansion we lack
+        self.assertTrue(res["org/packed-jang"]["compatible"])         # packed ternary runs on the ptq1 kernel
+        self.assertEqual(res["org/packed-jang"]["route"], "ptq1")
         self.assertTrue(res["org/native-4bit"]["fits"])
 
     def test_a_half_downloaded_model_is_partial_not_installed(self):

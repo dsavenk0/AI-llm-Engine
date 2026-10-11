@@ -805,6 +805,34 @@ class TestTQ1Model(TestPTQ1Model):
         self.assertIn("TQ1", str(ctx.exception))
 
 
+class TestJangPackedModel(TestPTQ1Model):
+    """JANG's `ternary_packed_26b` storage (OsaurusAI/Bonsai-2-27B-1.75bit-JANG): uint8 weight +
+    float16 scales under a plain qwen3_5 config, flagged only by jang_config.json's runtime."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from tests.synth import make_ptq1_bundle
+        cls.q, cls.f = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_ptq1_bundle(cls.q, seed=7, fmt="jang")
+        make_ptq1_bundle(cls.f, seed=7, twin=True, fmt="jang")
+
+    def test_it_runs_the_tq1_digit_order_in_the_packed_layout(self):
+        eng = self.engine(self.q, ptq1=True)
+        self.assertEqual(eng.model.args["ternary_scheme"], "tq1")
+        w = eng.model.language_model.model.layers[0].mlp.gate_up_proj.weight
+        self.assertEqual((w.dtype, w.ndim, tuple(w.shape[2:])), (mx.uint8, 4, (1024, 28)))
+
+    def test_ordinary_affine_bundles_are_untouched(self):
+        import tempfile
+        from tests.synth import make_bundle
+        d = tempfile.mkdtemp()
+        make_bundle(d, seed=8)
+        eng = self.engine(d)
+        self.assertFalse(eng.model.ptq1)
+        self.assertEqual(eng.model.args["ternary_scheme"], "ptq1")   # the default; no ternary module exists
+
+
 class TestStopStrings(unittest.TestCase):
     """A stop string ends the answer and is not part of it; text that might still become a stop
     string is held back, and released if it never does."""
