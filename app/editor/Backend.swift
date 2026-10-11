@@ -78,7 +78,10 @@ struct BranchesResponse: Decodable {
     let remote: [String]
 }
 struct CheckoutResponse: Decodable { let branches: BranchesResponse; let git: GitStatus }
-struct InfoResponse: Decodable { let root: String, name: String, engine: EngineInfo?, git: GitStatus }
+struct InfoResponse: Decodable {
+    let root: String, name: String, engine: EngineInfo?, git: GitStatus
+    let remote: Bool?, endpoint: String?
+}
 
 struct BackendError: LocalizedError {
     let message: String

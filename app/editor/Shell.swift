@@ -62,6 +62,7 @@ struct RootView: View {
 private struct Toolbar: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var modules: ModuleSettings
+    @State private var showRemote = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -74,11 +75,19 @@ private struct Toolbar: View {
                 Text("Editor").tag(LayoutMode.ide)
             }.pickerStyle(.segmented).frame(width: 150).labelsHidden()
             Spacer()
-            HStack(spacing: 5) {
-                Circle().fill(ws.engine == nil ? Color.red : Color.green).frame(width: 8, height: 8)
-                Text(ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") } ?? "model not running")
-                    .font(.callout).foregroundColor(.secondary).lineLimit(1)
-            }
+            Menu {
+                Button("This Mac's engine") { ws.useLocalEngine() }.disabled(ws.remoteURL == nil)
+                Button("Another server (OpenRouter, other computer)…") { showRemote = true }
+                if let u = ws.remoteURL { Divider(); Text("Now: \(u)") }
+            } label: {
+                HStack(spacing: 5) {
+                    Circle().fill(ws.engine == nil ? Color.red : Color.green).frame(width: 8, height: 8)
+                    if ws.remoteURL != nil { Image(systemName: "cloud").font(.caption) }
+                    Text(ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") } ?? "model not running")
+                        .font(.callout).lineLimit(1)
+                }.foregroundColor(.secondary)
+            }.menuStyle(.borderlessButton).fixedSize().help("Where the assistant's model runs")
+            .sheet(isPresented: $showRemote) { RemoteSheet(ws: ws, shown: $showRemote) }
             Button { ws.bottomVisible.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }
                 .buttonStyle(.plain).help("Problems and terminal (⌘J)")
             Menu {

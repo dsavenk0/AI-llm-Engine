@@ -529,14 +529,47 @@ class Handler(BaseHTTPRequestHandler):
     def api_info(self, P, q, body):
         eng = None
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{self.server.engine_port}/health", timeout=1.5) as r:
-                h = json.load(r)
-            eng = {"model": h.get("model"), "state": h.get("state"), "context": h.get("context"),
-                   "vision": bool(h.get("vision")), "vision_capable": bool(h.get("vision_capable"))}
+            ep = self.server.endpoint
+            if ep.remote:                         # a remote server: the OpenAI model list is all there is to ask
+                req = urllib.request.Request(ep.base + "/models", headers=ep.headers())
+                with urllib.request.urlopen(req, timeout=4) as r:
+                    listing = json.load(r)
+                ids = [m.get("id") for m in listing.get("data", [])]
+                eng = {"model": ep.model if ep.model != "local" else (ids[0] if ids else "remote"),
+                       "state": "remote", "context": None, "vision": False, "vision_capable": False}
+            else:
+                with urllib.request.urlopen(ep.health_url, timeout=1.5) as r:
+                    h = json.load(r)
+                eng = {"model": h.get("model"), "state": h.get("state"), "context": h.get("context"),
+                       "vision": bool(h.get("vision")), "vision_capable": bool(h.get("vision_capable"))}
         except (OSError, ValueError):
             pass
         return self._json(200, {"root": P.root, "name": os.path.basename(P.root), "engine": eng,
-                                "git": P.git_status()})
+                                "git": P.git_status(), "remote": self.server.endpoint.remote,
+                                "endpoint": self.server.endpoint.base if self.server.endpoint.remote else None})
+
+    def api_endpoint(self, P, q, body):
+        """GET: where the model is. PUT {url, key, model, confirm} points the assistant at another server
+        (the key stays in memory of this process; the editor keeps it in the Keychain); PUT {reset: true}
+        returns to the engine on this Mac."""
+        srv = self.server
+        if self.command == "GET":
+            ep = srv.endpoint
+            return self._json(200, {"remote": ep.remote, "url": ep.base if ep.remote else "", "model": ep.model,
+                                    "has_key": bool(ep.key)})
+        if body.get("reset"):
+            srv.endpoint = agentloop.Endpoint.local(srv.engine_port)
+            return self._json(200, {"remote": False})
+        url = str(body.get("url") or "").strip()
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("the address must start with http:// or https://")
+        if parts.scheme == "http" and parts.hostname not in ("127.0.0.1", "localhost", "::1") and body.get("key"):
+            raise ValueError("a key is not sent over plain http to another computer — use https://")
+        if body.get("confirm") is not True:         # your messages and attached files will go to that server
+            return self._error(400, "pointing the assistant at another server needs an explicit confirmation")
+        srv.endpoint = agentloop.Endpoint(url.rstrip("/"), body.get("key") or "", body.get("model") or "local")
+        return self._json(200, {"remote": srv.endpoint.remote, "url": srv.endpoint.base})
 
     def api_tree(self, P, q, body):
         return self._json(200, {"path": q.get("path", ""), "entries": P.tree(q.get("path", ""))})
@@ -632,7 +665,7 @@ class Handler(BaseHTTPRequestHandler):
                 extra = memory.system_block(P.root)
             except Exception:
                 pass
-            finished = agentloop.run_agent(P, self.server.engine_port, msgs, emit, run, think=bool(body.get("think")),
+            finished = agentloop.run_agent(P, self.server.endpoint, msgs, emit, run, think=bool(body.get("think")),
                                            auto_edit=bool(body.get("auto_edit")), system_extra=extra)
             if finished:
                 emit({"type": "done"})
@@ -695,10 +728,9 @@ class Handler(BaseHTTPRequestHandler):
         if pictures:
             msgs[-1]["content"] = user_content(msgs[-1]["content"], pictures)
         msgs.insert(0, {"role": "system", "content": self.server.system_prompt()})
-        payload = {"model": "local", "messages": msgs, "stream": True,
-                   "chat_template_kwargs": {"enable_thinking": bool(body.get("think", False))}}
-        req = urllib.request.Request(f"http://127.0.0.1:{self.server.engine_port}/v1/chat/completions",
-                                     data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        ep = self.server.endpoint
+        req = urllib.request.Request(ep.chat_url, data=json.dumps(ep.payload(msgs, bool(body.get("think", False)))).encode(),
+                                     headers=ep.headers())
         try:
             r = urllib.request.urlopen(req, timeout=3600)
         except urllib.error.HTTPError as e:
@@ -724,6 +756,7 @@ class UIServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", port), Handler)
         self.project = project
         self.engine_port = engine_port
+        self.endpoint = agentloop.Endpoint.local(engine_port)
         self.token = token or secrets.token_urlsafe(18)
 
     def system_prompt(self):

@@ -45,6 +45,55 @@ def load(root):
             if isinstance(w, dict) and w.get("type") in ("openai", "cli")}
 
 
+PRESETS = {
+    "openrouter": {"type": "openai", "url": "https://openrouter.ai/api/v1", "model": "anthropic/claude-sonnet-5-5",
+                   "key_env": "OPENROUTER_API_KEY", "about": "any model on OpenRouter — change `model` to taste"},
+}
+
+
+def add_preset(root, name):
+    """Write a ready-made worker into .llm/workers.json (the key itself is read from the environment)."""
+    if name not in PRESETS:
+        raise ValueError(f"unknown preset {name!r}; available: {', '.join(PRESETS)}")
+    p = config_path(root)
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("workers", {})[name] = dict(PRESETS[name])
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return p
+
+
+def is_local_url(url):
+    """http(s) to this machine. Decided on the parsed host: a prefix test took "127.evil.com" for local."""
+    import ipaddress
+    import urllib.parse
+    host = (urllib.parse.urlsplit(str(url)).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def describe(workers):
+    """What using each worker does, in terms a person can judge: program to run, server and key variable."""
+    lines = []
+    for n, w in workers.items():
+        if w["type"] == "cli":
+            lines.append(f"{n}: runs  {' '.join(map(str, w.get('command', [])))}  in the workspace (may edit files)")
+        else:
+            key = f" with ${w['key_env']}" if w.get("key_env") else ""
+            where = "this machine" if is_local_url(w.get("url", "")) else "leaves this machine"
+            lines.append(f"{n}: sends tasks to {w.get('url')}{key}  ({where})")
+    return lines
+
+
 def usable(spec):
     """(ok, reason) — a worker whose key is missing is listed but not offered to the model."""
     if spec["type"] == "openai":
@@ -151,9 +200,9 @@ def tools(root, workers, allow=lambda what: True):
             return f"error: {e}"
         sends = f"send this task to “{worker}”" + (f" with {len(files)} file(s): {', '.join(files)}" if files else "")
         if spec["type"] == "cli":
-            sends += " — it runs in the workspace and may change files itself"
-        elif not str(spec.get("url", "")).startswith(("http://127.", "http://localhost", "http://[::1]")):
-            sends += " — leaves this machine"
+            sends += f" — runs `{' '.join(map(str, spec.get('command', [])))}` in the workspace and may change files itself"
+        elif not is_local_url(spec.get("url", "")):
+            sends += f" — leaves this machine ({spec.get('url')}" + (f", key ${spec['key_env']}" if spec.get("key_env") else "") + ")"
         if not allow(sends + f"\n    task: {task.strip()[:300]}"):
             return "user declined to delegate"
         try:

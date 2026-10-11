@@ -282,7 +282,11 @@ class TestAgentMcp(unittest.TestCase):
         names = lambda: {t["function"]["name"] for t in a.tool_schemas()}
         self.assertFalse(any(n.startswith("f__") for n in names()))     # config alone costs nothing
         a.auto = True
-        a.set_mcp(True)
+        from unittest import mock
+        from harness import trust
+        with mock.patch.object(trust, "STORE", os.path.join(root, "trusted.json")), \
+                mock.patch.object(agent.llm, "ask_yn", lambda q, default=True: True):
+            a.set_mcp(True)
         self.addCleanup(lambda: a.set_mcp(False))
         self.assertTrue({"f__echo", "f__boom"} <= names())
         self.assertIn("echo: yo", a.call_tool("f__echo", {"text": "yo"}))

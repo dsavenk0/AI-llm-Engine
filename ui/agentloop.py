@@ -210,12 +210,52 @@ class Tools:
         return out if len(out) <= MAX_TOOL_OUTPUT else out[:MAX_TOOL_OUTPUT] + f"\n… [truncated, {len(out)} chars]"
 
 
+class Endpoint:
+    """Where the model is: this Mac's engine (default) or any OpenAI-compatible server — another computer
+    running this engine, OpenRouter, a company gateway. `base` ends in /v1."""
+
+    def __init__(self, base, key="", model="local"):
+        self.base, self.key, self.model = base.rstrip("/"), key or "", model or "local"
+
+    @classmethod
+    def local(cls, port):
+        return cls(f"http://127.0.0.1:{port}/v1")
+
+    @property
+    def remote(self):
+        return not self.base.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+
+    @property
+    def chat_url(self):
+        return self.base + "/chat/completions"
+
+    @property
+    def health_url(self):
+        return self.base[:-3] + "/health" if self.base.endswith("/v1") else self.base + "/health"
+
+    def headers(self):
+        h = {"Content-Type": "application/json", "User-Agent": "llm-editor/1"}
+        if self.key:
+            h["Authorization"] = "Bearer " + self.key
+        return h
+
+    def payload(self, messages, think, **extra):
+        p = {"model": self.model, "messages": messages, "stream": True, **extra}
+        if not self.remote:                         # the local engine's own switch; a cloud API would reject it
+            p["chat_template_kwargs"] = {"enable_thinking": bool(think)}
+        return p
+
+
+def as_endpoint(x):
+    return x if isinstance(x, Endpoint) else Endpoint.local(x)
+
+
 def _stream_chat(engine_port, messages, think, run):
-    """Yield ("content"|"reasoning", text) and finally ("calls", [tool calls]). Raises RuntimeError."""
-    payload = {"model": "local", "messages": messages, "tools": TOOLS, "stream": True,
-               "chat_template_kwargs": {"enable_thinking": bool(think)}}
-    req = urllib.request.Request(f"http://127.0.0.1:{engine_port}/v1/chat/completions",
-                                 data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    """Yield ("content"|"reasoning", text) and finally ("calls", [tool calls]). Raises RuntimeError.
+    `engine_port` is a local port number or an Endpoint."""
+    ep = as_endpoint(engine_port)
+    req = urllib.request.Request(ep.chat_url, data=json.dumps(ep.payload(messages, think, tools=TOOLS)).encode(),
+                                 headers=ep.headers())
     try:
         r = urllib.request.urlopen(req, timeout=3600)
     except urllib.error.HTTPError as e:
@@ -223,7 +263,8 @@ def _stream_chat(engine_port, messages, think, run):
         e.close()
         raise RuntimeError(f"the model returned {e.code}: {detail}")
     except (urllib.error.URLError, OSError):
-        raise RuntimeError("the model is not running — start it first (./llm start)")
+        raise RuntimeError("cannot reach the model server at " + ep.base if ep.remote
+                           else "the model is not running — start it first (./llm start)")
     calls = []
     try:
         for raw in r:

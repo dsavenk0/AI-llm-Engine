@@ -27,6 +27,7 @@ def git(cwd, *args):
 
 class FakeEngine(BaseHTTPRequestHandler):
     seen = []
+    headers_seen = []
 
     def log_message(self, *a):
         pass
@@ -39,6 +40,7 @@ class FakeEngine(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        FakeEngine.headers_seen.append(dict(self.headers))
         FakeEngine.seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
         events = [{"choices": [{"delta": {"content": "Hel"}}]}, {"choices": [{"delta": {"content": "lo"}}]}]
         body = "".join(f"data: {json.dumps(e)}\n\n" for e in events).encode() + b"data: [DONE]\n\n"
@@ -238,6 +240,52 @@ class TestReviewFixes(Base):
         resp = conn.getresponse()
         self.assertEqual(resp.status, 400)
         conn.close()
+
+
+class TestEndpoint(Base):
+    """The assistant can talk to another OpenAI-compatible server (another computer, OpenRouter)."""
+
+    def local_url(self):
+        return f"http://127.0.0.1:{self.engine.server_address[1]}/v1"
+
+    def test_the_default_is_the_engine_on_this_mac(self):
+        code, r = self.call("GET", "/api/endpoint")
+        self.assertEqual((code, r["remote"], r["has_key"]), (200, False, False))
+
+    def test_pointing_it_elsewhere_needs_confirmation_and_a_sane_address(self):
+        self.assertEqual(self.call("PUT", "/api/endpoint", {"url": "https://openrouter.ai/api/v1"})[0], 400)
+        for bad in ("ftp://x/v1", "openrouter.ai", "", "file:///etc/passwd"):
+            self.assertEqual(self.call("PUT", "/api/endpoint", {"url": bad, "confirm": True})[0], 400, bad)
+        code, r = self.call("PUT", "/api/endpoint", {"url": "http://192.168.1.20:8090/v1", "key": "k", "confirm": True})
+        self.assertEqual(code, 400)                                  # a key never goes over plain http to another host
+        self.assertIn("https", r["error"])
+
+    def test_a_chat_goes_to_the_chosen_server_with_its_key_and_model(self):
+        code, _ = self.call("PUT", "/api/endpoint", {"url": self.local_url(), "key": "sk-test", "model": "gpt-x",
+                                                     "confirm": True})
+        self.assertEqual(code, 200)
+        code, r = self.call("GET", "/api/endpoint")
+        self.assertEqual((r["model"], r["has_key"]), ("gpt-x", True))
+        self.assertNotIn("sk-test", json.dumps(r))                   # the key is never read back
+        self.call("POST", "/api/chat", {"messages": [{"role": "user", "content": "hi"}]}, raw=True)
+        self.assertEqual(FakeEngine.seen[-1]["model"], "gpt-x")
+        self.assertEqual(FakeEngine.headers_seen[-1].get("Authorization"), "Bearer sk-test")
+        self.call("PUT", "/api/endpoint", {"reset": True})
+        self.assertEqual(self.call("GET", "/api/endpoint")[1]["model"], "local")
+
+    def test_a_remote_payload_has_no_local_only_fields(self):
+        from ui import agentloop
+        cloud = agentloop.Endpoint("https://openrouter.ai/api/v1", "k", "anthropic/claude-sonnet-5-5")
+        self.assertTrue(cloud.remote)
+        p = cloud.payload([{"role": "user", "content": "x"}], think=True)
+        self.assertNotIn("chat_template_kwargs", p)
+        self.assertEqual(p["model"], "anthropic/claude-sonnet-5-5")
+        self.assertEqual(cloud.chat_url, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(cloud.headers()["Authorization"], "Bearer k")
+        local = agentloop.Endpoint.local(8090)
+        self.assertFalse(local.remote)
+        self.assertIn("chat_template_kwargs", local.payload([], think=False))
+        self.assertEqual(local.health_url, "http://127.0.0.1:8090/health")
 
 
 class TestBranches(Base):

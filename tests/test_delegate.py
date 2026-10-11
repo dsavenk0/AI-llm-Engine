@@ -159,7 +159,11 @@ class TestAgentWorkers(Base):
         a = agent.Agent(cfg, self.root)
         names = lambda: {t["function"]["name"] for t in a.tool_schemas()}
         self.assertNotIn("delegate", names())               # configured is not offered until asked
-        self.assertTrue(a.set_workers(True))
+        from unittest import mock
+        from harness import trust
+        with mock.patch.object(trust, "STORE", os.path.join(self.root, "trusted.json")), \
+                mock.patch.object(agent.llm, "ask_yn", lambda q, default=True: True):
+            self.assertTrue(a.set_workers(True))
         self.assertIn("delegate", names())
         a.auto = True
         self.assertTrue(a.call_tool("delegate", {"worker": "w", "task": "hi"}).startswith("ANSWER: hi"))

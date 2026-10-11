@@ -168,10 +168,27 @@ class Agent:
     def allow_delegate(self, what):
         return self.auto or llm.ask_yn(Y(T("Delegate: {what}?").format(what=what)), False)
 
+    def trust_config(self, path, lines):
+        """A config that came with the project may start programs and put secrets into requests: show what
+        it would do and ask once (again when the file changes). True = go ahead."""
+        from harness import trust
+        if trust.is_trusted(path, self.root):
+            return True
+        print(Y(T("{p} came with this project. Turning it on would:").format(p=os.path.relpath(path, self.root))))
+        for ln in lines:
+            print("   " + ln)
+        if self.confirm(T("Trust this file and continue?"), force=True):
+            trust.remember(path)
+            return True
+        print(DIM(T("Not enabled.")))
+        return False
+
     def set_workers(self, on):
         """Offer the configured workers to the model as one `delegate` tool."""
         from harness import delegate
         self.extra.pop("delegate", None)
+        if on and not self.trust_config(delegate.config_path(self.root), delegate.describe(delegate.load(self.root))):
+            return False
         if on:
             self.extra.update(delegate.tools(self.root, delegate.load(self.root), self.allow_delegate))
         return "delegate" in self.extra
@@ -184,6 +201,8 @@ class Agent:
                 self.extra.pop(mcp.tool_name(srv.name, t["name"]), None)
             srv.close()
         self.mcp, self.mcp_failed, self.mcp_ok = [], {}, {}
+        if on and not self.trust_config(mcp.config_path(self.root), mcp.describe(self.root)):
+            return
         if on:
             self.mcp, self.mcp_failed = mcp.load_servers(self.root)
             self.extra.update(mcp.tools(self.mcp, self.allow_mcp))
@@ -458,6 +477,11 @@ class Agent:
                 continue
             if line.startswith("/workers"):
                 from harness import delegate
+                if line.split()[1:2] == ["add"]:
+                    try:
+                        print(DIM(T("Added to {p}").format(p=delegate.add_preset(self.root, (line.split() + [""])[2]))))
+                    except ValueError as e:
+                        print(Y(str(e)))
                 workers = delegate.load(self.root)
                 if line.split()[1:] in (["on"], ["off"]):
                     on = self.set_workers(line.endswith("on"))

@@ -91,6 +91,7 @@ final class Workspace: ObservableObject {
     @Published var inline: [InlineFile] = []         // files from elsewhere: their text travels with the message
     @Published var pictures: [Picture] = []
     @Published var visionSwitching = false
+    @Published var remoteURL: String?                 // set while the assistant talks to another server
     @Published var saveTick = 0                       // bumped after every save: the preview reloads on it
     @Published var branches: BranchesResponse?
     @Published var toast: String?
@@ -181,7 +182,8 @@ final class Workspace: ObservableObject {
             do {
                 try await backend.start(root: path, llmRoot: llmRoot, enginePort: enginePort)
                 let info: InfoResponse = try await backend.get("/api/info")
-                projectName = info.name; engine = info.engine; git = info.git
+                projectName = info.name; engine = info.engine; git = info.git; remoteURL = info.endpoint
+                await restoreEndpoint()
                 await loadBranches()
                 await loadDir("")
                 starting = false
@@ -205,6 +207,7 @@ final class Workspace: ObservableObject {
                 if let info: InfoResponse = try? await self.backend.get("/api/info") {
                     self.engine = info.engine
                     self.git = info.git
+                    self.remoteURL = info.endpoint
                 } else { self.engine = nil }
             }
         }

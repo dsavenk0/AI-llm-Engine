@@ -69,6 +69,24 @@ def load_config(root):
     return {n: dict(s, enabled=s.get("enabled", True)) for n, s in servers.items() if isinstance(s, dict)}
 
 
+def describe(root):
+    """One line per configured server saying what turning it on does: the program that will be started, or
+    the address that will be contacted and which environment variables go into the request."""
+    out = []
+    for name, spec in load_config(root).items():
+        if not spec["enabled"]:
+            continue
+        env = sorted(set(re.findall(r"\$\{(\w+)\}", json.dumps(spec))))
+        use = f" — uses ${', $'.join(env)}" if env else ""
+        if spec.get("url"):
+            out.append(f"{name}: connects to {spec['url']}{use}")
+        elif spec.get("command"):
+            out.append(f"{name}: runs  {spec['command']} {' '.join(map(str, spec.get('args') or []))}{use}")
+        else:
+            out.append(f"{name}: (incomplete)")
+    return out
+
+
 def add_preset(root, name):
     if name not in PRESETS:
         raise ValueError(f"unknown preset {name!r}; available: {', '.join(PRESETS)}")
