@@ -115,8 +115,12 @@ class CompatEngine:
 
         tpl = self._template_source()
         self.supports_thinking = bool(self.tok.has_thinking or "enable_thinking" in tpl)
-        self.thinking_default = bool(self.supports_thinking and self._opens_reasoning(
-            self._render([{"role": "user", "content": "hi"}], None, {})))
+        # Reasons by default unless the template itself pre-fills an empty, closed think block
+        # (Qwen3.5-0.8B does; Qwen3 leaves `<think>` to the model, so it thinks unless told not to).
+        self.think_tags = self._think_tags(tpl)
+        default_prompt = self._render([{"role": "user", "content": "hi"}], None, {})
+        self.thinking_default = bool(self.supports_thinking and not (
+            self.think_tags and default_prompt.rstrip().endswith(self.think_tags[1])))
         self.thinking = self.thinking_default if thinking is None else bool(thinking)
         self.efforts = []
 
@@ -195,14 +199,21 @@ class CompatEngine:
         return self.tok.apply_chat_template(messages, tools=tools or None, add_generation_prompt=True,
                                             tokenize=False, **kw)
 
+    def _think_tags(self, tpl):
+        """(start, end) of this model's reasoning block: from its tokenizer when mlx-lm detected
+        one, else the Qwen-style tags when the template speaks of them (mlx-lm misses some)."""
+        if self.tok.has_thinking:
+            return self.tok.think_start, self.tok.think_end
+        if "</think>" in tpl and "<think>" in tpl:
+            return "<think>", "</think>"
+        return None
+
     def _opens_reasoning(self, text):
         """True when the rendered prompt ends inside an open reasoning block."""
-        if not self.tok.has_thinking:
+        if not self.think_tags:
             return False
-        try:
-            return self.tok.rfind_think_start(text) > self.tok.rfind_think_end(text)
-        except Exception:
-            return False
+        start, end = self.think_tags
+        return text.rfind(start) > text.rfind(end)
 
     def build_prompt(self, messages, tools=None, thinking=None, effort=None, extra_kwargs=None):
         thinking = self.thinking if thinking is None else thinking
@@ -227,7 +238,13 @@ class CompatEngine:
                 m["content"] = "".join(texts)
             flat.append(m)
         text = self._render(flat, tools, kw)
-        return text, images, self._opens_reasoning(text)
+        opens = self._opens_reasoning(text)
+        if thinking and self.think_tags and not opens and not text.rstrip().endswith(self.think_tags[1]):
+            # the template leaves `<think>` to the model (Qwen3): write it ourselves so the server
+            # parses the reasoning and the think budget applies, exactly as the model would begin
+            text += self.think_tags[0] + "\n"
+            opens = True
+        return text, images, opens
 
     def encode(self, text, images):
         self.ensure_awake()
@@ -239,7 +256,7 @@ class CompatEngine:
     def parser_markers(self):
         """Marker strings for the server's OutputParser, from this model's own tokenizer."""
         t = self.tok
-        return {"think_end": t.think_end if t.has_thinking else None,
+        return {"think_end": self.think_tags[1] if self.think_tags else None,
                 "tool_start": t.tool_call_start if t.has_tool_calling else None,
                 "tool_end": t.tool_call_end if t.has_tool_calling else None}
 
@@ -358,7 +375,7 @@ class CompatEngine:
 
         budget = int(max_tokens * self.think_frac) if thinking_open and self.think_frac else None
         in_think, forced = budget is not None, None
-        think_end = self.tok.think_end if self.tok.has_thinking else None
+        think_end = self.think_tags[1] if self.think_tags else None
         closing = self.tok.encode(f"\n{think_end}\n\n", add_special_tokens=False) if think_end else []
 
         dec = StreamDecoder(self.decoder)
