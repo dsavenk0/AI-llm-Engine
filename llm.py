@@ -935,17 +935,39 @@ def _pull_dest(repo):
     return os.path.join(HOME, ".cache", "huggingface", "hub", *repo.split("/"))
 
 
+def install_state(repo, siblings=None):
+    """"complete" | "partial" | "none" for a repo's download folder. With the hub listing (sizes) every
+    wanted file must be there at its full size; without it, a folder with a config, weights and no
+    .part files counts as complete. A folder that merely exists is NOT a finished download."""
+    dest = _pull_dest(repo)
+    if not os.path.isdir(dest):
+        return "none"
+    if siblings:
+        for f in siblings:
+            name = f["rfilename"]
+            if name.lower().endswith(PULL_SKIP):
+                continue
+            q = os.path.join(dest, name)
+            if not os.path.isfile(q) or (f.get("size") and os.path.getsize(q) != f["size"]):
+                return "partial"
+        return "complete"
+    parts = [n for _, _, fs in os.walk(dest) for n in fs if n.endswith(".part")]
+    has = os.path.isfile(os.path.join(dest, "config.json")) and any(
+        n.endswith(".safetensors") for n in os.listdir(dest))
+    return "complete" if has and not parts else "partial"
+
+
 def hf_search(query, limit=20):
     """MLX models on the hub, most downloaded first, with size and engine compatibility."""
     from concurrent.futures import ThreadPoolExecutor
     found = _hf(f"/api/models?search={urllib.parse.quote(query)}&filter=mlx&sort=downloads&direction=-1&limit={limit}")
 
     def probe(repo):
-        """(size in GB, storage format the engine can't read yet?) for one repo."""
+        """(size in GB, storage format the engine can't read yet?, install state) for one repo."""
         try:
             info = _hf(f"/api/models/{repo}?blobs=true", timeout=15)
         except Exception:
-            return None, False
+            return None, False, install_state(repo)
         names = {f["rfilename"] for f in info.get("siblings", [])}
         size = sum(f.get("size") or 0 for f in info.get("siblings", [])
                    if not f["rfilename"].lower().endswith(PULL_SKIP)) / 2**30
@@ -956,14 +978,14 @@ def hf_search(query, limit=20):
                 unsupported = bool(rt.get("requires_jang_ternary_packed_expansion") or rt.get("requires_jang_affine1_expansion"))
             except Exception:
                 pass
-        return size, unsupported
+        return size, unsupported, install_state(repo, info.get("siblings", []))
     with ThreadPoolExecutor(8) as ex:
         probes = list(ex.map(probe, [m["id"] for m in found]))
     sizes = [p_[0] for p_ in probes]
     return [{"id": m["id"], "downloads": m.get("downloads", 0), "likes": m.get("likes", 0), "size": sz,
              "route": "none" if pr[1] else hub_route(m.get("tags")),
              "compatible": hub_route(m.get("tags")) != "none" and not pr[1],
-             "local": os.path.isdir(_pull_dest(m["id"])),
+             "local": pr[2] == "complete", "partial": pr[2] == "partial",
              "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz, pr in zip(found, sizes, probes)]
 
 

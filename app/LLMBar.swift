@@ -952,17 +952,28 @@ struct HubModel: Identifiable {
     let size: Double?
     let compatible, local, fits: Bool
     var route = "native"
+    var partial = false               // a download was started and not finished: resume, don't start over
 }
 
 final class Downloader: ObservableObject {
-    @Published var repo: String? = nil
+    @Published var repo: String? = nil        // downloading now
+    @Published var paused: String? = nil      // paused by the user; the .part files stay, resume continues
     @Published var fraction = 0.0
     @Published var file = ""
     @Published var error: String? = nil
     private var proc: Process?
+    private var stoppedByUser = false
+    private var finished: (() -> Void)?
+
+    /// Pause = stop the transfer but keep what is on disk; `resume()` picks up from the .part files.
+    func pause() { stoppedByUser = true; proc?.terminate() }
+    func resume() { if let r = paused, let f = finished { start(r, done: f) } }
+    func cancel() { stoppedByUser = true; paused = nil; finished = nil; proc?.terminate() }
 
     func start(_ repo: String, done: @escaping () -> Void) {
-        self.repo = repo; fraction = 0; file = ""; error = nil
+        let keep = (paused == repo) ? fraction : 0       // a resumed download keeps its progress bar
+        self.repo = repo; paused = nil; fraction = keep; file = ""; error = nil
+        stoppedByUser = false; finished = done
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Paths.shared.root + "/llm")
         p.arguments = ["pull", repo, "--progress"]
@@ -994,7 +1005,11 @@ final class Downloader: ObservableObject {
         p.terminationHandler = { proc in
             DispatchQueue.main.async {
                 pipe.fileHandleForReading.readabilityHandler = nil
-                if proc.terminationStatus != 0 && self.error == nil { self.error = L("Download failed", "Загрузка не удалась") }
+                if self.stoppedByUser {
+                    if self.finished != nil { self.paused = repo }     // paused, not cancelled
+                } else if proc.terminationStatus != 0 && self.error == nil {
+                    self.error = L("Download failed", "Загрузка не удалась")
+                }
                 self.repo = nil
                 self.proc = nil
                 done()
@@ -1004,7 +1019,6 @@ final class Downloader: ObservableObject {
         try? p.run()
     }
 
-    func cancel() { proc?.terminate() }
 }
 
 struct ModelsTab: View {
@@ -1131,11 +1145,27 @@ struct ModelsTab: View {
                             Text(L("Downloading ", "Загрузка ") + repo).font(.system(size: 11, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
                             Spacer()
                             Text("\(Int(dl.fraction * 100))%").font(HUD.mono(11)).foregroundColor(HUD.phosphor)
+                            Button(action: dl.pause) { Image(systemName: "pause.fill") }.buttonStyle(.plain).foregroundColor(HUD.text)
+                                .help(L("Pause (keeps what is downloaded)", "Пауза (скачанное сохраняется)"))
                             Button(action: dl.cancel) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundColor(HUD.dim)
-                                .help(L("Cancel (resumes next time)", "Отменить (докачается в следующий раз)"))
+                                .help(L("Stop (what is downloaded stays; downloading again continues from it)",
+                                        "Остановить (скачанное остаётся; повторная загрузка продолжит с него)"))
                         }
                         Bar(value: dl.fraction, color: HUD.phosphor)
                         Text(dl.file).font(HUD.mono(9)).foregroundColor(HUD.dim).lineLimit(1)
+                    }
+                } else if let repo = dl.paused {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(L("Paused · ", "Пауза · ") + repo).font(.system(size: 11, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
+                            Spacer()
+                            Text("\(Int(dl.fraction * 100))%").font(HUD.mono(11)).foregroundColor(HUD.amber)
+                            Button(action: dl.resume) { Image(systemName: "play.fill") }.buttonStyle(.plain).foregroundColor(HUD.phosphor)
+                                .help(L("Resume", "Продолжить"))
+                            Button(action: dl.cancel) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundColor(HUD.dim)
+                                .help(L("Forget the pause (files stay on disk)", "Сбросить паузу (файлы остаются на диске)"))
+                        }
+                        Bar(value: dl.fraction, color: HUD.amber)
                     }
                 }
                 if let err = dl.error { Text(err).font(HUD.mono(10)).foregroundColor(HUD.magenta).lineLimit(2) }
@@ -1153,6 +1183,7 @@ struct ModelsTab: View {
                                 default: badge(L("not supported", "не поддерживается"), HUD.dim)
                                 }
                                 if r.size != nil { badge(r.fits ? L("fits RAM", "влезет") : L("too big", "не влезет"), r.fits ? HUD.cyan : HUD.magenta) }
+                                if r.partial { badge(L("partial", "не докачана"), HUD.amber) }
                             }
                         }
                         Spacer()
@@ -1162,8 +1193,9 @@ struct ModelsTab: View {
                             Button(action: { dl.start(r.id) { e.loadModels(); search() } }) { Image(systemName: "arrow.down.circle") }
                                 .buttonStyle(.plain).font(.system(size: 16)).foregroundColor(r.compatible ? HUD.phosphor : HUD.dim)
                                 .disabled(dl.repo != nil)
-                                .help(r.compatible ? L("Download (resumable)", "Скачать (с докачкой)")
-                                                   : L("Downloads, but no backend here can run it", "Скачается, но ни один бэкенд её не запустит"))
+                                .help(r.partial ? L("Resume the download", "Докачать")
+                                      : (r.compatible ? L("Download (resumable)", "Скачать (с докачкой)")
+                                                      : L("Downloads, but no backend here can run it", "Скачается, но ни один бэкенд её не запустит")))
                         }
                     }.padding(.vertical, 2)
                 }
@@ -1190,7 +1222,7 @@ struct ModelsTab: View {
             results = arr.map {
                 HubModel(id: $0["id"] as? String ?? "?", downloads: $0["downloads"] as? Int ?? 0, size: $0["size"] as? Double,
                          compatible: $0["compatible"] as? Bool ?? false, local: $0["local"] as? Bool ?? false, fits: $0["fits"] as? Bool ?? false,
-                         route: $0["route"] as? String ?? "native")
+                         route: $0["route"] as? String ?? "native", partial: $0["partial"] as? Bool ?? false)
             }
         }
     }

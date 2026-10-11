@@ -407,12 +407,43 @@ class TestHub(State):
         self.assertTrue(res["org/native-4bit"]["compatible"])
         self.assertAlmostEqual(res["org/native-4bit"]["size"] * 2**30, len(WEIGHTS) + len(CONFIG) + 2, delta=2)  # .png skipped
         self.assertEqual(res["org/glm-mlx"]["route"], "mlxlm")
-        self.assertTrue(res["org/glm-mlx"]["local"])
+        self.assertFalse(res["org/glm-mlx"]["local"])     # the folder exists but nothing is in it
+        self.assertTrue(res["org/glm-mlx"]["partial"])
         self.assertEqual(res["org/gguf-only"]["route"], "none")
         self.assertEqual(res["org/mlx-and-gguf"]["route"], "none")      # a GGUF tag wins over mlx/qwen3_5
         self.assertFalse(res["org/gguf-only"]["compatible"])
         self.assertFalse(res["org/packed-jang"]["compatible"])        # needs storage expansion we lack
         self.assertTrue(res["org/native-4bit"]["fits"])
+
+    def test_a_half_downloaded_model_is_partial_not_installed(self):
+        dest = llm._pull_dest("org/native-4bit")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "config.json"), "wb") as f:
+            f.write(CONFIG)
+        with open(os.path.join(dest, "model.safetensors.part"), "wb") as f:
+            f.write(WEIGHTS[:1000])
+        res = {r["id"]: r for r in llm.hf_search("x")}["org/native-4bit"]
+        self.assertFalse(res["local"])                    # a folder that merely exists is not a model
+        self.assertTrue(res["partial"])
+        self.assertEqual(llm.install_state("org/native-4bit"), "partial")
+        self.assertEqual(llm.install_state("org/never-seen"), "none")
+        # resuming finishes it, and only then does it count as installed
+        ok, _ = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertTrue(ok)
+        res = {r["id"]: r for r in llm.hf_search("x")}["org/native-4bit"]
+        self.assertTrue(res["local"])
+        self.assertFalse(res["partial"])
+
+    def test_a_short_file_under_the_final_name_is_partial_too(self):
+        dest = llm._pull_dest("org/glm-mlx")
+        os.makedirs(dest)
+        for name, body in (("config.json", CONFIG), ("model.safetensors", WEIGHTS[:5000])):
+            with open(os.path.join(dest, name), "wb") as f:
+                f.write(body)
+        # (without the hub listing sizes are unknown, so only hf_search below — which has it — can tell)
+        res = {r["id"]: r for r in llm.hf_search("x")}["org/glm-mlx"]
+        self.assertTrue(res["partial"])
+        self.assertFalse(res["local"])
 
     def test_pull_downloads_verifies_and_skips_previews(self):
         ok, out = quiet(llm.hf_pull, "org/native-4bit")
