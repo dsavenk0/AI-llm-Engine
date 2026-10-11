@@ -145,5 +145,11 @@
   "Search & download models": "Поиск и загрузка моделей",
   "weights {w:.0f} MB · context {kv:.0f} MB · SSM+snapshots {ssm:.0f} MB · buffers {buf:.0f} MB · process {p:.0f} MB": "веса {w:.0f} МБ · контекст {kv:.0f} МБ · SSM+снимки {ssm:.0f} МБ · буферы {buf:.0f} МБ · процесс {p:.0f} МБ",
   "model default": "по умолчанию модели",
-  "Download failed: {name}: {err}": "Не удалось загрузить {name}: {err}"
+  "Download failed: {name}: {err}": "Не удалось загрузить {name}: {err}",
+  "Compacting the conversation to save context…": "Сжимаю историю, чтобы освободить контекст…",
+  "Could not summarize:": "Не удалось сделать резюме:",
+  "— compacted: {a} → {b} messages": "— сжато: {a} → {b} сообщений",
+  "No project memory yet — /remember <note>": "Памяти проекта пока нет — /remember <заметка>",
+  "Remembered.": "Запомнил.",
+  "Usage: /remember <note>": "Использование: /remember <заметка>"
 }

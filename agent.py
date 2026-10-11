@@ -8,7 +8,10 @@ The model gets file and shell tools scoped to the workspace. Writes, edits and
 commands are shown (with a diff) and need confirmation unless /auto is on.
 Hard-to-reverse or outward-facing commands (git push, rm -rf, sudo, ...) always
 ask, even with /auto on — see DANGEROUS_PATTERNS.
-Commands: /auto  /clear  /think on|off  /exit
+Commands: /auto  /clear  /think on|off  /compact  /memory  /remember <note>  /exit
+
+Long sessions are compacted automatically before they fill the context window; standing
+project instructions are read from .llm/memory.md, AGENTS.md or CLAUDE.md (harness/).
 """
 import difflib
 import fnmatch
@@ -21,6 +24,7 @@ import time
 import urllib.request
 
 import llm
+from harness import compact, memory
 from llm import B, CY, DIM, G, R, T, Y
 
 MAX_TOOL_OUTPUT = 12000
@@ -97,7 +101,12 @@ class Agent:
         self.url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
         self.auto = False
         self.think = True
-        self.messages = [{"role": "system", "content": SYSTEM.format(root=self.root)}]
+        self.messages = [{"role": "system", "content": self.system_prompt()}]
+        self.prompt_tokens = 0       # size of the last prompt, from the server's usage report
+        self.context = (llm.health(cfg) or {}).get("context") or 0
+
+    def system_prompt(self):
+        return SYSTEM.format(root=self.root) + memory.system_block(self.root)
 
     # ───────────────────────── tools ─────────────────────────
     def path(self, p):
@@ -250,6 +259,7 @@ class Agent:
                     calls += d.get("tool_calls") or []
         print()
         if usage:
+            self.prompt_tokens = usage.get("prompt_tokens") or self.prompt_tokens
             dt = time.time() - t0
             cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
             print(DIM(T("— {inp} in ({cached} cached) / {out} out · {s:.1f} s").format(
@@ -261,9 +271,36 @@ class Agent:
             msg["tool_calls"] = [{"id": c["id"], "type": "function", "function": c["function"]} for c in calls]
         return msg
 
+    def oneshot(self, prompt):
+        """A plain, non-streamed, no-tools, no-reasoning completion (used for summaries)."""
+        body = {"model": "local", "stream": False, "max_tokens": 1500,
+                "messages": [{"role": "user", "content": prompt}],
+                "chat_template_kwargs": {"enable_thinking": False}}
+        req = urllib.request.Request(self.url, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3600) as r:
+            return json.load(r)["choices"][0]["message"].get("content") or ""
+
+    def compact(self, force=False):
+        """Fold old turns into a summary when the last prompt came close to the context size."""
+        if not (force or compact.needs_compaction(self.prompt_tokens, self.context)):
+            return
+        before = len(self.messages)
+        msgs, saved = compact.shrink(self.messages)
+        self.messages = msgs
+        if force or compact.needs_compaction(self.prompt_tokens - saved // 3, self.context):
+            print(DIM(T("Compacting the conversation to save context…")))
+            try:
+                self.messages = compact.compact(self.messages, self.oneshot)
+            except Exception as e:
+                print(Y(T("Could not summarize:") + f" {e}"))
+        self.prompt_tokens = 0
+        print(DIM(T("— compacted: {a} → {b} messages").format(a=before, b=len(self.messages))))
+
     def turn(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
         for _ in range(MAX_STEPS):
+            self.compact()
             msg = self.complete()
             self.messages.append(msg)
             if not msg.get("tool_calls"):
@@ -281,7 +318,7 @@ class Agent:
         print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
 
     def repl(self):
-        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /exit"))
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /compact  /memory  /remember  /exit"))
         while True:
             mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
             try:
@@ -300,6 +337,22 @@ class Agent:
             if line == "/clear":
                 self.messages = self.messages[:1]
                 print(DIM(T("History cleared.")))
+                continue
+            if line == "/compact":
+                self.compact(force=True)
+                continue
+            if line == "/memory":
+                rel, text = memory.load(self.root)
+                print(DIM(f"{rel}\n{text}") if text else DIM(T("No project memory yet — /remember <note>")))
+                continue
+            if line.startswith("/remember"):
+                note = line[len("/remember"):].strip()
+                try:
+                    memory.remember(self.root, note)
+                    self.messages[0]["content"] = self.system_prompt()
+                    print(DIM(T("Remembered.")))
+                except ValueError:
+                    print(Y(T("Usage: /remember <note>")))
                 continue
             if line.startswith("/think"):
                 self.think = not line.endswith("off")
