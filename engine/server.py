@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import re
+import signal
 import socketserver
 import sys
 import threading
@@ -24,7 +25,15 @@ _DONE = object()
 
 
 def worker(init):
-    """All MLX work runs on this one thread: MLX GPU streams are thread-local."""
+    """All MLX work runs on this one thread: MLX GPU streams are thread-local.
+
+    The SSD prefix cache is persisted on sleep (Engine.sleep) and on a clean shutdown
+    (_shutdown, below) — not after every request. A long conversation's snapshot point
+    grows every turn, so saving it each time would mean writing the whole growing
+    history to disk on every single message; saving only when the in-memory state is
+    actually about to go away gets the same "resume without re-prefilling" benefit for
+    a small fraction of the SSD writes.
+    """
     global ENGINE
     ENGINE = init()
     READY.set()
@@ -44,7 +53,6 @@ def worker(init):
         finally:
             out.put(_DONE)
         ENGINE.last_used = time.time()
-        ENGINE.persist_prefix()  # after the client got its answer
 
 
 def run_job(fn):
@@ -526,6 +534,25 @@ def main():
                           log=log)
     threading.Thread(target=worker, args=(init,), daemon=True).start()
     READY.wait()
+
+    def _persist_job():
+        ENGINE.persist_prefix()
+        return iter(())  # no streamed output, just run on the worker thread and finish
+
+    def _shutdown(signum, frame):
+        # persist_prefix touches MLX arrays, so it has to run on the worker thread like
+        # everything else — route it through the same job queue chat requests use, then
+        # exit directly (stop/restart already has its own SIGKILL fallback if this hangs).
+        try:
+            for _ in run_job(_persist_job):
+                pass
+        except Exception:
+            pass
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     srv = Server((ARGS.host, ARGS.port), Handler)
     log(f"serving {ARGS.name} on http://{ARGS.host}:{ARGS.port}/v1  "
         f"(context {ENGINE.max_context}, max output {ENGINE.max_tokens})")

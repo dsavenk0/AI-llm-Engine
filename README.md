@@ -91,9 +91,12 @@ embeddings and quantized gate projections.
 - **Auto-sleep.** After 15 idle minutes (configurable, 0 = never) the engine unloads the weights and gives about 7 GB
   back to macOS. The next request wakes it in about 2 s.
 - **SSD prefix cache.** The KV and recurrent state at two restore points per request (the end of the system prompt and
-  the start of the answer) is written to `~/.cache/ai-llm-engine/prefix/` after the response is sent. The budget is
-  8 GB by default, and the least recently used entries go first. A long agent system prompt is prefilled once and
-  then restored from disk across sleeps, restarts and model switches, with output identical to a cold run.
+  the start of the answer) is written to `~/.cache/ai-llm-engine/prefix/` (configurable) when the model goes to sleep
+  or the server shuts down cleanly — not after every single message, since a growing conversation's snapshot point is
+  different every turn and writing the whole thing to disk each time would be wasteful SSD wear for a cache that's
+  only a speed optimization. The budget is 8 GB by default, and the least recently used entries go first. A long
+  agent system prompt is prefilled once and then restored from disk across sleeps, restarts and model switches, with
+  output identical to a cold run.
 
 ### Menu-bar app (optional)
 
