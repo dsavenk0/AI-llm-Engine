@@ -878,6 +878,44 @@ class TestJangPackedModel(TestPTQ1Model):
         self.assertEqual(eng.model.args["ternary_scheme"], "ptq1")   # the default; no ternary module exists
 
 
+class TestPrefixDivergence(unittest.TestCase):
+    """An agent that puts a changing value (a time, a file list) in the middle of its system prompt used to
+    be prefilled whole every session: the stored prompt was no prefix of the new one. The engine now also
+    takes a restore point where the two part, so the shared beginning is restored next time."""
+
+    def test_the_shared_beginning_is_restored_after_one_miss(self):
+        import tempfile
+        from engine.generate import Engine
+        from tests.synth import CHATML, make_bundle
+        d, cache_dir = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_bundle(d, CHATML, seed=31)
+        log = []
+        eng = Engine(d, vision=False, max_context=4096, max_tokens=4, disk_cache_gb=1, disk_cache_dir=cache_dir,
+                     thinking=False, log=log.append)
+        shared = ("You are a coding agent. Rules: be brief, show diffs, never delete files, ask when unsure. " * 30)
+
+        def run(stamp):
+            msgs = [{"role": "system", "content": f"{shared}\nCurrent time: {stamp}\nMore rules: be kind."},
+                    {"role": "user", "content": "hello there"}]
+            text, _, _ = eng.build_prompt(msgs, thinking=False)
+            ids, _ = eng.encode(text, [])
+            st = None
+            for it in eng.generate(ids, sampling={"temperature": 0}, max_tokens=2):
+                if isinstance(it, dict):
+                    st = it
+            eng.sleep()                                    # restore points are written to the SSD cache here
+            return st, len(ids)
+
+        a, _ = run("2026-10-11 10:00")
+        self.assertEqual(a["cached_tokens"], 0)
+        b, n = run("2026-10-11 10:07")                     # the time differs: nothing to restore, but a point is added
+        self.assertEqual(b["cached_tokens"], 0)
+        self.assertTrue(any("differs — restore point added" in m for m in log), log)
+        c, _ = run("2026-10-11 10:19")                     # the third session restores the shared beginning
+        self.assertGreater(c["cached_tokens"], 1000)
+        self.assertLess(c["cached_tokens"], n)
+
+
 class TestStopStrings(unittest.TestCase):
     """A stop string ends the answer and is not part of it; text that might still become a stop
     string is held back, and released if it never does."""

@@ -300,6 +300,35 @@ class TestGateway(unittest.TestCase):
         self.assertEqual(args[args.index("-c") + 1], "8192")
         self.assertEqual(args[args.index("--host") + 1], "127.0.0.1")        # never exposed directly
 
+    def test_prompt_lookup_speculation_is_on_when_the_server_knows_it(self):
+        with open(os.path.join(self.tmp, "llama-server"), "w") as f:
+            f.write(FAKE_SERVER)
+        # a fake that answers --help with the option list of a recent build
+        helper = os.path.join(self.tmp, "helped")
+        os.makedirs(helper)
+        g = self.gw()
+        g.chat()
+        args = open(g.fake + ".args").read().split()
+        self.assertNotIn("--spec-type", args)            # this fake does not list the option: not passed
+
+    def test_the_speculation_flag_follows_the_help_text_and_the_switch(self):
+        import importlib
+        sys.path.insert(0, ROOT)
+        from engine import gguf_server
+        importlib.reload(gguf_server)
+        new = os.path.join(self.tmp, "new-server")
+        with open(new, "w") as f:
+            f.write("#!/bin/sh\necho '--spec-type none,draft-simple,ngram-simple,ngram-mod'\n")
+        old = os.path.join(self.tmp, "old-server")
+        with open(old, "w") as f:
+            f.write("#!/bin/sh\necho 'usage: llama-server'\n")
+        for p in (new, old):
+            os.chmod(p, 0o755)
+        on = gguf_server.Inner(new, "m.gguf", 4096, "m").command(1234)
+        self.assertEqual(on[on.index("--spec-type") + 1], "ngram-mod")
+        self.assertNotIn("--spec-type", gguf_server.Inner(new, "m.gguf", 4096, "m", speculative=False).command(1234))
+        self.assertNotIn("--spec-type", gguf_server.Inner(old, "m.gguf", 4096, "m").command(1234))
+
     def test_a_chat_is_forwarded_and_max_tokens_is_clamped(self):
         g = self.gw("--max-tokens", "256")
         code, raw = g.chat(max_tokens=100000)

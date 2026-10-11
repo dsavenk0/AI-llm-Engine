@@ -745,6 +745,8 @@ def gguf_cmd(cfg, m):
         cmd += ["--fallback-model", "off"]
     if not mc["vision"]:
         cmd.append("--no-vision")
+    if not cfg.get("speculative", True):
+        cmd.append("--no-speculative")
     return cmd
 
 

@@ -32,6 +32,9 @@ struct FilesModuleView: View {
             .padding(8)
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
             .padding(8)
+            HStack { AccentCaption(text: "Files", color: Palette.accent); Spacer()
+                     Text("\(ws.allFiles.count)").font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary) }
+                .padding(.horizontal, 10).padding(.bottom, 4)
             Divider()
             if query.isEmpty {
                 ScrollView { LazyVStack(alignment: .leading, spacing: 0) { TreeRows(ws: ws, path: "", depth: 0) } }
@@ -120,8 +123,13 @@ struct OutlineModuleView: View {
     @ObservedObject var ws: Workspace
 
     var body: some View {
-        if let f = ws.active { OutlineList(file: f, ws: ws) }
-        else { Text("Open a file to see its structure").foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+        VStack(spacing: 0) {
+            HStack { AccentCaption(text: "Outline", color: Palette.phosphor); Spacer() }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+            Divider()
+            if let f = ws.active { OutlineList(file: f, ws: ws) }
+            else { Text("Open a file to see its structure").foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+        }
     }
 }
 
@@ -291,8 +299,9 @@ struct GitModuleView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let g = ws.git, g.repo {
+                AccentCaption(text: "Changes", color: Palette.yellow)
                 HStack {
-                    Image(systemName: "arrow.triangle.branch")
+                    Image(systemName: "arrow.triangle.branch").foregroundColor(Palette.accent)
                     Text(g.branch ?? "?").bold()
                     if let a = g.ahead, a > 0 { Text("↑\(a)").foregroundColor(.secondary) }
                     if let b = g.behind, b > 0 { Text("↓\(b)").foregroundColor(.secondary) }
@@ -345,7 +354,7 @@ struct GitModuleView: View {
     }
 
     private func label(_ s: String) -> String { ["modified": "M", "added": "A", "deleted": "D", "renamed": "R", "untracked": "?"][s] ?? s }
-    private func color(_ s: String) -> Color { s == "deleted" ? .red : s == "modified" ? .orange : .green }
+    private func color(_ s: String) -> Color { s == "deleted" ? .red : s == "modified" ? Palette.yellow : Palette.phosphor }
 
     private func showDiff(_ path: String) {
         ws.guarded("Diff") {

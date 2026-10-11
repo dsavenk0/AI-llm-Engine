@@ -305,9 +305,9 @@ struct Composer: View {
                     Image(systemName: dictation.listening ? "mic.fill" : "mic")
                         .foregroundColor(dictation.listening ? .red : .secondary)
                 }.buttonStyle(.plain).help(dictation.listening ? "Stop dictation" : "Dictate (\(Dictation.localeID))")
-                Toggle("Reasoning", isOn: $store.think).toggleStyle(.checkbox)
-                Toggle("Auto-apply", isOn: $store.autoEdit).toggleStyle(.checkbox)
-                    .help("Skip the approval for file edits (commands still ask)")
+                Toggle("Think", isOn: $store.think).toggleStyle(.checkbox).help("Let the model reason before it answers")
+                Toggle("Auto", isOn: $store.autoEdit).toggleStyle(.checkbox)
+                    .help("Auto-apply edits: skip the approval for file edits (commands still ask)")
                 imagesToggle
                 Spacer()
                 if store.busy {
@@ -319,7 +319,7 @@ struct Composer: View {
                     .buttonStyle(.borderedProminent).tint(Palette.send).disabled(!canSend)
                 }
             }.font(.callout)
-            if let n = dictation.note { Text(n).font(.caption).foregroundColor(.orange) }
+            if let n = dictation.note { Text(n).font(.caption).foregroundColor(Palette.yellow) }
         }.padding(10).background(Palette.panel)
     }
 

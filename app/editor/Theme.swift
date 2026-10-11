@@ -81,8 +81,28 @@ enum Palette {
                : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1)
     }
 
+    /// LLMBar's small accents, for details only (labels, marks, counters) — never large fills.
+    static var yellow: Color { c((0.70, 0.56, 0.0), (1.0, 0.94, 0.0)) }
+    static var magenta: Color { c((0.82, 0.08, 0.40), (1.0, 0.30, 0.62)) }
+    static var phosphor: Color { c((0.0, 0.56, 0.45), (0.30, 0.95, 0.76)) }
+
     static func windowNS(isDark: Bool) -> NSColor {
         isDark ? NSColor(srgbRed: 0.055, green: 0.075, blue: 0.100, alpha: 1)
                : NSColor(srgbRed: 0.965, green: 0.972, blue: 0.980, alpha: 1)
+    }
+}
+
+
+/// A small mono caption with a coloured bar: LLMBar's way of naming a section.
+struct AccentCaption: View {
+    let text: String
+    var color: Color = Palette.accent
+
+    var body: some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 1).fill(color).frame(width: 2.5, height: 11)
+            Text(text.uppercased()).font(.system(size: 10, weight: .semibold, design: .monospaced)).tracking(1.6)
+                .foregroundColor(color)
+        }
     }
 }

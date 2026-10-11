@@ -36,9 +36,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# reuse the engine's icon when it has been built
-for icon in "$ROOT/LLMBar.app/Contents/Resources/AppIcon.icns" "$OUT/../Resources/AppIcon.icns"; do
-  [ -f "$icon" ] && cp "$icon" "$APP/Contents/Resources/AppIcon.icns" && break
+# its own icon: the same little terminal as LLMBar's, with "</>" in the editor's cyan
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+swift "$ROOT/tools/make-icon.swift" "$TMP/icon-1024.png" "</>" 00E5FF
+ICONSET="$TMP/AppIcon.iconset"
+mkdir -p "$ICONSET"
+for s in 16 32 128 256 512; do
+  sips -z $s $s "$TMP/icon-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s * 2)) $((s * 2)) "$TMP/icon-1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 echo "✓ Done: $APP ($(du -sh "$APP" | cut -f1))"

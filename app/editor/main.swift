@@ -44,9 +44,26 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
     func open(_ path: String) {
         let p = (path as NSString).standardizingPath
         UserDefaults.standard.set(p, forKey: "lastProject")
+        Workspace.remember(project: p)
         window.title = "LLM Editor — \((p as NSString).lastPathComponent)"
         ws.openProject(p)
         chat.load(root: p)
+    }
+
+    /// The folder picker as a sheet on this window — never a blocking modal at launch (an app that opens with
+    /// nothing but a panel looks like it did not start).
+    func chooseProjectSheet() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Open"
+        panel.message = "Choose the project folder"
+        if let last = UserDefaults.standard.string(forKey: "lastProject") {
+            panel.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent()
+        }
+        panel.beginSheetModal(for: window) { [weak self] r in
+            if r == .OK, let url = panel.url { self?.open(url.path) }
+        }
     }
 
     /// Ask for a folder; false when the user cancelled.
@@ -211,8 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         c.owner = self
         c.show(near: current?.window)
         controllers.append(c)
+        c.ws.onChooseProject = { [weak c] in c?.chooseProjectSheet() }
+        c.ws.onOpenProject = { [weak c] path in c?.open(path) }
         if let p = project { c.open(p) }
-        else if !c.chooseProject() { c.window.close() }
+        else { c.ws.needsProject = true; c.ws.starting = false }         // the welcome screen, with the picker on top
     }
 
     @objc func newWindowRequested(_ n: Notification) {

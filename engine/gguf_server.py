@@ -35,11 +35,26 @@ def free_port():
         return s.getsockname()[1]
 
 
+_SPEC = {}
+
+
+def supports_spec(binary):
+    """Does this llama-server know `--spec-type ngram-mod`? (older builds do not, and would refuse to start)"""
+    if binary not in _SPEC:
+        try:
+            out = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+            _SPEC[binary] = "ngram-mod" in (out.stdout + out.stderr)
+        except (OSError, subprocess.TimeoutExpired):
+            _SPEC[binary] = False
+    return _SPEC[binary]
+
+
 class Inner:
     """The llama-server process: started on demand, stopped when idle."""
 
-    def __init__(self, binary, model, ctx, name, mmproj=None, ngl=99, log_path=None):
+    def __init__(self, binary, model, ctx, name, mmproj=None, ngl=99, log_path=None, speculative=True):
         self.binary, self.model, self.ctx, self.name = binary, model, ctx, name
+        self.speculative = speculative
         self.mmproj, self.ngl, self.log_path = mmproj, ngl, log_path
         self.proc, self.port = None, None
         self.lock = threading.Lock()
@@ -51,6 +66,10 @@ class Inner:
                "-ngl", str(self.ngl), "-np", "1", "--jinja", "-a", self.name]
         if self.mmproj:
             cmd += ["--mmproj", self.mmproj]
+        if self.speculative and supports_spec(self.binary):
+            # prompt-lookup drafting: where the answer repeats the prompt (code edits, quotations) several
+            # tokens are verified per step; where it does not, nothing is lost. Greedy output is identical.
+            cmd += ["--spec-type", "ngram-mod"]
         return cmd
 
     @property
@@ -275,6 +294,7 @@ def main(argv=None):
     ap.add_argument("--llama-server", default="")
     ap.add_argument("--mmproj", default="")
     ap.add_argument("--no-vision", action="store_true")
+    ap.add_argument("--no-speculative", action="store_true", help="no prompt-lookup speculative decoding")
     ap.add_argument("--inner-log", default="")
     ap.add_argument("--ram-gb", type=float, default=0)
     ARGS = ap.parse_args(argv)
@@ -293,7 +313,8 @@ def main(argv=None):
     ARGS.context_effective = ARGS.context or auto_context(info.get("context_length"), ram)
     ARGS.format_info = {"architecture": info["architecture"], "quant": info["quant"]}
     mmproj = None if ARGS.no_vision else (ARGS.mmproj or gguf.projector_for(ARGS.model))
-    INNER = Inner(binary, ARGS.model, ARGS.context_effective, ARGS.name, mmproj, log_path=ARGS.inner_log or None)
+    INNER = Inner(binary, ARGS.model, ARGS.context_effective, ARGS.name, mmproj, log_path=ARGS.inner_log or None,
+                  speculative=not ARGS.no_speculative)
     LOG(f"backend: llama.cpp ({info['architecture']} {info['quant']})")
     try:
         INNER.ensure()

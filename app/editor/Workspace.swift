@@ -92,6 +92,19 @@ final class Workspace: ObservableObject {
     @Published var pictures: [Picture] = []
     @Published var visionSwitching = false
     @Published var remoteURL: String?                 // set while the assistant talks to another server
+    @Published var needsProject = false               // a window with no folder yet: the welcome screen
+    var onChooseProject: (() -> Void)?                // the window controller asks for a folder (non-blocking)
+    var onOpenProject: ((String) -> Void)?
+
+    static var recentProjects: [String] {
+        (UserDefaults.standard.array(forKey: "recentProjects") as? [String] ?? [])
+            .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+    static func remember(project path: String) {
+        var r = (UserDefaults.standard.array(forKey: "recentProjects") as? [String] ?? []).filter { $0 != path }
+        r.insert(path, at: 0)
+        UserDefaults.standard.set(Array(r.prefix(10)), forKey: "recentProjects")
+    }
     @Published var saveTick = 0                       // bumped after every save: the preview reloads on it
     @Published var branches: BranchesResponse?
     @Published var toast: String?
@@ -173,6 +186,7 @@ final class Workspace: ObservableObject {
     // MARK: project
 
     func openProject(_ path: String) {
+        needsProject = false
         starting = true
         fatal = nil
         open = []; activePath = nil; tree = [:]; expanded = [""]; attachments = []; inline = []; pictures = []

@@ -248,7 +248,8 @@ struct ChatItemView: View {
                 }
             }
             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            .background(Palette.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(alignment: .leading) { RoundedRectangle(cornerRadius: 1).fill(Palette.accent).frame(width: 3).padding(.vertical, 6) }
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
                 if !item.reasoning.isEmpty {
@@ -412,8 +413,8 @@ struct ApprovalCard: View {
                 }
             }
         }
-        .padding(12).background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.35)))
+        .padding(12).background(Palette.yellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.yellow.opacity(0.35)))
     }
 }
 
@@ -444,7 +445,7 @@ struct SessionsModuleView: View {
             Button { store.newChat() } label: { Label("New chat", systemImage: "square.and.pencil").frame(maxWidth: .infinity, alignment: .leading) }
                 .buttonStyle(.plain).padding(10)
             Divider()
-            Text("Chats").font(.caption).foregroundColor(.secondary).padding(.horizontal, 10).padding(.top, 8)
+            AccentCaption(text: "Chats", color: Palette.accent).padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 2)
             List(selection: Binding(get: { store.currentID }, set: { store.currentID = $0 })) {
                 ForEach(store.sessions.sorted { $0.updated > $1.updated }) { s in
                     HStack {

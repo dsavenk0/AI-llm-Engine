@@ -10,12 +10,14 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if ws.starting {
+            if ws.needsProject {
+                WelcomeView(ws: ws)
+            } else if ws.starting {
                 VStack(spacing: 12) { ProgressView(); Text("Starting the editor backend…").foregroundColor(.secondary) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let err = ws.fatal {
                 VStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundColor(.orange)
+                    Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundColor(Palette.yellow)
                     Text(err)
                     Button("Try again") { ws.openProject(ws.root) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -59,6 +61,49 @@ struct RootView: View {
     }
 }
 
+/// What a window with no folder shows (a plain launch, or a window opened from LLMBar without a project):
+/// the name, a button, and the folders used before.
+struct WelcomeView: View {
+    @ObservedObject var ws: Workspace
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 34, weight: .semibold)).foregroundColor(Palette.accent)
+            Text("LLM Editor").font(.system(size: 22, weight: .semibold))
+            Text("A native editor for your local model — open a folder to begin.")
+                .foregroundColor(.secondary)
+            Button { ws.onChooseProject?() } label: {
+                Label("Open a folder…", systemImage: "folder").padding(.horizontal, 10).padding(.vertical, 3)
+            }.buttonStyle(.borderedProminent).tint(Palette.send).keyboardShortcut("o")
+            let recent = Workspace.recentProjects
+            if !recent.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    AccentCaption(text: "Recent", color: Palette.accent)
+                    ForEach(recent.prefix(6), id: \.self) { p in
+                        Button { ws.onOpenProject?(p) } label: {
+                            HStack {
+                                Image(systemName: "folder.fill").foregroundColor(Palette.accent)
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text((p as NSString).lastPathComponent)
+                                    Text((p as NSString).abbreviatingWithTildeInPath).font(.caption).foregroundColor(.secondary)
+                                }
+                                Spacer()
+                            }.padding(8).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                            .background(Palette.field, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }.frame(width: 380).padding(.top, 8)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            // a first launch: offer the picker right away, as a sheet on this window
+            if Workspace.recentProjects.isEmpty { DispatchQueue.main.async { ws.onChooseProject?() } }
+        }
+    }
+}
+
 private struct Toolbar: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var modules: ModuleSettings
@@ -66,7 +111,7 @@ private struct Toolbar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "folder").foregroundColor(.secondary)
+            Image(systemName: "folder.fill").foregroundColor(Palette.accent)
             Text(ws.projectName).bold()
             if ws.git?.repo == true { BranchMenu(ws: ws) }
             Spacer()
@@ -81,7 +126,8 @@ private struct Toolbar: View {
                 if let u = ws.remoteURL { Divider(); Text("Now: \(u)") }
             } label: {
                 HStack(spacing: 5) {
-                    Circle().fill(ws.engine == nil ? Color.red : Color.green).frame(width: 8, height: 8)
+                    Circle().fill(ws.engine == nil ? Palette.magenta : Palette.phosphor).frame(width: 8, height: 8)
+                        .shadow(color: (ws.engine == nil ? Palette.magenta : Palette.phosphor).opacity(0.7), radius: 3)
                     if ws.remoteURL != nil { Image(systemName: "cloud").font(.caption) }
                     Text(ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") } ?? "model not running")
                         .font(.callout).lineLimit(1)
@@ -144,7 +190,7 @@ private struct StatusBar: View {
             Button { ws.showPanel("problems") } label: { ProblemSummary(ws: ws) }.buttonStyle(.plain)
             Spacer()
             let dirty = ws.open.filter(\.dirty).count
-            if dirty > 0 { Text("\(dirty) unsaved").foregroundColor(.orange) }
+            if dirty > 0 { Text("\(dirty) unsaved").foregroundColor(Palette.yellow) }
         }.font(.caption).foregroundColor(.secondary).padding(.horizontal, 12).frame(height: 22)
     }
 }
@@ -154,7 +200,7 @@ struct ProblemSummary: View {
     var body: some View {
         let s = ws.problemSummary
         HStack(spacing: 8) {
-            Label("\(s.errors)", systemImage: "xmark.octagon").foregroundColor(s.errors > 0 ? .red : .secondary)
+            Label("\(s.errors)", systemImage: "xmark.octagon").foregroundColor(s.errors > 0 ? Palette.magenta : .secondary)
             Label("\(s.warnings)", systemImage: "exclamationmark.triangle").foregroundColor(s.warnings > 0 ? .yellow : .secondary)
         }.labelStyle(.titleAndIcon)
     }
@@ -171,10 +217,11 @@ private struct BottomPanel: View {
             HStack(spacing: 14) {
                 if modules.isOn(.problems) {
                     tab("problems", "Problems" + (ws.problemSummary.errors + ws.problemSummary.warnings > 0
-                                                  ? " \(ws.problemSummary.errors + ws.problemSummary.warnings)" : ""))
+                                                  ? " \(ws.problemSummary.errors + ws.problemSummary.warnings)" : ""),
+                        color: ws.problemSummary.errors > 0 ? Palette.magenta : Palette.accent)
                 }
-                if modules.isOn(.terminal) { tab("terminal", "Terminal") }
-                if modules.isOn(.preview) { tab("preview", "Preview") }
+                if modules.isOn(.terminal) { tab("terminal", "Terminal", color: Palette.phosphor) }
+                if modules.isOn(.preview) { tab("preview", "Preview", color: Palette.accent) }
                 Spacer()
                 Button { ws.bottomVisible = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
             }.padding(.horizontal, 10).padding(.vertical, 5).background(Color.primary.opacity(0.04))
@@ -192,10 +239,12 @@ private struct BottomPanel: View {
         }
     }
 
-    private func tab(_ id: String, _ title: String) -> some View {
+    private func tab(_ id: String, _ title: String, color: Color = Palette.accent) -> some View {
         Button { ws.bottomTab = id } label: {
-            Text(title).fontWeight(ws.bottomTab == id ? .semibold : .regular)
-                .foregroundColor(ws.bottomTab == id ? .primary : .secondary)
+            Text(title.uppercased()).font(.system(size: 10, weight: .semibold, design: .monospaced)).tracking(1.4)
+                .foregroundColor(ws.bottomTab == id ? color : .secondary)
+                .padding(.vertical, 3)
+                .overlay(alignment: .bottom) { Rectangle().fill(ws.bottomTab == id ? color : .clear).frame(height: 1.5) }
         }.buttonStyle(.plain)
     }
 }
@@ -226,7 +275,8 @@ struct ProblemsView: View {
                 if ws.open.isEmpty {
                     Text("Open a file to see its problems").foregroundColor(.secondary).padding(14)
                 } else if total == 0 {
-                    Label("No problems in the open files", systemImage: "checkmark.circle").foregroundColor(.green).padding(14)
+                    Label("No problems in the open files", systemImage: "checkmark.circle")
+                        .foregroundColor(.primary).padding(14)
                 }
                 ForEach(ws.open) { f in FileProblems(ws: ws, file: f) }
             }
@@ -251,7 +301,7 @@ private struct FileProblems: View {
             ForEach(file.diagnostics) { d in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: d.isError ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
-                        .foregroundColor(d.isError ? .red : .yellow)
+                        .foregroundColor(d.isError ? Palette.magenta : Palette.yellow)
                     Text(d.message).lineLimit(2)
                     Spacer()
                     Text("\(d.source) · \(d.line):\(d.col)").font(.caption).foregroundColor(.secondary)
@@ -321,7 +371,7 @@ private struct ChatRightPanel: View {
 
 private struct DirtyMark: View {
     @ObservedObject var file: OpenFile
-    var body: some View { Text(file.dirty ? "●" : "").foregroundColor(.orange) }
+    var body: some View { Text(file.dirty ? "●" : "").foregroundColor(Palette.yellow) }
 }
 
 private struct IDELayout: View {
@@ -380,7 +430,10 @@ private struct TabButton: View {
             Button { ws.closeFile(file.path) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain)
         }
         .padding(.horizontal, 10).frame(height: 30)
-        .background(ws.activePath == file.path ? Color.accentColor.opacity(0.18) : Color.clear)
+        .background(ws.activePath == file.path ? Palette.accent.opacity(0.14) : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(ws.activePath == file.path ? Palette.accent : Color.clear).frame(height: 2)
+        }
         .contentShape(Rectangle())
         .onTapGesture { ws.activePath = file.path }
     }

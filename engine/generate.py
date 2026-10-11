@@ -656,8 +656,26 @@ class Engine:
             # prompt — shared by every conversation of an agent) and the final
             # <|im_start|> (the generation prompt — shared by the next turn).
             starts = [i for i, t in enumerate(ids) if t == self.im_start]
-            cuts = sorted({c for c in (starts[1] if len(starts) > 1 else None, starts[-1] if starts else None)
-                           if c is not None and reused < c < len(ids)})
+            cuts = {c for c in (starts[1] if len(starts) > 1 else None, starts[-1] if starts else None)
+                    if c is not None and reused < c < len(ids)}
+            # A prompt that parts from a stored one in the middle of its system message (a date, a file list,
+            # a session id that an agent puts there) would otherwise be prefilled whole every time: also take
+            # a restore point exactly where the two diverge, so the shared part is restored next time.
+            if self.store and len(ids) > self.store.min_tokens:
+                shared, key = self.store.overlap(ids)
+                if shared >= self.store.min_tokens and reused + 64 < shared < len(ids):
+                    # a changing value sits in the middle of a line: back off to the start of that line, so
+                    # the next prompt that changes the same value (a minute later) still shares the point
+                    point = shared
+                    for j in range(shared - 1, max(self.store.min_tokens, shared - 200), -1):
+                        if "\n" in self.tok.decode([ids[j]]):
+                            point = j + 1
+                            break
+                    if point not in cuts and reused < point:
+                        cuts.add(point)
+                        self.log(f"prefix cache: this prompt shares {shared} tokens with a stored one and then "
+                                 f"differs — restore point added at {point}")
+            cuts = sorted(cuts)
             pos = reused
             for cut in cuts:
                 self._prefill(cache, ids[:cut], start=pos)

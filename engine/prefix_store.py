@@ -89,6 +89,23 @@ class PrefixStore:
             del self.entries[key]
         self._save_index()
 
+    def overlap(self, ids):
+        """(length, key) of the stored prompt that shares the longest prefix with `ids` — whether or not that
+        entry is itself a prefix of `ids`. Tells where a new conversation parts from a known one."""
+        a = np.asarray(ids, np.int32)
+        best = (0, None)
+        for key, e in self.entries.items():
+            try:
+                toks = np.load(self._file(key, "tokens.npy"), mmap_mode="r")
+            except OSError:
+                continue
+            m = min(len(toks), len(a))
+            diff = np.nonzero(np.asarray(toks[:m]) != a[:m])[0]
+            c = int(diff[0]) if len(diff) else m
+            if c > best[0]:
+                best = (c, key)
+        return best
+
     def lookup(self, ids):
         """Longest stored prefix of `ids` (shorter than ids), or None."""
         best = None

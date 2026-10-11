@@ -2,7 +2,7 @@ import AppKit
 
 // App icon (1024×1024 PNG): a little CRT terminal — dark-teal bezel, black
 // screen with a soft vignette and a mint "Ai>_" prompt that glows.
-// Usage: swift make-icon.swift <output.png>
+// Usage: swift make-icon.swift <output.png> [prompt text] [glow colour as RRGGBB]
 
 let outPath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/tmp/llm-icon-1024.png"
 let size: CGFloat = 1024
@@ -16,7 +16,11 @@ guard let rep = NSBitmapImageRep(
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 
-let phosphor = NSColor(srgbRed: 0.30, green: 0.95, blue: 0.76, alpha: 1.0)
+let glowArg = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "4DF2C2"
+let promptText = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Ai>_"
+let rgb = UInt32(glowArg, radix: 16) ?? 0x4DF2C2
+let phosphor = NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255,
+                       blue: CGFloat(rgb & 255) / 255, alpha: 1.0)
 
 // --- bezel: dark-teal squircle with a lit top edge ---
 let inset: CGFloat = 92
@@ -57,7 +61,7 @@ NSGraphicsContext.restoreGraphicsState()
 
 // --- glowing prompt ---
 let font = NSFont(name: "Menlo-Regular", size: 250) ?? NSFont.monospacedSystemFont(ofSize: 250, weight: .regular)
-let prompt = NSAttributedString(string: "Ai>_", attributes: [.font: font, .foregroundColor: phosphor])
+let prompt = NSAttributedString(string: promptText, attributes: [.font: font, .foregroundColor: phosphor])
 let ts = prompt.size()
 let origin = NSPoint(x: (size - ts.width) / 2, y: (size - ts.height) / 2 - 10)
 for (blur, alpha) in [(CGFloat(60), CGFloat(0.55)), (28, 0.7), (8, 0.9)] {
