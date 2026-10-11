@@ -6,6 +6,7 @@ struct RootView: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var chat: ChatStore
     @ObservedObject var modules: ModuleSettings
+    @ObservedObject private var theme = ThemeSettings.shared
 
     var body: some View {
         Group {
@@ -20,7 +21,7 @@ struct RootView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 0) {
-                    Toolbar(ws: ws, modules: modules)
+                    Toolbar(ws: ws, modules: modules).background(Palette.panel)
                     Divider()
                     VSplitView {
                         Group {
@@ -43,6 +44,9 @@ struct RootView: View {
                     .foregroundColor(.white).padding(16).transition(.opacity)
             }
         }
+        .background(Palette.window)
+        .tint(Palette.accent)
+        .preferredColorScheme(theme.colorScheme)
         .animation(.easeOut(duration: 0.15), value: ws.toast)
         .onAppear {
             ws.onAsk = {                                  // a problem or terminal output was sent to the assistant
@@ -63,9 +67,7 @@ private struct Toolbar: View {
         HStack(spacing: 12) {
             Image(systemName: "folder").foregroundColor(.secondary)
             Text(ws.projectName).bold()
-            if let b = ws.git?.branch, ws.git?.repo == true {
-                Label(b, systemImage: "arrow.triangle.branch").font(.callout).foregroundColor(.secondary)
-            }
+            if ws.git?.repo == true { BranchMenu(ws: ws) }
             Spacer()
             Picker("", selection: $ws.mode) {
                 Text("Chat").tag(LayoutMode.chat)
@@ -81,10 +83,47 @@ private struct Toolbar: View {
                 .buttonStyle(.plain).help("Problems and terminal (⌘J)")
             Menu {
                 ForEach(ModuleID.allCases) { m in
-                    Toggle(m.title, isOn: Binding(get: { modules.isOn(m) }, set: { _ in modules.toggle(m) })).disabled(m == .files)
+                    Toggle(m.title, isOn: Binding(get: { modules.isOn(m) }, set: { _ in
+                        modules.toggle(m)
+                        if m == .preview, modules.isOn(.preview) { ws.showPanel("preview") }      // switching it on shows it
+                    })).disabled(m == .files)
                 }
             } label: { Image(systemName: "square.grid.2x2") }.menuStyle(.borderlessButton).fixedSize().help("Modules")
+            Menu {
+                Picker("Theme", selection: Binding(get: { ThemeSettings.shared.mode }, set: { ThemeSettings.shared.mode = $0 })) {
+                    ForEach(ThemeMode.allCases) { Text($0.title).tag($0) }
+                }.pickerStyle(.inline)
+            } label: { Image(systemName: "circle.lefthalf.filled") }.menuStyle(.borderlessButton).fixedSize().help("Theme")
         }.padding(.horizontal, 12).padding(.vertical, 7)
+    }
+}
+
+/// The current branch; a click lists the others (local, then remote ones that have no local copy yet).
+private struct BranchMenu: View {
+    @ObservedObject var ws: Workspace
+
+    var body: some View {
+        Menu {
+            if let b = ws.branches {
+                ForEach(b.local, id: \.self) { name in
+                    Button { if name != b.current { ws.checkout(name) } } label: {
+                        if name == b.current { Label(name, systemImage: "checkmark") } else { Text(name) }
+                    }
+                }
+                let extra = b.remote.filter { r in !b.local.contains { r.hasSuffix("/" + $0) } }
+                if !extra.isEmpty {
+                    Divider()
+                    ForEach(extra, id: \.self) { r in Button(r) { ws.checkout(r) } }
+                }
+            }
+            Divider()
+            Button("New branch…") { ws.newBranch() }
+        } label: {
+            Label(ws.git?.branch ?? ws.branches?.current ?? "branch", systemImage: "arrow.triangle.branch")
+        }
+        .menuStyle(.borderlessButton).fixedSize().font(.callout)
+        .onAppear { Task { await ws.loadBranches() } }
+        .help("Switch or create a branch")
     }
 }
 
@@ -126,12 +165,15 @@ private struct BottomPanel: View {
                                                   ? " \(ws.problemSummary.errors + ws.problemSummary.warnings)" : ""))
                 }
                 if modules.isOn(.terminal) { tab("terminal", "Terminal") }
+                if modules.isOn(.preview) { tab("preview", "Preview") }
                 Spacer()
                 Button { ws.bottomVisible = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
             }.padding(.horizontal, 10).padding(.vertical, 5).background(Color.primary.opacity(0.04))
             Divider()
             if ws.bottomTab == "terminal", modules.isOn(.terminal) {
                 TerminalPanel(ws: ws)
+            } else if ws.bottomTab == "preview", modules.isOn(.preview) {
+                PreviewPanel(ws: ws)
             } else if modules.isOn(.problems) {
                 ProblemsView(ws: ws)
             } else {

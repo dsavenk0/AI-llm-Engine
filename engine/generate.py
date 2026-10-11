@@ -274,7 +274,8 @@ class Engine:
         self.sleeping, self.last_used = False, time.time()
         self._load_weights()
         nbytes = self.model_bytes
-        self.vision_allowed = vision and has_vision(path)
+        self.vision_capable = has_vision(path)           # the checkpoint ships a vision tower
+        self.vision_allowed = vision and self.vision_capable
         self.vision_bytes = 0          # bytes of the lazily loaded tower (0 until the first image)
         mx.set_cache_limit(int(cache_limit_mb) * 2**20)
         self.draft_levels = tuple(sorted({min(l, draft_max) for l in DRAFT_LEVELS}))

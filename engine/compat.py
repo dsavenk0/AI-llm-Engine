@@ -100,6 +100,7 @@ class CompatEngine:
         self.config = _json(os.path.join(path, "config.json"))
         self.gen_cfg = _json(os.path.join(path, "generation_config.json"))
         self.vision_allowed = False      # text only; mlx-vlm would be a separate optional backend
+        self.vision_capable = False
         self.speculative = False
         self.store = None                # no SSD prefix cache on this backend
         self.wired_limit_advice_mb = None

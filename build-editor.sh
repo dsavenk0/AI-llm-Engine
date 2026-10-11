@@ -28,6 +28,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LLMRoot</key><string>$ROOT</string>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+  <key>NSMicrophoneUsageDescription</key><string>Dictation: speak a message to the assistant.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Dictation turns your speech into text for the assistant.</string>
   <key>NSHumanReadableCopyright</key><string>© 2026 AI-llm-Engine · Apache-2.0</string>
 </dict>
 </plist>

@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,7 +29,9 @@ SKIP_DIRS = {".git", ".llm", "node_modules", "__pycache__", ".venv", "venv", ".b
              ".DS_Store"}
 MAX_FILE = 2_000_000          # larger files are listed but not opened
 MAX_ATTACH_TOTAL = 200_000    # bytes of attachments inlined into one prompt
-MAX_BODY = 8_000_000
+MAX_BODY = 40_000_000         # images arrive inline (base64) with the request
+MAX_IMAGES = 6
+MAX_IMAGE_BYTES = 10_000_000
 GIT_TIMEOUT = 60
 
 
@@ -261,7 +264,126 @@ class Project:
             raise RuntimeError(out or "git push failed")
         return out or "pushed"
 
+    # ---- GitHub (through the `gh` CLI: its login, its credentials — nothing of ours is stored)
+    def gh(self, *args, timeout=60):
+        exe = shutil.which("gh")
+        if not exe:
+            raise RuntimeError("GitHub CLI not found — install it with: brew install gh")
+        env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1")
+        return subprocess.run([exe, *args], cwd=self.root, capture_output=True, text=True, timeout=timeout, env=env)
+
+    def github_status(self):
+        out = {"installed": bool(shutil.which("gh")), "authenticated": False, "user": None, "repo": None, "remote": None}
+        if self.is_repo():
+            url = self.git("remote", "get-url", "origin").stdout.strip()
+            out["remote"] = url or None
+            m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$", url)
+            if m:
+                out["repo"] = f"{m.group(1)}/{m.group(2)}"
+        if out["installed"]:
+            who = self.gh("api", "user", "--jq", ".login", timeout=20)
+            if who.returncode == 0 and who.stdout.strip():
+                out.update(authenticated=True, user=who.stdout.strip())
+        return out
+
+    def github_prs(self):
+        p = self.gh("pr", "list", "--limit", "20", "--json", "number,title,headRefName,url,isDraft,author")
+        if p.returncode != 0:
+            raise RuntimeError((p.stderr or p.stdout).strip() or "gh pr list failed")
+        return json.loads(p.stdout or "[]")
+
+    def github_pr(self, title, body="", base=None, draft=False):
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("a title is required")
+        args = ["pr", "create", "--title", title, "--body", body or ""]
+        if base:
+            if base.startswith("-") or self.git("check-ref-format", "--branch", base).returncode != 0:
+                raise ValueError(f"not a branch name: {base!r}")
+            args += ["--base", base]
+        if draft:
+            args.append("--draft")
+        p = self.gh(*args, timeout=120)
+        if p.returncode != 0:
+            raise RuntimeError((p.stderr or p.stdout).strip() or "gh pr create failed")
+        return p.stdout.strip().splitlines()[-1] if p.stdout.strip() else ""
+
+    def github_create_repo(self, name, private=True):
+        name = (name or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name):
+            raise ValueError("a repository name may contain letters, digits, '.', '_' and '-'")
+        if self.git("remote", "get-url", "origin").returncode == 0:
+            raise ValueError("this project already has a remote named origin")
+        p = self.gh("repo", "create", name, "--private" if private else "--public", "--source=.", "--remote=origin",
+                    "--push", timeout=180)
+        if p.returncode != 0:
+            raise RuntimeError((p.stderr or p.stdout).strip() or "gh repo create failed")
+        return (p.stdout + p.stderr).strip().splitlines()[-1]
+
+    # ---- branches
+    def branches(self):
+        if not self.is_repo():
+            return {"repo": False, "current": None, "local": [], "remote": []}
+        cur = self.git("branch", "--show-current").stdout.strip()
+        local = self.git("for-each-ref", "--format=%(refname:short)", "refs/heads").stdout.split()
+        remote = [r for r in self.git("for-each-ref", "--format=%(refname:short)", "refs/remotes").stdout.split()
+                  if not r.endswith("/HEAD")]
+        return {"repo": True, "current": cur or None, "local": sorted(local), "remote": sorted(remote)}
+
+    def checkout(self, branch, create=False):
+        """Switch (or create and switch to) a branch. git refuses when local changes would be lost, and its
+        message is passed on; nothing is forced."""
+        branch = (branch or "").strip()
+        if not branch or branch.startswith("-") or self.git("check-ref-format", "--branch", branch).returncode != 0:
+            raise ValueError(f"not a branch name: {branch!r}")
+        if not self.is_repo():
+            raise RuntimeError("not a git repository")
+        info = self.branches()
+        if create:
+            if branch in info["local"]:
+                raise ValueError(f"branch {branch!r} already exists")
+            self.git("checkout", "-b", branch, check=True)
+        elif branch in info["local"]:
+            self.git("checkout", branch, check=True)
+        elif branch in info["remote"]:                  # origin/x: a local branch that tracks it
+            self.git("checkout", "--track", branch, check=True)
+        else:
+            raise ValueError(f"no such branch: {branch!r}")
+        return self.branches()
+
     # ---- prompt attachments
+    def inline_attachments(self, items):
+        """Files that are not in the project (picked from anywhere on disk by the editor): [(name, text)]."""
+        out, total = [], 0
+        for it in items or []:
+            name, text = str(it.get("name") or "attachment"), it.get("text")
+            if not isinstance(text, str):
+                raise ValueError(f"{name}: no text")
+            total += len(text.encode("utf-8"))
+            if total > MAX_ATTACH_TOTAL:
+                raise ValueError(f"attachments exceed {MAX_ATTACH_TOTAL // 1000} KB; attach fewer or smaller files")
+            out.append((os.path.basename(name), text))
+        return out
+
+    @staticmethod
+    def images(items):
+        """['data:image/png;base64,…', …] after checking type and size."""
+        import base64
+        urls = []
+        for it in items or []:
+            url = it.get("data") if isinstance(it, dict) else None
+            if not isinstance(url, str) or not re.match(r"data:image/(png|jpeg|jpg|gif|webp);base64,", url):
+                raise ValueError(f"{(it or {}).get('name', 'image')}: not a PNG/JPEG/GIF/WebP image")
+            try:
+                size = len(base64.b64decode(url.split(",", 1)[1], validate=False))
+            except Exception:
+                raise ValueError("the image data is not valid base64")
+            if size > MAX_IMAGE_BYTES:
+                raise ValueError(f"{(it or {}).get('name', 'image')} is larger than {MAX_IMAGE_BYTES // 1_000_000} MB")
+            urls.append(url)
+        if len(urls) > MAX_IMAGES:
+            raise ValueError(f"at most {MAX_IMAGES} images per message")
+        return urls
     def attachments(self, paths):
         """Files inlined into a prompt: [(path, text)], refusing anything outside the project, binary or huge."""
         out, total = [], 0
@@ -280,6 +402,13 @@ class Project:
                 raise ValueError(f"attachments exceed {MAX_ATTACH_TOTAL // 1000} KB; attach fewer or smaller files")
             out.append((self.rel(full), raw.decode("utf-8", errors="replace")))
         return out
+
+
+def user_content(text, images):
+    """A user message's content: plain text, or text plus image parts when images are attached."""
+    if not images:
+        return text
+    return [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
 
 
 def attachment_block(items):
@@ -402,7 +531,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{self.server.engine_port}/health", timeout=1.5) as r:
                 h = json.load(r)
-            eng = {"model": h.get("model"), "state": h.get("state"), "context": h.get("context")}
+            eng = {"model": h.get("model"), "state": h.get("state"), "context": h.get("context"),
+                   "vision": bool(h.get("vision")), "vision_capable": bool(h.get("vision_capable"))}
         except (OSError, ValueError):
             pass
         return self._json(200, {"root": P.root, "name": os.path.basename(P.root), "engine": eng,
@@ -466,10 +596,14 @@ class Handler(BaseHTTPRequestHandler):
         messages = body.get("messages") or []
         if not messages or messages[-1].get("role") != "user":
             raise ValueError("the last message must be from the user")
-        items = P.attachments(body.get("attachments"))
+        items = P.attachments(body.get("attachments")) + P.inline_attachments(body.get("inline"))
+        pictures = P.images(body.get("images"))
         msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
         if items:
             msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{attachment_block(items)}"
+        if pictures:
+            msgs[-1]["content"] = user_content(msgs[-1]["content"], pictures)
+
         def alive():
             try:                                  # an orderly close shows up as an empty peek
                 return self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) != b""
@@ -514,6 +648,31 @@ class Handler(BaseHTTPRequestHandler):
     def api_git_diff(self, P, q, body):
         return self._json(200, {"diff": P.git_diff(q.get("path", ""))})
 
+    def api_git_branches(self, P, q, body):
+        return self._json(200, P.branches())
+
+    def api_git_checkout(self, P, q, body):
+        info = P.checkout(body.get("branch"), bool(body.get("create")))
+        return self._json(200, {"ok": True, "branches": info, "git": P.git_status()})
+
+    def api_github_status(self, P, q, body):
+        return self._json(200, P.github_status())
+
+    def api_github_prs(self, P, q, body):
+        return self._json(200, {"prs": P.github_prs()})
+
+    def api_github_pr(self, P, q, body):
+        if body.get("confirm") is not True:               # opening a PR is public: never implicit
+            return self._error(400, "creating a pull request needs an explicit confirmation")
+        url = P.github_pr(body.get("title"), body.get("body", ""), body.get("base"), bool(body.get("draft")))
+        return self._json(200, {"ok": True, "url": url})
+
+    def api_github_create_repo(self, P, q, body):
+        if body.get("confirm") is not True:
+            return self._error(400, "creating a repository needs an explicit confirmation")
+        url = P.github_create_repo(body.get("name"), bool(body.get("private", True)))
+        return self._json(200, {"ok": True, "url": url, "git": P.git_status()})
+
     def api_git_commit(self, P, q, body):
         summary = P.git_commit(body.get("message"), body.get("paths"), bool(body.get("all")))
         return self._json(200, {"ok": True, "commit": summary, "git": P.git_status()})
@@ -528,10 +687,13 @@ class Handler(BaseHTTPRequestHandler):
         messages = body.get("messages") or []
         if not messages or messages[-1].get("role") != "user":
             raise ValueError("the last message must be from the user")
-        items = P.attachments(body.get("attachments"))
+        items = P.attachments(body.get("attachments")) + P.inline_attachments(body.get("inline"))
+        pictures = P.images(body.get("images"))
         msgs = [dict(m) for m in messages]
         if items:
             msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{attachment_block(items)}"
+        if pictures:
+            msgs[-1]["content"] = user_content(msgs[-1]["content"], pictures)
         msgs.insert(0, {"role": "system", "content": self.server.system_prompt()})
         payload = {"model": "local", "messages": msgs, "stream": True,
                    "chat_template_kwargs": {"enable_thinking": bool(body.get("think", False))}}
@@ -586,12 +748,32 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--engine-port", type=int, default=8090)
     ap.add_argument("--open", action="store_true", help="open the browser")
+    ap.add_argument("--exit-with-parent", type=int, nargs="?", const=0, default=None, metavar="PID",
+                    help="stop when process PID is gone (the editor app passes its own); without a PID: "
+                         "when the starting process is")
     args = ap.parse_args(argv)
     root = os.path.abspath(args.root)
     if not os.path.isdir(root):
         print(f"not a directory: {root}", file=sys.stderr)
         return 2
     srv = UIServer(Project(root), args.port, args.engine_port)
+    if args.exit_with_parent is not None:
+        parent = args.exit_with_parent or os.getppid()
+
+        def gone():
+            try:
+                os.kill(parent, 0)
+                return False
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+
+        def watch():
+            while not gone() and (args.exit_with_parent or os.getppid() == parent):
+                time.sleep(1)
+            os._exit(0)              # the app crashed or was killed: no orphan with a live token
+        threading.Thread(target=watch, daemon=True).start()
     print(f"Editor UI for {root}\n  {srv.url}\n  (Ctrl+C to stop)", flush=True)
     if args.open:
         threading.Timer(0.4, lambda: subprocess.run(["open", srv.url])).start()

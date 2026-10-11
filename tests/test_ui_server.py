@@ -240,6 +240,178 @@ class TestReviewFixes(Base):
         conn.close()
 
 
+class TestBranches(Base):
+    def test_listing_and_switching(self):
+        code, r = self.call("GET", "/api/git/branches")
+        self.assertEqual((code, r["current"], r["local"]), (200, "main", ["main"]))
+        code, r = self.call("POST", "/api/git/checkout", {"branch": "feature/x", "create": True})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["branches"]["current"], "feature/x")
+        self.assertEqual(r["git"]["branch"], "feature/x")
+        code, r = self.call("POST", "/api/git/checkout", {"branch": "main"})
+        self.assertEqual((code, r["branches"]["current"]), (200, "main"))
+        self.assertEqual(sorted(self.call("GET", "/api/git/branches")[1]["local"]), ["feature/x", "main"])
+
+    def test_bad_names_and_unknown_branches_are_refused(self):
+        for bad in ("", "--orphan", "-b", "a..b", "with space"):
+            with self.subTest(bad):
+                self.assertEqual(self.call("POST", "/api/git/checkout", {"branch": bad})[0], 400)
+        self.assertEqual(self.call("POST", "/api/git/checkout", {"branch": "nope"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/git/checkout", {"branch": "main", "create": True})[0], 400)
+
+    def test_git_refuses_to_lose_local_changes_and_says_so(self):
+        self.call("POST", "/api/git/checkout", {"branch": "other", "create": True})
+        self.put("README.md", "# on other\n")
+        git(self.root, "commit", "-qam", "other")
+        self.call("POST", "/api/git/checkout", {"branch": "main"})
+        self.put("README.md", "# local edit\n")                       # conflicts with the commit on 'other'
+        code, r = self.call("POST", "/api/git/checkout", {"branch": "other"})
+        self.assertEqual(code, 500)
+        self.assertIn("README.md", r["error"])
+        self.assertEqual(self.call("GET", "/api/git/branches")[1]["current"], "main")
+
+    def test_a_remote_branch_gets_a_tracking_local_branch(self):
+        git(self.root, "push", "-q", "origin", "main")
+        git(self.root, "checkout", "-q", "-b", "side")
+        self.put("side.txt", "s")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "side")
+        git(self.root, "push", "-q", "origin", "side")
+        git(self.root, "checkout", "-q", "main")
+        git(self.root, "branch", "-q", "-D", "side")
+        git(self.root, "fetch", "-q", "origin")
+        info = self.call("GET", "/api/git/branches")[1]
+        self.assertIn("origin/side", info["remote"])
+        code, r = self.call("POST", "/api/git/checkout", {"branch": "origin/side"})
+        self.assertEqual((code, r["branches"]["current"]), (200, "side"))
+
+
+class TestGitHub(Base):
+    """`gh` is replaced by a script that records its arguments: no network, no account."""
+
+    def setUp(self):
+        super().setUp()
+        self.bin = tempfile.mkdtemp()
+        self.log = os.path.join(self.bin, "calls.txt")
+        script = os.path.join(self.bin, "gh")
+        with open(script, "w") as f:
+            f.write('#!/bin/sh\necho "$@" >> "%s"\n'
+                    'case "$1 $2" in\n'
+                    '  "api user") echo octocat ;;\n'
+                    '  "pr list") echo \'[{"number":7,"title":"Fix","headRefName":"fix","url":"https://github.com/o/r/pull/7",'
+                    '"isDraft":false,"author":{"login":"octocat"}}]\' ;;\n'
+                    '  "pr create") echo "https://github.com/o/r/pull/8" ;;\n'
+                    '  "repo create") echo "https://github.com/octocat/$3" ;;\n'
+                    'esac\n' % self.log)
+        os.chmod(script, 0o755)
+        from unittest import mock
+        p = mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def calls(self):
+        return open(self.log).read().splitlines() if os.path.exists(self.log) else []
+
+    def test_status_reads_the_login_and_the_repo_from_the_remote(self):
+        git(self.root, "remote", "set-url", "origin", "git@github.com:octocat/hello.git")
+        code, r = self.call("GET", "/api/github/status")
+        self.assertEqual(code, 200)
+        self.assertEqual((r["installed"], r["authenticated"], r["user"], r["repo"]),
+                         (True, True, "octocat", "octocat/hello"))
+
+    def test_without_gh_everything_says_so_and_status_still_answers(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            code, r = self.call("GET", "/api/github/status")
+            self.assertEqual((code, r["installed"], r["authenticated"]), (200, False, False))
+            code, r = self.call("GET", "/api/github/prs")
+            self.assertEqual(code, 500)
+            self.assertIn("brew install gh", r["error"])
+
+    def test_pull_requests_are_listed(self):
+        code, r = self.call("GET", "/api/github/prs")
+        self.assertEqual((code, r["prs"][0]["number"]), (200, 7))
+
+    def test_creating_a_pr_or_a_repo_needs_confirmation_and_valid_input(self):
+        self.assertEqual(self.call("POST", "/api/github/pr", {"title": "x"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/github/pr", {"title": "x", "confirm": "yes"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/github/pr", {"title": "  ", "confirm": True})[0], 400)
+        self.assertEqual(self.call("POST", "/api/github/pr", {"title": "x", "confirm": True, "base": "--force"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/github/create_repo", {"name": "r"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/github/create_repo", {"name": "bad name!", "confirm": True})[0], 400)
+        self.assertFalse([c for c in self.calls() if c.startswith(("pr create", "repo create"))])   # nothing left the machine
+
+    def test_a_confirmed_pr_runs_gh_with_exactly_those_arguments(self):
+        code, r = self.call("POST", "/api/github/pr", {"title": "Add thing", "body": "why", "base": "main",
+                                                       "draft": True, "confirm": True})
+        self.assertEqual((code, r["url"]), (200, "https://github.com/o/r/pull/8"))
+        self.assertIn("pr create --title Add thing --body why --base main --draft", self.calls())
+
+    def test_a_repo_is_not_created_over_an_existing_origin(self):
+        code, r = self.call("POST", "/api/github/create_repo", {"name": "again", "confirm": True})
+        self.assertEqual(code, 400)                    # the test project already has origin
+        self.assertIn("origin", r["error"])
+
+
+class TestPicturesAndOutsideFiles(Base):
+    PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+    def chat(self, **extra):
+        body = {"messages": [{"role": "user", "content": "look"}], **extra}
+        return self.call("POST", "/api/chat", body, raw=True)
+
+    def test_inline_text_is_quoted_like_a_project_file(self):
+        code, _ = self.chat(inline=[{"name": "/Users/x/Downloads/notes.md", "text": "# outside\n"}])
+        self.assertEqual(code, 200)
+        content = FakeEngine.seen[-1]["messages"][-1]["content"]
+        self.assertIn("notes.md", content)
+        self.assertNotIn("/Users/x/Downloads", content)           # only the base name travels
+        self.assertIn("# outside", content)
+
+    def test_images_become_image_parts_for_the_engine(self):
+        code, _ = self.chat(images=[{"name": "shot.png", "data": self.PNG}])
+        self.assertEqual(code, 200)
+        content = FakeEngine.seen[-1]["messages"][-1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0], {"type": "text", "text": "look"})
+        self.assertEqual(content[1]["image_url"]["url"], self.PNG)
+
+    def test_bad_images_and_too_much_are_refused(self):
+        self.assertEqual(self.chat(images=[{"name": "x", "data": "data:text/html;base64,PGI+"}])[0], 400)
+        self.assertEqual(self.chat(images=[{"name": "x", "data": "http://evil/x.png"}])[0], 400)
+        self.assertEqual(self.chat(images=[{"name": f"{i}.png", "data": self.PNG} for i in range(7)])[0], 400)
+        big = "x" * (ATTACH_LIMIT + 10)
+        self.assertEqual(self.chat(inline=[{"name": "big.txt", "text": big}])[0], 400)
+
+
+ATTACH_LIMIT = 200_000
+
+
+class TestExitWithParent(unittest.TestCase):
+    def test_the_backend_follows_the_named_process_out(self):
+        """The editor app passes its own pid: if the app is killed the backend must not stay behind with
+        its token and its agent runs."""
+        import time
+        root = tempfile.mkdtemp()
+        parent = subprocess.Popen(["sleep", "60"])
+        srv = subprocess.Popen([sys.executable, "-B", "-m", "ui.server", "--root", root,
+                                "--exit-with-parent", str(parent.pid)], cwd=ROOT,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            self.assertIn("Editor UI", srv.stdout.readline())          # it is up
+            time.sleep(1.2)
+            self.assertIsNone(srv.poll(), "it exited while its parent was alive")
+            parent.kill()
+            parent.wait()
+            try:
+                srv.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.fail("the backend outlived its parent")
+        finally:
+            srv.kill()
+            parent.kill()
+
+
 class TestFiles(Base):
     def test_tree_orders_folders_first(self):
         entries = self.call("GET", "/api/tree")[1]["entries"]

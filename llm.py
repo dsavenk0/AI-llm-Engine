@@ -385,6 +385,23 @@ def delete_model(cfg, m, assume_yes=False):
     return True
 
 
+def set_vision(cfg, arg="on"):
+    """`./llm vision on|off`: image input for the selected model (a setting that needs an engine restart,
+    which this does when the engine is running). The editor's "Images" switch calls it."""
+    m = current_model(cfg)
+    if not m:
+        print(R(T("Select a model first."))); return False
+    if not m["vision"]:
+        print(R(T("This model has no vision tower."))); return False
+    on = str(arg or "on").lower() not in ("off", "0", "no", "false")
+    set_mcfg(cfg, "vision", on)
+    save_cfg(cfg)
+    print(G(T("Images: {state} for {name}").format(state=T("on") if on else T("off"), name=m["name"])))
+    if read_pid(ENGINE_PID):
+        return restart(cfg, False)
+    return True
+
+
 def remove_cmd(cfg, args):
     assume_yes = "--yes" in args or "-y" in args
     arg = " ".join(a for a in args if a not in ("--yes", "-y")).strip()
@@ -1466,6 +1483,7 @@ def main():
         "chat": lambda: chat(cfg), "bench": lambda: bench(cfg), "logs": logs,
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,
         "rm": lambda: remove_cmd(cfg, sys.argv[2:]),
+        "vision": lambda: set_vision(cfg, arg or "on"),
         "perf": lambda: run_perf(sys.argv[2:]),
         "eval": lambda: run_eval(sys.argv[2:]),
         "calibrate": lambda: run_calibrate(sys.argv[2:]),

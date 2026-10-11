@@ -303,6 +303,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # the model is None while the engine sleeps — /health must still answer (the app polls it)
                 "vision": ("loaded" if ENGINE.model is not None and "vision_tower" in ENGINE.model else "on demand")
                 if ENGINE.vision_allowed else False,
+                "vision_capable": bool(getattr(ENGINE, "vision_capable", False)),
                 "busy": ENGINE.lock.locked(),
                 "progress": getattr(ENGINE, "progress", None),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),

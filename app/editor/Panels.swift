@@ -136,7 +136,11 @@ private struct OutlineList: View {
     var body: some View {
         let flat = rows(file.outline)
         if flat.isEmpty {
-            Text("No symbols").foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 4) {
+                Text("No functions, classes or headings found").foregroundColor(.secondary)
+                Text("The outline lists a file's structure — it fills in for source code and Markdown.")
+                    .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center)
+            }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List(flat, id: \.0.id) { sym, depth in
                 Button { file.jumpLine = sym.line } label: {
@@ -150,6 +154,127 @@ private struct OutlineList: View {
                     }.padding(.leading, CGFloat(depth) * 12)
                 }.buttonStyle(.plain)
             }.listStyle(.plain)
+        }
+    }
+}
+
+// MARK: - GitHub (through the `gh` command-line tool: its login, its credentials)
+
+struct GitHubSection: View {
+    @ObservedObject var ws: Workspace
+    @State private var status: GitHubStatus?
+    @State private var prs: [PullRequest] = []
+    @State private var expanded = false
+    @State private var title = ""
+    @State private var body_ = ""
+    @State private var draft = false
+    @State private var busy = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let s = status {
+                    if !s.installed {
+                        Text("The GitHub command-line tool is not installed.").foregroundColor(.secondary)
+                        Button("Copy “brew install gh”") {
+                            NSPasteboard.general.clearContents(); NSPasteboard.general.setString("brew install gh", forType: .string)
+                        }
+                    } else if !s.authenticated {
+                        Text("Not signed in to GitHub.").foregroundColor(.secondary)
+                        Button("Sign in in the terminal") {
+                            ws.showPanel("terminal")
+                            let t = ws.terminalSession(); t.start()
+                            t.send("gh auth login --web --git-protocol https\r")
+                        }
+                        Button("I have signed in — check again") { reload() }
+                    } else {
+                        Label("Signed in as \(s.user ?? "?")" + (s.repo.map { " · \($0)" } ?? ""), systemImage: "checkmark.seal")
+                            .foregroundColor(.secondary)
+                        if s.repo == nil { createRepo() } else { pullRequests(s) }
+                    }
+                } else { ProgressView().controlSize(.small) }
+            }.padding(.top, 6)
+        } label: {
+            Label("GitHub", systemImage: "network").font(.callout)
+        }
+        .onChange(of: expanded) { open in if open { reload() } }
+    }
+
+    private func reload() {
+        Task {
+            status = try? await ws.backend.get("/api/github/status")
+            if status?.authenticated == true, status?.repo != nil {
+                let r: PullRequestsResponse? = try? await ws.backend.get("/api/github/prs")
+                prs = r?.prs ?? []
+            }
+        }
+    }
+
+    @ViewBuilder private func pullRequests(_ s: GitHubStatus) -> some View {
+        if prs.isEmpty { Text("No open pull requests").font(.caption).foregroundColor(.secondary) }
+        ForEach(prs) { pr in
+            Button { if let u = URL(string: pr.url) { NSWorkspace.shared.open(u) } } label: {
+                HStack { Text("#\(pr.number)").foregroundColor(.secondary); Text(pr.title).lineLimit(1); Spacer()
+                         Text(pr.headRefName).font(.caption).foregroundColor(.secondary) }
+            }.buttonStyle(.plain)
+        }
+        Divider()
+        Text("New pull request from \(ws.git?.branch ?? "this branch")").font(.caption).foregroundColor(.secondary)
+        TextField("Title", text: $title).textFieldStyle(.roundedBorder)
+        TextField("Description", text: $body_, axis: .vertical).lineLimit(2...5).textFieldStyle(.roundedBorder)
+        HStack {
+            Toggle("Draft", isOn: $draft).toggleStyle(.checkbox)
+            Spacer()
+            Button("Create pull request…") { createPR() }
+                .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || busy)
+        }
+    }
+
+    private func createRepo() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("This project has no GitHub remote.").font(.caption).foregroundColor(.secondary)
+            Button("Create a private repository from this folder…") { newRepo() }.disabled(busy)
+        }
+    }
+
+    private func createPR() {
+        let a = NSAlert()
+        a.messageText = "Open a pull request?"
+        a.informativeText = "“\(title)” from \(ws.git?.branch ?? "this branch") — visible on GitHub as soon as it is created. Push the branch first."
+        a.addButton(withTitle: "Create"); a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        busy = true
+        let t = title, b = body_, d = draft
+        ws.guarded("Pull request") {
+            defer { busy = false }
+            let r: URLResponseBody = try await ws.backend.request("POST", "/api/github/pr", body: [
+                "title": t, "body": b, "draft": d, "confirm": true])
+            title = ""; body_ = ""
+            ws.say("Pull request created")
+            if let u = URL(string: r.url) { NSWorkspace.shared.open(u) }
+            reload()
+        }
+    }
+
+    private func newRepo() {
+        let a = NSAlert()
+        a.messageText = "Create a private GitHub repository"
+        a.informativeText = "The folder is published as a new private repository under your account and the current branch is pushed."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = ws.projectName
+        a.accessoryView = field
+        a.addButton(withTitle: "Create and push"); a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        busy = true
+        let name = field.stringValue
+        ws.guarded("Create repository") {
+            defer { busy = false }
+            let r: CreateRepoResponse = try await ws.backend.request("POST", "/api/github/create_repo", body: [
+                "name": name, "private": true, "confirm": true])
+            ws.git = r.git
+            ws.say("Repository created")
+            if let u = URL(string: r.url) { NSWorkspace.shared.open(u) }
+            reload()
         }
     }
 }
@@ -195,6 +320,7 @@ struct GitModuleView: View {
                     Button("Push \(g.branch ?? "")…") { push(g) }.disabled(busy || (g.remotes ?? []).isEmpty)
                         .help((g.remotes ?? []).isEmpty ? "No remote configured" : "Send commits to the remote")
                 }
+                if ModuleSettings.shared.isOn(.github) { Divider(); GitHubSection(ws: ws) }
             } else {
                 Text("Not a git repository").foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             }

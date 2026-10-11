@@ -86,6 +86,33 @@ func runSelfTest(_ ws: Workspace, root: String) {
         ws.askAboutTerminal(term.buffer.text)
         check(ws.draft.contains("pty_42_ok") && ws.draft.contains("terminal"), "terminal output can be sent to the assistant")
 
+        // attachments: in the project → by path; elsewhere → its text; a binary file or an unreadable one → refused
+        let realRoot = (root as NSString).resolvingSymlinksInPath
+        let outside = NSTemporaryDirectory() + "llm-selftest-outside.txt"
+        try? "text from elsewhere".write(toFile: outside, atomically: true, encoding: .utf8)
+        if case .project(let rel)? = try? Attach.make(URL(fileURLWithPath: realRoot + "/hello.py"), root: realRoot) {
+            check(rel == "hello.py", "a file in the project is attached by path")
+        } else { check(false, "a file in the project is attached by path") }
+        if case .inline(let f)? = try? Attach.make(URL(fileURLWithPath: outside), root: realRoot) {
+            check(f.text == "text from elsewhere", "a file from elsewhere travels as text")
+        } else { check(false, "a file from elsewhere travels as text") }
+        let bin = NSTemporaryDirectory() + "llm-selftest.bin"
+        FileManager.default.createFile(atPath: bin, contents: Data([0, 1, 2, 3, 0]))
+        check((try? Attach.make(URL(fileURLWithPath: bin), root: realRoot)) == nil, "a binary file is refused")
+        ws.addAttachment(from: URL(fileURLWithPath: outside))
+        check(ws.inline.count == 1, "addAttachment puts it in the composer's list")
+
+        // branches: list, create + switch, come back
+        await ws.loadBranches()
+        let original = ws.branches?.current ?? ""
+        check(!original.isEmpty && ws.branches?.local.contains(original) == true, "branches listed (current \(original))")
+        ws.checkout("selftest-branch", create: true)
+        for _ in 0..<50 where ws.branches?.current != "selftest-branch" { try? await Task.sleep(nanoseconds: 100_000_000) }
+        check(ws.branches?.current == "selftest-branch" && ws.git?.branch == "selftest-branch", "created and switched to a branch")
+        ws.checkout(original)
+        for _ in 0..<50 where ws.branches?.current != original { try? await Task.sleep(nanoseconds: 100_000_000) }
+        check(ws.branches?.current == original, "switched back")
+
         ws.shutdown()
         print(failures.isEmpty ? "SELFTEST OK" : "SELFTEST FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)

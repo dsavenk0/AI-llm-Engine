@@ -195,5 +195,7 @@
   "No proxy for": "Без прокси для",
   "hosts / CIDRs, comma-separated": "хосты / CIDR через запятую",
   "CA bundle (PEM)": "Набор CA (PEM)",
-  "empty to clear": "пусто — сбросить"
+  "empty to clear": "пусто — сбросить",
+  "This model has no vision tower.": "У этой модели нет модуля изображений.",
+  "Images: {state} for {name}": "Изображения: {state} для {name}"
 }

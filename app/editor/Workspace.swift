@@ -8,10 +8,14 @@ enum LayoutMode: String { case chat, ide }
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
-    case files, outline, git, chat, problems, terminal
+    case files, outline, git, chat, problems, terminal, github, preview
     var id: String { rawValue }
+    /// Modules that start switched off: they bring a web view / network, so they are opt-in.
+    static let offByDefault: Set<ModuleID> = [.preview]
     var title: String {
         switch self {
+        case .github: return "GitHub"
+        case .preview: return "Preview (browser)"
         case .files: return "Files"
         case .outline: return "Outline"
         case .git: return "Changes (git)"
@@ -32,7 +36,7 @@ final class ModuleSettings: ObservableObject {
         if let raw = UserDefaults.standard.array(forKey: key) as? [String] {
             enabled = Set(raw.compactMap(ModuleID.init(rawValue:)))
         } else {
-            enabled = Set(ModuleID.allCases)
+            enabled = Set(ModuleID.allCases).subtracting(ModuleID.offByDefault)
         }
         if !enabled.contains(.files) { enabled.insert(.files) }       // a window without files is not a window
     }
@@ -83,7 +87,12 @@ final class Workspace: ObservableObject {
     @Published var open: [OpenFile] = []
     @Published var activePath: String?
     @Published var git: GitStatus?
-    @Published var attachments: [String] = []
+    @Published var attachments: [String] = []        // project files, by path
+    @Published var inline: [InlineFile] = []         // files from elsewhere: their text travels with the message
+    @Published var pictures: [Picture] = []
+    @Published var visionSwitching = false
+    @Published var saveTick = 0                       // bumped after every save: the preview reloads on it
+    @Published var branches: BranchesResponse?
     @Published var toast: String?
     @Published var toastBad = false
     @Published var cursor = (line: 1, col: 1)
@@ -165,13 +174,15 @@ final class Workspace: ObservableObject {
     func openProject(_ path: String) {
         starting = true
         fatal = nil
-        open = []; activePath = nil; tree = [:]; expanded = [""]; attachments = []; git = nil
+        open = []; activePath = nil; tree = [:]; expanded = [""]; attachments = []; inline = []; pictures = []
+        git = nil; branches = nil
         root = path
         Task {
             do {
                 try await backend.start(root: path, llmRoot: llmRoot, enginePort: enginePort)
                 let info: InfoResponse = try await backend.get("/api/info")
                 projectName = info.name; engine = info.engine; git = info.git
+                await loadBranches()
                 await loadDir("")
                 starting = false
                 startPolling()
@@ -226,6 +237,8 @@ final class Workspace: ObservableObject {
             let r: FileResponse = try await self.backend.get("/api/file?path=\(self.backend.encoded(path))")
             if r.binary == true { self.say("\(path) is a binary file", bad: true); return }
             if r.too_large == true { self.say("\(path) is too large to open", bad: true); return }
+            if r.not_utf8 == true { self.say("\(path) is not UTF-8 text; it is not opened (saving would damage it)", bad: true); return }
+            if let again = self.open.first(where: { $0.path == r.path }) { self.activePath = again.path; return }  // opened twice quickly
             let f = OpenFile(path: r.path, text: r.text ?? "", mtime: r.mtime ?? 0, language: r.language ?? "plaintext",
                              spans: r.spans ?? [], outline: r.outline ?? [])
             f.jumpLine = line
@@ -251,16 +264,37 @@ final class Workspace: ObservableObject {
     func save() {
         guard let f = active else { return }
         guarded("Save") {
-            let r: SaveResponse = try await self.backend.request("PUT", "/api/file", body: [
-                "path": f.path, "text": f.text, "expected_mtime": f.mtime])
-            f.saved = f.text; f.mtime = r.mtime
+            _ = try await self.write(f)
             self.say("Saved \(Paths.displayName(f.path))")
             await self.refreshGit()
         }
     }
 
+    /// Writes the buffer as it is *now*; marks that exact text as saved (keystrokes made while the request
+    /// was in flight stay unsaved).
+    @discardableResult
+    private func write(_ f: OpenFile) async throws -> Bool {
+        let snapshot = f.text
+        let r: SaveResponse = try await backend.request("PUT", "/api/file", body: [
+            "path": f.path, "text": snapshot, "expected_mtime": f.mtime])
+        f.saved = snapshot
+        f.mtime = r.mtime
+        saveTick += 1
+        return true
+    }
+
     func saveAll() {
         for f in open where f.dirty { activePath = f.path; save() }
+    }
+
+    /// Saves every changed buffer and reports whether all of them reached the disk.
+    func saveAllAndWait() async -> Bool {
+        var ok = true
+        for f in open where f.dirty {
+            do { try await write(f) } catch { say("Save \(Paths.displayName(f.path)): \(error.localizedDescription)", bad: true); ok = false }
+        }
+        await refreshGit()
+        return ok
     }
 
     func newFile(_ rel: String) {
@@ -306,4 +340,100 @@ final class Workspace: ObservableObject {
 
     func attach(_ path: String) { if !attachments.contains(path) { attachments.append(path) } }
     func detach(_ path: String) { attachments.removeAll { $0 == path } }
+
+    /// A file picked, dropped or pasted into the composer.
+    func addAttachment(from url: URL) {
+        do {
+            switch try Attach.make(url, root: (root as NSString).resolvingSymlinksInPath) {
+            case .project(let rel): attach(rel)
+            case .inline(let f): if !inline.contains(where: { $0.name == f.name && $0.text == f.text }) { inline.append(f) }
+            case .picture(let p): add(picture: p)
+            }
+        } catch { say(error.localizedDescription, bad: true) }
+    }
+
+    func addPastedImage(_ img: NSImage) {
+        do { add(picture: try Attach.picture(img, name: "pasted-image-\(pictures.count + 1).jpg")) }
+        catch { say(error.localizedDescription, bad: true) }
+    }
+
+    private func add(picture p: Picture) {
+        pictures.append(p)
+        if engine?.vision_capable == true, engine?.vision != true {
+            say("Images are switched off for this model — tick “Images” to enable them", bad: true)
+        } else if engine?.vision_capable != true, engine != nil {
+            say("This model cannot read images; the picture is sent but ignored", bad: true)
+        }
+    }
+
+    // MARK: image input switch (a per-model setting that needs the model restarted)
+
+    func setVision(_ on: Bool) {
+        guard !visionSwitching else { return }
+        visionSwitching = true
+        Task {
+            let ok = await Task.detached { [llmRoot] () -> Bool in
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: llmRoot + "/llm")
+                p.arguments = ["vision", on ? "on" : "off"]
+                p.currentDirectoryURL = URL(fileURLWithPath: llmRoot)
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                do { try p.run() } catch { return false }
+                p.waitUntilExit()
+                return p.terminationStatus == 0
+            }.value
+            // the restart is asynchronous: poll until the engine answers again
+            for _ in 0..<60 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if let info: InfoResponse = try? await backend.get("/api/info"), let e = info.engine {
+                    engine = e
+                    if e.vision == on || !ok { break }
+                }
+            }
+            visionSwitching = false
+            say(ok ? (on ? "Images are on" : "Images are off") : "Could not change the image setting", bad: !ok)
+        }
+    }
+
+    // MARK: branches
+
+    func loadBranches() async {
+        if let b: BranchesResponse = try? await backend.get("/api/git/branches") { branches = b }
+    }
+
+    func checkout(_ branch: String, create: Bool = false) {
+        let dirtyOpen = open.filter(\.dirty)
+        guarded(create ? "New branch" : "Switch branch") {
+            let r: CheckoutResponse = try await self.backend.request("POST", "/api/git/checkout",
+                                                                     body: ["branch": branch, "create": create])
+            self.branches = r.branches
+            self.git = r.git
+            self.say("On branch \(r.branches.current ?? branch)")
+            // files on disk may differ now: reload the open ones that have no unsaved work, then the tree
+            for f in self.open where !dirtyOpen.contains(where: { $0.path == f.path }) {
+                if let fr: FileResponse = try? await self.backend.get("/api/file?path=\(self.backend.encoded(f.path))"),
+                   let t = fr.text { f.text = t; f.saved = t; f.mtime = fr.mtime ?? f.mtime }
+                else { self.open.removeAll { $0.path == f.path } }        // gone on this branch
+            }
+            if let a = self.activePath, !self.open.contains(where: { $0.path == a }) { self.activePath = self.open.last?.path }
+            self.tree = [:]
+            await self.loadDir("")
+            for d in self.expanded where !d.isEmpty { await self.loadDir(d) }
+            await self.loadAllFiles()
+        }
+    }
+
+    func newBranch() {
+        let a = NSAlert()
+        a.messageText = "New branch"
+        a.informativeText = "Created from the current commit and switched to."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "feature/name"
+        a.accessoryView = field
+        a.addButton(withTitle: "Create"); a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { checkout(name, create: true) }
+    }
 }

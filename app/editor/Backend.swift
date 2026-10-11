@@ -30,7 +30,7 @@ struct FileResponse: Decodable {
     let text: String?, language: String?
     let mtime: Int64?
     let outline: [Symbol]?, spans: [Span]?
-    let binary: Bool?, too_large: Bool?
+    let binary: Bool?, too_large: Bool?, not_utf8: Bool?
 }
 struct AnalyzeResponse: Decodable {
     let language: String
@@ -59,7 +59,25 @@ struct SearchHit: Decodable, Identifiable, Hashable {
     var id: String { "\(path):\(line)" }
 }
 struct SearchResponse: Decodable { let hits: [SearchHit] }
-struct EngineInfo: Decodable { let model: String?, state: String?, context: Int? }
+struct EngineInfo: Decodable { let model: String?, state: String?, context: Int?, vision: Bool?, vision_capable: Bool? }
+struct GitHubStatus: Decodable {
+    let installed: Bool, authenticated: Bool
+    let user: String?, repo: String?, remote: String?
+}
+struct PullRequest: Decodable, Identifiable, Hashable {
+    let number: Int, title: String, headRefName: String, url: String
+    var id: Int { number }
+}
+struct PullRequestsResponse: Decodable { let prs: [PullRequest] }
+struct URLResponseBody: Decodable { let url: String }
+struct CreateRepoResponse: Decodable { let url: String; let git: GitStatus }
+struct BranchesResponse: Decodable {
+    let repo: Bool
+    let current: String?
+    let local: [String]
+    let remote: [String]
+}
+struct CheckoutResponse: Decodable { let branches: BranchesResponse; let git: GitStatus }
 struct InfoResponse: Decodable { let root: String, name: String, engine: EngineInfo?, git: GitStatus }
 
 struct BackendError: LocalizedError {
@@ -95,7 +113,8 @@ final class Backend: @unchecked Sendable {
         guard let py = Backend.pythonPath() else { throw BackendError(message: "python3 not found") }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: py)
-        p.arguments = ["-B", "-m", "ui.server", "--root", root, "--engine-port", String(enginePort)]
+        p.arguments = ["-B", "-m", "ui.server", "--root", root, "--engine-port", String(enginePort),
+                       "--exit-with-parent", String(ProcessInfo.processInfo.processIdentifier)]
         p.currentDirectoryURL = URL(fileURLWithPath: llmRoot)
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
@@ -120,7 +139,10 @@ final class Backend: @unchecked Sendable {
                 once.run { cont.resume(returning: nil) }
             }
         }
-        pipe.fileHandleForReading.readabilityHandler = nil
+        // keep reading (and discarding): a pipe nobody empties fills at 64 KB and blocks the backend's stderr
+        pipe.fileHandleForReading.readabilityHandler = { h in
+            if h.availableData.isEmpty { h.readabilityHandler = nil }
+        }
         guard let (port, tok) = found else { stop(); throw BackendError(message: "the editor backend did not start") }
         base = URL(string: "http://127.0.0.1:\(port)")
         token = tok
@@ -168,11 +190,13 @@ final class Backend: @unchecked Sendable {
 
     /// Streams the agent's events for one user turn. Cancelling the consuming task closes the connection,
     /// which the backend notices (and abandons any pending approval).
-    func agent(messages: [[String: String]], attachments: [String], think: Bool, autoEdit: Bool) -> AsyncThrowingStream<AgentEvent, Error> {
+    func agent(messages: [[String: String]], attachments: [String], inline: [[String: String]] = [],
+               images: [[String: String]] = [], think: Bool, autoEdit: Bool) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { cont in
             let task = Task {
                 do {
                     var r = try make("POST", "/api/agent", body: ["messages": messages, "attachments": attachments,
+                                                                  "inline": inline, "images": images,
                                                                   "think": think, "auto_edit": autoEdit])
                     r.timeoutInterval = 3600
                     let (bytes, resp) = try await URLSession.shared.bytes(for: r)

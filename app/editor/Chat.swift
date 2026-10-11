@@ -94,11 +94,13 @@ final class ChatStore: ObservableObject {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !busy else { return }
         let attached = ws.attachments
+        let inline = ws.inline, pictures = ws.pictures
         if let f = ws.active, f.dirty, attached.contains(f.path) { ws.save() }
-        ws.attachments = []
+        ws.attachments = []; ws.inline = []; ws.pictures = []
+        let names = attached + inline.map(\.name) + pictures.map { "🖼 " + $0.name }
         mutate { s in
             if s.items.isEmpty { s.title = String(prompt.prefix(48)) }
-            s.items.append(ChatItem(kind: .user, text: prompt, attached: attached))
+            s.items.append(ChatItem(kind: .user, text: prompt, attached: names))
         }
         // the model sees the plain conversation (activity cards and approvals are for the human)
         let history = items.compactMap { item -> [String: String]? in
@@ -109,13 +111,17 @@ final class ChatStore: ObservableObject {
             }
         }
         busy = true
-        task = Task { await self.run(history: history, attached: attached) }
+        task = Task { await self.run(history: history, attached: attached, inline: inline, pictures: pictures) }
     }
 
-    private func run(history: [[String: String]], attached: [String]) async {
+    private func run(history: [[String: String]], attached: [String], inline: [InlineFile], pictures: [Picture]) async {
         defer { busy = false; runID = nil; save() }
         do {
-            for try await ev in ws.backend.agent(messages: history, attachments: attached, think: think, autoEdit: autoEdit) {
+            let stream = ws.backend.agent(messages: history, attachments: attached,
+                                          inline: inline.map { ["name": $0.name, "text": $0.text] },
+                                          images: pictures.map { ["name": $0.name, "data": $0.dataURL] },
+                                          think: think, autoEdit: autoEdit)
+            for try await ev in stream {
                 apply(ev)
             }
         } catch is CancellationError {
@@ -222,49 +228,6 @@ private struct EmptyChat: View {
             Text("The assistant can search and read files, ask you questions, and edit after your approval.")
                 .font(.callout).foregroundColor(.secondary).multilineTextAlignment(.center)
         }.frame(maxWidth: .infinity).padding(.top, 60)
-    }
-}
-
-private struct Composer: View {
-    @ObservedObject var ws: Workspace
-    @ObservedObject var store: ChatStore
-    @Binding var draft: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if !ws.attachments.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack {
-                        ForEach(ws.attachments, id: \.self) { p in
-                            HStack(spacing: 4) {
-                                Image(systemName: "paperclip").font(.caption)
-                                Text(Paths.displayName(p)).font(.caption)
-                                Button { ws.detach(p) } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain)
-                            }.padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(Color.accentColor.opacity(0.15), in: Capsule())
-                        }
-                    }
-                }
-            }
-            TextEditor(text: $draft)
-                .font(.body).frame(height: 64).scrollContentBackground(.hidden)
-                .padding(4).background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
-            HStack(spacing: 10) {
-                Button { if let p = ws.activePath { ws.attach(p) } } label: { Label("Attach file", systemImage: "paperclip") }
-                    .disabled(ws.activePath == nil).buttonStyle(.borderless)
-                Toggle("Reasoning", isOn: $store.think).toggleStyle(.checkbox)
-                Toggle("Auto-apply edits", isOn: $store.autoEdit).toggleStyle(.checkbox)
-                    .help("Skip the approval for file edits (commands still ask)")
-                Spacer()
-                if store.busy {
-                    Button("Stop") { store.stop() }
-                } else {
-                    Button("Send") { store.send(draft); draft = "" }
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }.font(.callout)
-        }.padding(10)
     }
 }
 
@@ -495,14 +458,7 @@ struct SessionsModuleView: View {
                     .tag(s.id)
                     .contextMenu { Button("Delete") { store.delete(s.id) } }
                 }
-            }.listStyle(.sidebar)
-            Divider()
-            HStack {
-                Image(systemName: "folder")
-                Text(ws.projectName).lineLimit(1)
-                Spacer()
-                if let b = ws.git?.branch { Text(b).font(.caption).foregroundColor(.secondary) }
-            }.padding(10)
-        }
+            }.listStyle(.sidebar).scrollContentBackground(.hidden)
+        }.background(Palette.panel)
     }
 }

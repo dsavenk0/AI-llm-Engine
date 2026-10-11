@@ -3,27 +3,34 @@ import AppKit
 import SwiftUI
 
 enum Syntax {
-    static let font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+    /// Medium weight: regular strokes of a monospaced face are ~1 px wide on a retina display and read as
+    /// washed out once anti-aliased, whatever the colour.
+    static let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
 
-    private static func dyn(_ light: (CGFloat, CGFloat, CGFloat), _ dark: (CGFloat, CGFloat, CGFloat)) -> NSColor {
-        NSColor(name: nil) { a in
-            let c = a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1)
-        }
-    }
-    static let colors: [String: NSColor] = [
-        "keyword": dyn((0.67, 0.10, 0.45), (1.00, 0.48, 0.71)),
-        "string": dyn((0.10, 0.45, 0.15), (0.61, 0.89, 0.48)),
-        "comment": dyn((0.42, 0.47, 0.52), (0.45, 0.54, 0.61)),
-        "number": dyn((0.70, 0.35, 0.00), (1.00, 0.72, 0.42)),
-        "function": dyn((0.00, 0.40, 0.65), (0.15, 0.83, 1.00)),
-        "type": dyn((0.00, 0.50, 0.40), (0.30, 0.95, 0.76)),
-        "decorator": dyn((0.50, 0.25, 0.70), (0.78, 0.57, 0.92)),
-        "property": dyn((0.15, 0.30, 0.75), (0.51, 0.67, 1.00)),
-        "constant": dyn((0.75, 0.30, 0.10), (0.97, 0.55, 0.42)),
-        "tag": dyn((0.67, 0.10, 0.45), (1.00, 0.48, 0.71)),
-        "heading": dyn((0.00, 0.50, 0.40), (0.30, 0.95, 0.76)),
+    private static func ns(_ c: (CGFloat, CGFloat, CGFloat)) -> NSColor { NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1) }
+
+    /// Chosen by the theme setting itself (a dynamic colour resolved to the wrong variant in a hosted view
+    /// and came out as pale pastels on a light background). Light values are saturated and dark enough
+    /// for ~7:1 contrast on white; dark values are bright on the graphite ground.
+    private static let light: [String: (CGFloat, CGFloat, CGFloat)] = [
+        "keyword": (0.55, 0.00, 0.45), "string": (0.00, 0.34, 0.05), "comment": (0.30, 0.34, 0.40),
+        "number": (0.60, 0.22, 0.00), "function": (0.00, 0.26, 0.56), "type": (0.00, 0.36, 0.28),
+        "decorator": (0.40, 0.12, 0.60), "property": (0.05, 0.18, 0.62), "constant": (0.64, 0.18, 0.00),
+        "tag": (0.55, 0.00, 0.45), "heading": (0.00, 0.36, 0.28),
     ]
+    private static let dark: [String: (CGFloat, CGFloat, CGFloat)] = [
+        "keyword": (1.00, 0.45, 0.70), "string": (0.60, 0.92, 0.45), "comment": (0.50, 0.60, 0.68),
+        "number": (1.00, 0.72, 0.40), "function": (0.30, 0.85, 1.00), "type": (0.35, 0.96, 0.78),
+        "decorator": (0.80, 0.60, 0.95), "property": (0.55, 0.72, 1.00), "constant": (0.98, 0.58, 0.45),
+        "tag": (1.00, 0.45, 0.70), "heading": (0.35, 0.96, 0.78),
+    ]
+
+    static func color(_ kind: String, dark isDark: Bool) -> NSColor? {
+        (isDark ? dark : light)[kind].map(ns)
+    }
+    static func text(dark isDark: Bool) -> NSColor {
+        isDark ? ns((0.92, 0.96, 0.98)) : ns((0.02, 0.04, 0.07))
+    }
 }
 
 /// Draws 1-based line numbers next to the text view.
@@ -100,7 +107,8 @@ struct CodeEditor: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
-        scroll.drawsBackground = false
+        scroll.drawsBackground = true
+        scroll.backgroundColor = Palette.editorNS(isDark: ThemeSettings.shared.isDark)
         let tv = NSTextView()
         tv.isRichText = false
         tv.allowsUndo = true
@@ -110,8 +118,10 @@ struct CodeEditor: NSViewRepresentable {
         tv.isAutomaticSpellingCorrectionEnabled = false
         tv.isContinuousSpellCheckingEnabled = false
         tv.font = Syntax.font
-        tv.textColor = .labelColor
-        tv.drawsBackground = false
+        tv.textColor = Syntax.text(dark: ThemeSettings.shared.isDark)
+        tv.insertionPointColor = ThemeSettings.shared.isDark ? NSColor(srgbRed: 0, green: 0.9, blue: 1, alpha: 1) : .black
+        tv.drawsBackground = true
+        tv.backgroundColor = Palette.editorNS(isDark: ThemeSettings.shared.isDark)
         tv.textContainerInset = NSSize(width: 6, height: 8)
         tv.isHorizontallyResizable = true
         tv.isVerticallyResizable = true
@@ -126,6 +136,10 @@ struct CodeEditor: NSViewRepresentable {
         scroll.verticalRulerView = LineNumberRuler(textView: tv, scrollView: scroll)
         context.coordinator.textView = tv
         context.coordinator.load(file)
+        context.coordinator.themeObserver = NotificationCenter.default.addObserver(
+            forName: .themeChanged, object: nil, queue: .main) { [weak coordinator = context.coordinator] _ in
+            MainActor.assumeIsolated { coordinator?.themeChanged() }
+        }
         return scroll
     }
 
@@ -143,8 +157,21 @@ struct CodeEditor: NSViewRepresentable {
         private var appliedDiag = -1
         private var applying = false
         private var timer: Timer?
+        var themeObserver: NSObjectProtocol?
 
         init(_ p: CodeEditor) { parent = p }
+        deinit { if let o = themeObserver { NotificationCenter.default.removeObserver(o) } }
+
+        func themeChanged() {
+            guard let tv = textView else { return }
+            let dark = ThemeSettings.shared.isDark
+            tv.textColor = Syntax.text(dark: dark)
+            tv.backgroundColor = Palette.editorNS(isDark: dark)
+            tv.enclosingScrollView?.backgroundColor = Palette.editorNS(isDark: dark)
+            tv.insertionPointColor = dark ? NSColor(srgbRed: 0, green: 0.9, blue: 1, alpha: 1) : .black
+            appliedSpans = -1
+            paint(parent.file)
+        }
 
         func load(_ f: OpenFile) {
             guard let tv = textView else { return }
@@ -181,11 +208,12 @@ struct CodeEditor: NSViewRepresentable {
             guard let tv = textView, let storage = tv.textStorage else { return }
             let full = NSRange(location: 0, length: storage.length)
             storage.beginEditing()
-            storage.addAttributes([.font: Syntax.font, .foregroundColor: NSColor.labelColor], range: full)
+            let dark = ThemeSettings.shared.isDark
+            storage.addAttributes([.font: Syntax.font, .foregroundColor: Syntax.text(dark: dark)], range: full)
             let map = OffsetMap(f.text)
             for s in f.spans {
                 guard let r = map.range(start: s.start, end: s.end), NSMaxRange(r) <= storage.length,
-                      let c = Syntax.colors[s.kind] else { continue }
+                      let c = Syntax.color(s.kind, dark: dark) else { continue }
                 storage.addAttribute(.foregroundColor, value: c, range: r)
                 if s.kind == "comment" {
                     storage.addAttribute(.font, value: NSFontManager.shared.convert(Syntax.font, toHaveTrait: .italicFontMask), range: r)

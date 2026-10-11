@@ -1068,7 +1068,13 @@ final class Downloader: ObservableObject {
             }
         }
         proc = p
-        try? p.run()
+        do { try p.run() } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            self.error = L("Could not start the download", "Не удалось начать загрузку") + ": \(error.localizedDescription)"
+            self.repo = nil
+            self.proc = nil
+            done()
+        }
     }
 
 }

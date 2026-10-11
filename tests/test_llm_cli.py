@@ -347,6 +347,36 @@ class TestStartStop(State):
         self.assertIn("setup --compat", out)
 
 
+class TestVisionSwitch(State):
+    def setUp(self):
+        super().setUp()
+        self.model = write_model(os.path.join(self.cfg["dirs"][0], "v"), config={
+            "model_type": "qwen3_5", "text_config": {"model_type": "qwen3_5_text"}, "vision_config": {"depth": 1}})
+        self.cfg["model"] = self.model
+        self.cfg["models"][self.model] = {"vision": False}
+
+    def test_it_sets_the_model_setting_and_restarts_only_a_running_engine(self):
+        calls = []
+        with mock.patch.object(llm, "restart", lambda c, i=True: calls.append("restart") or True), \
+                mock.patch.object(llm, "read_pid", lambda p: None):
+            ok, out = quiet(llm.set_vision, self.cfg, "on")
+        self.assertTrue(ok, out)
+        self.assertTrue(llm.mcfg(self.cfg)["vision"])
+        self.assertEqual(calls, [])
+        with mock.patch.object(llm, "restart", lambda c, i=True: calls.append("restart") or True), \
+                mock.patch.object(llm, "read_pid", lambda p: 123):
+            quiet(llm.set_vision, self.cfg, "off")
+        self.assertFalse(llm.mcfg(self.cfg)["vision"])
+        self.assertEqual(calls, ["restart"])
+
+    def test_a_model_without_a_vision_tower_says_so(self):
+        plain = write_model(os.path.join(self.cfg["dirs"][0], "p"))
+        self.cfg["model"] = plain
+        ok, out = quiet(llm.set_vision, self.cfg, "on")
+        self.assertFalse(ok)
+        self.assertIn("vision", out.lower())
+
+
 class TestSettingsAndSelection(State):
     def test_per_model_settings_override_defaults_only_for_that_model(self):
         a = write_model(os.path.join(self.cfg["dirs"][0], "a"))

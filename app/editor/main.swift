@@ -27,6 +27,8 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
         window.title = "LLM Editor"
         window.contentView = host
         window.isReleasedWhenClosed = false
+        window.appearance = ThemeSettings.shared.appearance
+        window.backgroundColor = Palette.windowNS(isDark: ThemeSettings.shared.isDark)
         window.delegate = self
         if let o = other {                                     // a new window cascades from the one before it
             window.setFrame(o.frame, display: false)
@@ -59,6 +61,26 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
             panel.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent()
         }
         guard panel.runModal() == .OK, let url = panel.url else { return false }
+        // switching the project replaces every open buffer: unsaved work must not vanish silently
+        let dirty = ws.open.filter(\.dirty)
+        if !dirty.isEmpty {
+            let a = NSAlert()
+            a.messageText = "\(dirty.count) file(s) have unsaved changes"
+            a.informativeText = dirty.map { $0.path }.joined(separator: "\n")
+            a.addButton(withTitle: "Save and switch")
+            a.addButton(withTitle: "Discard and switch")
+            a.addButton(withTitle: "Cancel")
+            switch a.runModal() {
+            case .alertFirstButtonReturn:
+                Task { @MainActor in
+                    if await self.ws.saveAllAndWait() { self.open(url.path) }
+                    else { self.ws.say("Could not save every file; the project was not switched", bad: true) }
+                }
+                return true
+            case .alertSecondButtonReturn: break
+            default: return false
+            }
+        }
         open(url.path)
         return true
     }
@@ -134,6 +156,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(newWindowRequested(_:)), name: newWindowNotification, object: nil)
         newWindow(project: startRoot.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil })
+        if let out = value(after: "--snapshot") { scheduleSnapshot(to: out) }
+    }
+
+    private func value(after flag: String) -> String? {
+        let a = CommandLine.arguments
+        guard let i = a.firstIndex(of: flag), i + 1 < a.count else { return nil }
+        return a[i + 1]
+    }
+
+    /// `--snapshot out.png [--layout ide|chat] [--open-file rel] [--theme light|dark] [--bottom tab]`: renders the
+    /// window's own view hierarchy to a PNG (no screen-recording permission needed) and quits. For checking the
+    /// look of a build without a person at the screen.
+    private func scheduleSnapshot(to path: String) {
+        if let t = value(after: "--theme"), let m = ThemeMode(rawValue: t) { ThemeSettings.shared.mode = m }
+        Task { @MainActor in
+            guard let c = self.controllers.last else { exit(2) }
+            for _ in 0..<150 where c.ws.starting { try? await Task.sleep(nanoseconds: 100_000_000) }
+            if let l = self.value(after: "--layout") { c.ws.mode = l == "ide" ? .ide : .chat }
+            if let f = self.value(after: "--open-file") { c.ws.openFile(f) }
+            if let b = self.value(after: "--bottom") { c.ws.showPanel(b) }
+            if CommandLine.arguments.contains("--all-modules") { ModuleID.allCases.forEach { if !ModuleSettings.shared.isOn($0) { ModuleSettings.shared.toggle($0) } } }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard let view = c.window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(3) }
+            if ProcessInfo.processInfo.environment["LLM_EDITOR_DEBUG_VIEWS"] != nil {
+                func walk(_ v: NSView, _ chain: [String]) {
+                    let me = chain + ["\(type(of: v))(a=\(v.alphaValue))"]
+                    if v is NSTextView && !(v is ComposerNSTextView) {
+                        print("TEXTVIEW", me.suffix(8).joined(separator: " > "))
+                        if let tv = v as? NSTextView {
+                            let attrs = tv.textStorage?.attributes(at: 40, effectiveRange: nil) ?? [:]
+                            print("  attrs:", attrs[.foregroundColor] as Any, "typing:", tv.typingAttributes[.foregroundColor] as Any,
+                                  "textColor:", tv.textColor as Any, "layer:", tv.layer?.opacity as Any, "appearance:", tv.effectiveAppearance.name.rawValue)
+                        }
+                    }
+                    v.subviews.forEach { walk($0, me) }
+                }
+                walk(view, [])
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            guard let png = rep.representation(using: .png, properties: [:]) else { exit(4) }
+            try? png.write(to: URL(fileURLWithPath: path))
+            print("SNAPSHOT \(path) \(Int(view.bounds.width))x\(Int(view.bounds.height))")
+            fflush(stdout)
+            c.ws.shutdown()
+            exit(0)
+        }
     }
 
     /// Another window, on `project` — or, without one, on a folder the user picks.
@@ -153,6 +222,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    /// ⌘Q does not go through windowShouldClose: ask here, once, about every window's unsaved files.
+    func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
+        let dirty = controllers.flatMap { c in c.ws.open.filter(\.dirty).map { "\(c.ws.projectName)/\($0.path)" } }
+        if dirty.isEmpty { return .terminateNow }
+        let a = NSAlert()
+        a.messageText = "\(dirty.count) file(s) have unsaved changes"
+        a.informativeText = dirty.prefix(12).joined(separator: "\n") + (dirty.count > 12 ? "\n…" : "")
+        a.addButton(withTitle: "Save all and quit")
+        a.addButton(withTitle: "Quit without saving")
+        a.addButton(withTitle: "Cancel")
+        switch a.runModal() {
+        case .alertFirstButtonReturn:
+            Task { @MainActor in
+                var ok = true
+                for c in self.controllers { ok = await c.ws.saveAllAndWait() && ok }
+                NSApp.reply(toApplicationShouldTerminate: ok)
+                if !ok { self.controllers.first?.ws.say("Some files could not be saved; the editor stays open", bad: true) }
+            }
+            return .terminateLater
+        case .alertSecondButtonReturn: return .terminateNow
+        default: return .terminateCancel
+        }
+    }
     func applicationWillTerminate(_ n: Notification) { controllers.forEach { $0.ws.shutdown() } }
 
     // MARK: menus (act on the focused window)
