@@ -374,7 +374,8 @@ def remove_cmd(cfg, args):
 # ─────────────────────────── processes ───────────────────────────
 def read_pid(path):
     try:
-        pid = int(open(path).read().strip())
+        with open(path) as f:
+            pid = int(f.read().strip())
         os.kill(pid, 0)
         return pid
     except (OSError, ValueError):
@@ -546,9 +547,11 @@ def start(cfg, interactive=True):
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     if cfg["api_key"]:
         env["ENGINE_API_KEY"] = cfg["api_key"]
-    p = subprocess.Popen(cmd, cwd=BASE, stdout=open(ENGINE_LOG, "a"), stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True, env=env)
-    open(ENGINE_PID, "w").write(str(p.pid))
+    with open(ENGINE_LOG, "a") as logf:
+        p = subprocess.Popen(cmd, cwd=BASE, stdout=logf, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+    with open(ENGINE_PID, "w") as f:
+        f.write(str(p.pid))
     print(T("Loading {name} ({size:.1f} GB)").format(name=B(m["name"]), size=m["size"]), end="", flush=True)
     t0 = time.time()
     while time.time() - t0 < 600:
