@@ -177,9 +177,15 @@ _NUM = re.compile(r"(?<![\w.])(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|\d[\d_]*\.?\d*(?
 _WORD = re.compile(r"[A-Za-z_$@#][\w$]*(?:\?)?")
 
 
+MAX_HIGHLIGHT = 1_500_000      # characters; beyond this an editor shows plain text
+MAX_OUTLINE = 2_000_000
+
+
 def highlight(text, language):
     """Character spans [(start, end, kind)] for syntax colouring; kinds: comment string keyword number
     function type decorator tag property heading. Anything it does not understand is left unmarked."""
+    if len(text) > MAX_HIGHLIGHT:
+        return []
     if language == "markdown":
         return _highlight_markdown(text)
     if language in ("html", "xml"):
@@ -285,21 +291,30 @@ def _string_end(text, i, quote, multiline):
 
 
 def _add_keys(text, spans, language):
-    """Keys of key: value / key = value lines (and "key": in JSON) as `property`."""
-    taken = [(a, b) for a, b, k in spans if k == "comment"]
-    out = list(spans)
+    """Keys of key: value / key = value lines (and "key": in JSON) as `property`. One pass with a dict of
+    replaced starts — rescanning the span list per key made large JSON files take minutes."""
+    comments = [(a, b) for a, b, k in spans if k == "comment"]
+    ci = 0
+    keys = {}                                   # start -> end of every key found
     if language == "json":
         for m in re.finditer(r'("(?:[^"\\\n]|\\.)*")\s*:', text):
-            a, b = m.span(1)
-            out = [x for x in out if not (x[0] == a and x[2] == "string")]
-            out.append((a, b, "property"))
-        return out
-    for m in re.finditer(r"(?m)^(\s*-?\s*)([\w.\-\"']+)(\s*[:=])", text):
-        s, e = m.start(2), m.end(2)
-        if any(a <= s < b for a, b in taken):
-            continue
-        out = [x for x in out if not (x[0] == s)]
-        out.append((s, e, "property"))
+            keys[m.start(1)] = m.end(1)
+    else:
+        for m in re.finditer(r"(?m)^(\s*-?\s*)([\w.\-\"']+)(\s*[:=])", text):
+            s0 = m.start(2)
+            while ci < len(comments) and comments[ci][1] <= s0:     # spans are in text order: advance a cursor
+                ci += 1
+            if ci < len(comments) and comments[ci][0] <= s0 < comments[ci][1]:
+                continue
+            keys[s0] = m.end(2)
+    out = []
+    seen = set()
+    for a, b, k in spans:
+        if a in keys and (k == "string" or language != "json"):
+            continue                                                  # replaced by the property span below
+        out.append((a, b, k))
+    for a, b in keys.items():
+        out.append((a, b, "property"))
     return out
 
 
@@ -343,6 +358,8 @@ def _sym(kind, name, line, end=None, children=None):
 def outline(text, language):
     """Nested symbols with 1-based line numbers. Never raises: a file that does not parse still gets a
     best-effort outline."""
+    if len(text) > MAX_OUTLINE:
+        return []
     try:
         if language == "python":
             return _outline_python(text)

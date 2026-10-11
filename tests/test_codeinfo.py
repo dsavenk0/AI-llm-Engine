@@ -249,6 +249,49 @@ class TestOutline(unittest.TestCase):
         self.assertEqual([(d, s["name"]) for d, s in C.flatten(o)], [(0, "A"), (1, "m"), (0, "f")])
 
 
+class TestPerformance(unittest.TestCase):
+    """Editors must not stall on big files: these were minutes (JSON) before the keys pass was made linear."""
+
+    def timed(self, fn, *a):
+        import time
+        t = time.perf_counter()
+        r = fn(*a)
+        return r, time.perf_counter() - t
+
+    def test_large_json_highlights_in_linear_time(self):
+        import json
+        text = json.dumps([{"id": i, "name": f"item {i}", "tags": ["a", "b"]} for i in range(6000)], indent=1)
+        spans, secs = self.timed(C.highlight, text, "json")
+        self.assertLess(secs, 3.0, f"{len(text)} chars took {secs:.1f}s")
+        props = [(a, b) for a, b, k in spans if k == "property"]
+        self.assertEqual(len(props), 18000)
+        self.assertTrue(all(text[a:b].startswith('"') and text[a:b].endswith('"') for a, b in props[:200]))
+
+    def test_large_yaml_and_toml(self):
+        yaml = "\n".join(f"key{i}: value {i}  # c" for i in range(20000))
+        _, secs = self.timed(C.highlight, yaml, "yaml")
+        self.assertLess(secs, 3.0)
+        toml = "\n".join(f"k{i} = {i}" for i in range(20000))
+        _, secs = self.timed(C.highlight, toml, "toml")
+        self.assertLess(secs, 3.0)
+
+    def test_comment_lines_are_not_keys(self):
+        spans = kinds_at("# a: b\nreal: 1\n", "yaml")
+        self.assertEqual([t for t, k in spans if k == "property"], ["real"])
+
+    def test_a_huge_buffer_is_left_unhighlighted(self):
+        big = "x = 1\n" * 400_000
+        self.assertGreater(len(big), C.MAX_HIGHLIGHT)
+        self.assertEqual(C.highlight(big, "python"), [])
+
+    def test_code_files_of_a_megabyte_stay_interactive(self):
+        src = open(os.path.join(ROOT, "llm.py")).read() * 12              # ~700 KB
+        _, th = self.timed(C.highlight, src, "python")
+        _, to = self.timed(C.outline, src, "python")
+        self.assertLess(th, 2.0)
+        self.assertLess(to, 2.0)
+
+
 class TestOnTheRepository(unittest.TestCase):
     def test_every_source_file_here_is_handled_without_error(self):
         count = 0
