@@ -26,10 +26,17 @@ enum Syntax {
     ]
 
     static func color(_ kind: String, dark isDark: Bool) -> NSColor? {
-        (isDark ? dark : light)[kind].map(ns)
+        if let t = ThemeSettings.shared.custom {                // a theme from an extension: its colours, kind by kind
+            if let hex = t.kinds[kind], let v = ThemeOverride.rgb(hex) { return ns((CGFloat(v.0), CGFloat(v.1), CGFloat(v.2))) }
+            return nil
+        }
+        return (isDark ? dark : light)[kind].map(ns)
     }
     static func text(dark isDark: Bool) -> NSColor {
-        isDark ? ns((0.92, 0.96, 0.98)) : ns((0.02, 0.04, 0.07))
+        if let t = ThemeSettings.shared.custom, let v = ThemeOverride.rgb(t.foreground) {
+            return ns((CGFloat(v.0), CGFloat(v.1), CGFloat(v.2)))
+        }
+        return isDark ? ns((0.92, 0.96, 0.98)) : ns((0.02, 0.04, 0.07))
     }
 }
 
@@ -42,6 +49,7 @@ final class LineNumberRuler: NSRulerView {
         self.textView = textView
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
+        clipToFrame()
         ruleThickness = 44
         NotificationCenter.default.addObserver(self, selector: #selector(redraw), name: NSText.didChangeNotification, object: textView)
         NotificationCenter.default.addObserver(self, selector: #selector(redraw), name: NSView.boundsDidChangeNotification,
@@ -52,8 +60,11 @@ final class LineNumberRuler: NSRulerView {
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let tv = textView, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
-        NSColor.windowBackgroundColor.withAlphaComponent(0.6).setFill()
-        rect.fill()
+        // Only the gutter itself, and opaque: this used to be a 60 % window-coloured fill of the whole `rect`,
+        // which (views are not clipped to their frame since macOS 14) dimmed the code beside the numbers —
+        // an "overlay" that kept the pane's first width when the window was widened.
+        Palette.editorNS(isDark: ThemeSettings.shared.isDark).setFill()
+        rect.intersection(bounds).fill()
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
                                                     .foregroundColor: NSColor.tertiaryLabelColor]
         let visible = lm.glyphRange(forBoundingRect: tv.visibleRect, in: tc)
@@ -96,20 +107,66 @@ final class LineNumberRuler: NSRulerView {
     }
 }
 
+/// The text view is as wide as its longest line but never narrower than the visible area; without that the
+/// part of the pane the text view did not cover was painted by something else (a lighter, uncoloured band
+/// that kept its old width when the window was widened).
+final class CodeScrollView: NSScrollView {
+    private var gutterOverlap: CGFloat = -1
+
+    override func layout() {
+        super.layout()
+        guard let tv = documentView as? NSTextView else { return }
+        // With a TextKit 1 text view this scroll view puts the line-number ruler over the first 44 pt of the text
+        // instead of beside it (a TextKit 2 one gets the inset on its own: bounds.origin.x = -44), which hid the
+        // first characters of every line. Measure the overlap and move the text over by that much.
+        if let r = verticalRulerView, rulersVisible, contentView.bounds.origin.x == 0 {
+            let overlap = max(0, r.frame.maxX - contentView.frame.minX)
+            if overlap != gutterOverlap {
+                gutterOverlap = overlap
+                tv.textContainerInset = NSSize(width: 6 + overlap, height: 8)
+            }
+        }
+        let size = contentSize
+        tv.minSize = NSSize(width: size.width, height: size.height)
+        if tv.frame.width < size.width { tv.setFrameSize(NSSize(width: size.width, height: tv.frame.height)) }
+        if lastSize != size {                  // the pane was resized: nothing the layer cached is valid any more
+            lastSize = size
+            tv.layoutManager?.ensureLayout(for: tv.textContainer!)
+            tv.setNeedsDisplay(tv.bounds)
+            contentView.setNeedsDisplay(contentView.bounds)
+        }
+    }
+    private var lastSize = NSSize.zero
+}
+
+extension NSView {
+    /// macOS 14+ no longer clips a view's drawing to its frame by default.
+    func clipToFrame() {
+        if #available(macOS 14.0, *) { clipsToBounds = true }
+    }
+}
+
 struct CodeEditor: NSViewRepresentable {
     @ObservedObject var file: OpenFile
+    var snippets: [Snippet] = []                // from installed extensions: a prefix + Tab expands
     var onEdit: (OpenFile) -> Void
     var onCursor: (Int, Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = CodeScrollView()
+        scroll.clipToFrame()
+        scroll.contentView.clipToFrame()
+        scroll.contentView.layerContentsRedrawPolicy = .duringViewResize
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.drawsBackground = true
         scroll.backgroundColor = Palette.editorNS(isDark: ThemeSettings.shared.isDark)
-        let tv = NSTextView()
+        // TextKit 1 from the start: the line-number ruler needs the layout manager, and touching it on a default
+        // (TextKit 2) view switches it over mid-life, leaving a band of text the old engine drew once, at its
+        // original width, in the default colour.
+        let tv = NSTextView(usingTextLayoutManager: false)
         tv.isRichText = false
         tv.allowsUndo = true
         tv.isAutomaticQuoteSubstitutionEnabled = false
@@ -130,6 +187,8 @@ struct CodeEditor: NSViewRepresentable {
         tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.delegate = context.coordinator
+        tv.clipToFrame()
+        tv.layerContentsRedrawPolicy = .duringViewResize
         scroll.documentView = tv
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
@@ -266,8 +325,32 @@ struct CodeEditor: NSViewRepresentable {
             parent.onCursor(line, col)
         }
 
+        /// A snippet prefix before the caret + Tab → the snippet body, caret at its first tab stop.
+        private func expandSnippet(in tv: NSTextView) -> Bool {
+            let snippets = parent.snippets
+            let sel = tv.selectedRange()
+            guard !snippets.isEmpty, sel.length == 0 else { return false }
+            let ns = tv.string as NSString
+            let lineStart = ns.lineRange(for: NSRange(location: sel.location, length: 0)).location
+            let before = ns.substring(with: NSRange(location: lineStart, length: sel.location - lineStart))
+            guard let snip = SnippetMatch.find(in: before, among: snippets) else { return false }
+            let indent = String(before.prefix { $0 == " " || $0 == "\t" })
+            let (text, caret) = SnippetExpander.expand(snip.body, indent: indent)
+            let prefixLen = (snip.prefix as NSString).length
+            let range = NSRange(location: sel.location - prefixLen, length: prefixLen)
+            guard tv.shouldChangeText(in: range, replacementString: text) else { return false }
+            tv.replaceCharacters(in: range, with: text)
+            tv.didChangeText()
+            tv.setSelectedRange(NSRange(location: range.location + caret, length: 0))
+            return true
+        }
+
         func textView(_ tv: NSTextView, doCommandBy sel: Selector) -> Bool {
-            if sel == #selector(NSResponder.insertTab(_:)) { tv.insertText("    ", replacementRange: tv.selectedRange()); return true }
+            if sel == #selector(NSResponder.insertTab(_:)) {
+                if expandSnippet(in: tv) { return true }
+                tv.insertText("    ", replacementRange: tv.selectedRange())
+                return true
+            }
             return false
         }
     }

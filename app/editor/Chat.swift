@@ -11,7 +11,7 @@ struct QuestionInfo: Codable, Equatable {
 }
 
 struct ChatItem: Identifiable, Codable, Equatable {
-    enum Kind: String, Codable { case user, assistant, activity, approval, question, error }
+    enum Kind: String, Codable { case user, assistant, activity, approval, question, error, image }
     var id = UUID()
     var kind: Kind
     var text = ""
@@ -22,6 +22,7 @@ struct ChatItem: Identifiable, Codable, Equatable {
     var approval: ApprovalInfo?
     var question: QuestionInfo?
     var resolved: String?                 // what the user decided / answered
+    var imagePath: String?                // image: project-relative file of a generated picture
 }
 
 struct ChatSession: Identifiable, Codable {
@@ -37,13 +38,21 @@ final class ChatStore: ObservableObject {
     @Published var currentID: UUID?
     @Published var busy = false
     @Published var think = false
-    @Published var autoEdit = false
+    @Published var effort: String?        // nil = the model's own default level
+    @Published var mode: AgentMode {
+        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "agentMode") }
+    }
+    var autoEdit: Bool { mode.autoEdit }
+    @Published var web = false            // the globe: web search and page reading for the agent, off by default
     private var runID: String?
     private var task: Task<Void, Never>?
     private var file: URL?
     private unowned let ws: Workspace
 
-    init(ws: Workspace) { self.ws = ws }
+    init(ws: Workspace) {
+        self.ws = ws
+        mode = AgentMode(rawValue: UserDefaults.standard.string(forKey: "agentMode") ?? "") ?? .manual
+    }
 
     var current: ChatSession? { sessions.first { $0.id == currentID } }
     var items: [ChatItem] { current?.items ?? [] }
@@ -82,10 +91,91 @@ final class ChatStore: ObservableObject {
         save()
     }
 
+    func rename(_ id: UUID, to title: String) {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].title = String(t.prefix(80))
+        save()
+    }
+
+    /// Asks for a new name (a small dialog, like the new-branch one).
+    func promptRename(_ id: UUID) {
+        guard let s = sessions.first(where: { $0.id == id }) else { return }
+        let a = NSAlert()
+        a.messageText = "Rename chat"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = s.title
+        a.accessoryView = field
+        a.addButton(withTitle: "Rename"); a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        if a.runModal() == .alertFirstButtonReturn { rename(id, to: field.stringValue) }
+    }
+
+    /// Deleting a chat cannot be undone, so it asks (unless the chat is empty).
+    func confirmDelete(_ id: UUID) {
+        guard let s = sessions.first(where: { $0.id == id }) else { return }
+        if !s.items.isEmpty {
+            let a = NSAlert()
+            a.alertStyle = .warning
+            a.messageText = "Delete “\(s.title)”?"
+            a.informativeText = "The conversation is removed from this project's chats. This cannot be undone."
+            a.addButton(withTitle: "Delete"); a.addButton(withTitle: "Cancel")
+            a.buttons.first?.hasDestructiveAction = true
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+        }
+        delete(id)
+    }
+
     private func mutate(_ body: (inout ChatSession) -> Void) {
         guard let i = sessions.firstIndex(where: { $0.id == currentID }) else { return }
         body(&sessions[i])
         sessions[i].updated = Date()
+    }
+
+    // MARK: context
+
+    /// The model sees the plain conversation (activity cards and approvals are for the human).
+    private func plainHistory() -> [[String: String]] {
+        items.compactMap { item -> [String: String]? in
+            switch item.kind {
+            case .user: return ["role": "user", "content": item.text]
+            case .assistant: return item.text.isEmpty ? nil : ["role": "assistant", "content": item.text]
+            default: return nil
+            }
+        }
+    }
+
+    /// What the next request will carry, roughly (see ContextMeter).
+    var contextTokens: Int {
+        ContextMeter.overhead + plainHistory().reduce(0) { $0 + ContextMeter.tokens(of: $1["content"] ?? "") }
+    }
+
+    @Published var compacting = false
+
+    /// Replaces everything before the last two user turns with a short note the model writes.
+    func compact() {
+        guard !busy, !compacting else { return }
+        let users = items.indices.filter { items[$0].kind == .user }
+        guard users.count > 2 else { ws.say("The conversation is still short — nothing to compact"); return }
+        let tailStart = users[users.count - 2]
+        let history = plainHistory()
+        compacting = true
+        Task {
+            defer { compacting = false }
+            struct Result: Decodable { let summary: String; let folded: Int }
+            do {
+                let r: Result = try await ws.backend.request("POST", "/api/compact",
+                                                              body: ["messages": history, "keep_user_turns": 2])
+                guard !r.summary.isEmpty else { ws.say("Nothing to compact"); return }
+                mutate { s in
+                    guard tailStart <= s.items.count else { return }
+                    let note = ChatItem(kind: .assistant, text: "**Earlier conversation (compacted)**\n\n" + r.summary)
+                    s.items.replaceSubrange(0..<tailStart, with: [note])
+                }
+                save()
+                ws.say("Compacted \(r.folded) messages")
+            } catch { ws.say("Could not compact: \(error.localizedDescription)", bad: true) }
+        }
     }
 
     // MARK: sending
@@ -102,14 +192,7 @@ final class ChatStore: ObservableObject {
             if s.items.isEmpty { s.title = String(prompt.prefix(48)) }
             s.items.append(ChatItem(kind: .user, text: prompt, attached: names))
         }
-        // the model sees the plain conversation (activity cards and approvals are for the human)
-        let history = items.compactMap { item -> [String: String]? in
-            switch item.kind {
-            case .user: return ["role": "user", "content": item.text]
-            case .assistant: return item.text.isEmpty ? nil : ["role": "assistant", "content": item.text]
-            default: return nil
-            }
-        }
+        let history = plainHistory()
         busy = true
         task = Task { await self.run(history: history, attached: attached, inline: inline, pictures: pictures) }
     }
@@ -120,7 +203,8 @@ final class ChatStore: ObservableObject {
             let stream = ws.backend.agent(messages: history, attachments: attached,
                                           inline: inline.map { ["name": $0.name, "text": $0.text] },
                                           images: pictures.map { ["name": $0.name, "data": $0.dataURL] },
-                                          think: think, autoEdit: autoEdit)
+                                          think: think, autoEdit: autoEdit, web: web,
+                                          mode: mode.rawValue, effort: think ? effort : nil)
             for try await ev in stream {
                 apply(ev)
             }
@@ -149,6 +233,8 @@ final class ChatStore: ObservableObject {
                 s.items[n].counts.add(category: category)
                 let detail = args.values.first.map { String($0.prefix(60)) } ?? ""
                 s.items[n].steps.append(detail.isEmpty ? name : "\(name): \(detail)")
+            case .image(let path, let prompt):
+                s.items.append(ChatItem(kind: .image, text: prompt, imagePath: path))
             case .approval(let id, let kind, let path, let old, let new, let command, let dangerous):
                 s.items.append(ChatItem(kind: .approval, approval: ApprovalInfo(id: id, kind: kind, path: path, old: old,
                                                                                 new: new, command: command, dangerous: dangerous)))
@@ -196,12 +282,57 @@ final class ChatStore: ObservableObject {
 
 // MARK: - views
 
+/// ⋯ on a chat row: rename or delete without knowing about the right-click menu.
+struct ChatRowMenu: View {
+    @ObservedObject var store: ChatStore
+    let id: UUID
+    var body: some View {
+        Menu {
+            Button("Rename…") { store.promptRename(id) }
+            Button("Delete…") { store.confirmDelete(id) }
+        } label: { Image(systemName: "ellipsis").foregroundColor(.secondary) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Rename or delete this chat")
+    }
+}
+
+/// The editor layout has no chat list: this bar names the current chat and switches, renames or deletes.
+struct ChatSwitcher: View {
+    @ObservedObject var store: ChatStore
+    var body: some View {
+        HStack(spacing: 6) {
+            Menu {
+                Button("New chat") { store.newChat() }
+                Divider()
+                ForEach(store.sessions.sorted { $0.updated > $1.updated }.prefix(15)) { s in
+                    Button { store.currentID = s.id } label: {
+                        if s.id == store.currentID { Label(s.title, systemImage: "checkmark") } else { Text(s.title) }
+                    }
+                }
+                if let id = store.currentID {
+                    Divider()
+                    Button("Rename this chat…") { store.promptRename(id) }
+                    Button("Delete this chat…") { store.confirmDelete(id) }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(store.current?.title ?? "Chat").lineLimit(1).font(.callout)
+                }.foregroundColor(.secondary)
+            }.menuStyle(.borderlessButton).fixedSize()
+            Spacer()
+            Button { store.newChat() } label: { Image(systemName: "square.and.pencil") }
+                .buttonStyle(.plain).help("New chat")
+        }.padding(.horizontal, 10).padding(.vertical, 5)
+    }
+}
+
 struct ChatModuleView: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var store: ChatStore
+    var showSwitcher = false
 
     var body: some View {
         VStack(spacing: 0) {
+            if showSwitcher { ChatSwitcher(store: store); Divider() }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
@@ -284,6 +415,33 @@ struct ChatItemView: View {
             if let q = item.question { QuestionCard(item: item, q: q, store: store) }
         case .error:
             Label(item.text, systemImage: "exclamationmark.triangle").foregroundColor(.red).font(.callout)
+        case .image:
+            GeneratedImage(item: item, ws: ws)
+        }
+    }
+}
+
+/// A picture the assistant drew: shown inline, kept in the project under .llm/images, a click opens it.
+struct GeneratedImage: View {
+    let item: ChatItem
+    @ObservedObject var ws: Workspace
+
+    private var url: URL? { item.imagePath.map { URL(fileURLWithPath: ws.root).appendingPathComponent($0) } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let u = url, let img = NSImage(contentsOf: u) {
+                Image(nsImage: img).resizable().scaledToFit()
+                    .frame(maxWidth: 420, maxHeight: 420, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.hairline))
+                    .onTapGesture { NSWorkspace.shared.open(u) }
+                    .help("Open the image")
+            } else {
+                Label("The image is no longer on disk", systemImage: "photo").foregroundColor(.secondary)
+            }
+            Text((item.imagePath ?? "") + (item.text.isEmpty ? "" : "  ·  " + item.text))
+                .font(.caption).foregroundColor(.secondary).lineLimit(2).textSelection(.enabled)
         }
     }
 }
@@ -455,9 +613,13 @@ struct SessionsModuleView: View {
                             Text(s.updated, style: .relative).font(.caption2).foregroundColor(.secondary)
                         }
                         Spacer()
+                        ChatRowMenu(store: store, id: s.id)
                     }
                     .tag(s.id)
-                    .contextMenu { Button("Delete") { store.delete(s.id) } }
+                    .contextMenu {
+                        Button("Rename…") { store.promptRename(s.id) }
+                        Button("Delete…") { store.confirmDelete(s.id) }
+                    }
                 }
             }.listStyle(.sidebar).scrollContentBackground(.hidden)
         }.background(Palette.panel)

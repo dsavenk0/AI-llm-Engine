@@ -104,9 +104,14 @@ final class ComposerNSTextView: NSTextView {
     var onSend: (() -> Void)?
     var onImage: ((NSImage) -> Void)?
     var onFiles: (([URL]) -> Void)?
+    var onCycleMode: (() -> Void)?
     var placeholder = ""
 
     override func keyDown(with e: NSEvent) {
+        if e.keyCode == 48, e.modifierFlags.intersection([.shift, .option, .control, .command]) == .shift {
+            onCycleMode?()                                    // Shift+Tab: the next mode
+            return
+        }
         let isReturn = e.keyCode == 36 || e.keyCode == 76
         if isReturn, !hasMarkedText() {                       // not while an input method is composing
             let mods = e.modifierFlags.intersection([.shift, .option, .control, .command])
@@ -149,6 +154,7 @@ struct ComposerTextView: NSViewRepresentable {
     var onSend: () -> Void
     var onImage: (NSImage) -> Void
     var onFiles: ([URL]) -> Void
+    var onCycleMode: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -189,6 +195,7 @@ struct ComposerTextView: NSViewRepresentable {
         tv.onSend = { [weak c] in c?.parent.onSend() }
         tv.onImage = { [weak c] in c?.parent.onImage($0) }
         tv.onFiles = { [weak c] in c?.parent.onFiles($0) }
+        tv.onCycleMode = { [weak c] in c?.parent.onCycleMode() }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -287,7 +294,8 @@ struct Composer: View {
         VStack(alignment: .leading, spacing: 8) {
             chips
             ComposerTextView(text: $draft, placeholder: "Just chat, or describe a task…   Enter — send · Shift+Enter — new line",
-                             onSend: send, onImage: { addImage($0) }, onFiles: { addFiles($0) })
+                             onSend: send, onImage: { addImage($0) }, onFiles: { addFiles($0) },
+                             onCycleMode: { store.mode = store.mode.next })
                 .frame(height: 74)
                 .padding(4)
                 .background(Palette.field, in: RoundedRectangle(cornerRadius: 10))
@@ -305,11 +313,14 @@ struct Composer: View {
                     Image(systemName: dictation.listening ? "mic.fill" : "mic")
                         .foregroundColor(dictation.listening ? .red : .secondary)
                 }.buttonStyle(.plain).help(dictation.listening ? "Stop dictation" : "Dictate (\(Dictation.localeID))")
-                Toggle("Think", isOn: $store.think).toggleStyle(.checkbox).help("Let the model reason before it answers")
-                Toggle("Auto", isOn: $store.autoEdit).toggleStyle(.checkbox)
-                    .help("Auto-apply edits: skip the approval for file edits (commands still ask)")
-                imagesToggle
+                Button { store.web.toggle() } label: {
+                    Image(systemName: "globe").foregroundColor(store.web ? Palette.accent : .secondary)
+                }.buttonStyle(.plain)
+                    .help(store.web ? "Web search is on: the assistant may search the internet and read pages (click to turn off)"
+                                    : "Let the assistant search the internet and read web pages")
                 Spacer()
+                contextButton
+                modeButton
                 if store.busy {
                     Button("Stop") { store.stop() }.buttonStyle(.bordered)
                 } else {
@@ -323,15 +334,45 @@ struct Composer: View {
         }.padding(10).background(Palette.panel)
     }
 
-    @ViewBuilder private var imagesToggle: some View {
-        if ws.engine?.vision_capable == true {
-            HStack(spacing: 4) {
-                Toggle("Images", isOn: Binding(get: { ws.engine?.vision == true }, set: { ws.setVision($0) }))
-                    .toggleStyle(.checkbox).disabled(ws.visionSwitching)
-                    .help("Image input for this model (switching restarts the model, ~10 s)")
-                if ws.visionSwitching { ProgressView().controlSize(.mini) }
+    // MARK: the modes control (replaces the Think / Auto / Images checkboxes)
+
+    @State private var showModes = false
+
+    /// A ring for how full the context window is; a click compacts the conversation.
+    @ViewBuilder private var contextButton: some View {
+        let used = store.contextTokens
+        if let f = ContextMeter.fraction(used: used, limit: ws.engine?.context) {
+            let color: Color = { switch ContextMeter.level(f) {
+                case .ok: return Palette.accent
+                case .warn: return Palette.yellow
+                case .full: return Palette.magenta } }()
+            Button { store.compact() } label: {
+                ZStack {
+                    Circle().stroke(Color.primary.opacity(0.18), lineWidth: 2.5)
+                    Circle().trim(from: 0, to: max(0.02, f)).stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    if store.compacting { ProgressView().controlSize(.mini).scaleEffect(0.6) }
+                }.frame(width: 17, height: 17)
             }
+            .buttonStyle(.plain).disabled(store.busy || store.compacting)
+            .help("Context ≈ \(ContextMeter.short(used)) of \(ContextMeter.short(ws.engine?.context ?? 0)) tokens "
+                  + "(\(Int((f * 100).rounded())) %). Click to compact the earlier conversation into a short note.")
         }
+    }
+
+    private var modeButton: some View {
+        Button { showModes.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: store.mode.symbol)
+                Text(store.mode.short)
+            }
+            .font(.callout).padding(.horizontal, 9).padding(.vertical, 4)
+            .background(Palette.field, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.hairline))
+        }
+        .buttonStyle(.plain)
+        .help("Mode and reasoning effort (Shift+Tab switches the mode)")
+        .popover(isPresented: $showModes, arrowEdge: .top) { ModesPanel(ws: ws, store: store, shown: $showModes) }
     }
 
     private var chips: some View {
@@ -377,5 +418,102 @@ struct Composer: View {
         p.prompt = "Attach"
         if images { p.allowedContentTypes = [.png, .jpeg, .gif, .webP, .heic, .tiff, .bmp] }
         if p.runModal() == .OK { addFiles(p.urls) }
+    }
+}
+
+// MARK: - the Modes popover
+
+private struct KeyCap: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.system(size: 11, weight: .medium, design: .rounded))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Palette.field, in: RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Palette.hairline))
+    }
+}
+
+struct ModesPanel: View {
+    @ObservedObject var ws: Workspace
+    @ObservedObject var store: ChatStore
+    @Binding var shown: Bool
+
+    private var positions: [String] {
+        let levels = ws.remoteURL == nil ? (ws.engine?.efforts ?? []) : []
+        let thinking = ws.engine?.thinking_supported ?? true
+        return EffortScale.positions(levels: levels, supportsThinking: thinking)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Modes").foregroundColor(.secondary)
+                Spacer()
+                KeyCap(text: "⇧"); Text("+").foregroundColor(.secondary); KeyCap(text: "tab")
+                Text("to switch").foregroundColor(.secondary)
+            }.font(.callout).padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 4)
+
+            ForEach(AgentMode.allCases) { m in
+                Button { store.mode = m; shown = false } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: m.symbol).frame(width: 22).padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(m.title)
+                            Text(m.detail).font(.caption).foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 4)
+                        if m == store.mode { Image(systemName: "checkmark").foregroundColor(.primary) }
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7).contentShape(Rectangle())
+                    .background(m == store.mode ? Color.primary.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain)
+            }
+
+            if !positions.isEmpty {
+                Divider().padding(.vertical, 4)
+                effortRow
+            }
+            if ws.engine?.vision_capable == true {
+                Divider().padding(.vertical, 4)
+                HStack {
+                    Image(systemName: "photo").frame(width: 22)
+                    Text("Images")
+                    Spacer()
+                    if ws.visionSwitching { ProgressView().controlSize(.mini) }
+                    Toggle("", isOn: Binding(get: { ws.engine?.vision == true }, set: { ws.setVision($0) }))
+                        .toggleStyle(.switch).labelsHidden().controlSize(.small).disabled(ws.visionSwitching)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .help("Image input for this model (switching restarts the model, ~10 s)")
+            }
+        }
+        .padding(8).frame(width: 340)
+    }
+
+    private var effortRow: some View {
+        let pos = positions
+        let current = EffortScale.position(think: store.think, effort: store.effort, among: pos)
+        return HStack(spacing: 10) {
+            Image(systemName: "brain").frame(width: 22)
+            Text("Effort")
+            Text("(\(current.prefix(1).uppercased() + current.dropFirst()))").foregroundColor(.secondary)
+            Spacer()
+            HStack(spacing: 14) {
+                ForEach(pos, id: \.self) { p in
+                    Button {
+                        let s = EffortScale.setting(for: p)
+                        store.think = s.think; store.effort = s.effort
+                    } label: {
+                        Circle().fill(p == current ? Color.primary.opacity(0.85) : Color.primary.opacity(0.25))
+                            .frame(width: p == current ? 14 : 7, height: p == current ? 14 : 7)
+                            .frame(width: 16, height: 16)
+                    }.buttonStyle(.plain).help(p == "off" ? "No reasoning" : "Reasoning: \(p)")
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Palette.field, in: Capsule())
+        }
+        .padding(.horizontal, 10).padding(.vertical, 4)
     }
 }

@@ -49,6 +49,55 @@ eq(edits.summary(), "Made 2 edits", "edits only")
 var q = ActivityCounts(); q.add(category: "question"); q.add(category: "weird")
 eq(q.summary(), "", "a question alone is not activity text")
 
+var web = ActivityCounts(); web.add(category: "web"); web.add(category: "web"); web.add(category: "read")
+eq(web.summary(), "Explored 1 file, made 2 web requests", "web requests are counted apart from files")
+
+let img = AgentEvent.parse(line: #"data: {"type":"image","path":".llm/images/a.png","prompt":"a fox"}"#)
+check(img == .image(path: ".llm/images/a.png", prompt: "a fox"), "image event")
+check(AgentEvent.parse(line: #"data: {"type":"image"}"#) == nil, "image event without a path")
+var pics = ActivityCounts(); pics.add(category: "image")
+eq(pics.summary(), "Generated 1 image", "images are counted")
+
+// ── snippets and themes from extensions
+let e1 = SnippetExpander.expand(["for ${1:item} in ${2:items}:", "    $0"])
+eq(e1.text, "for item in items:\n    ", "snippet placeholders become their defaults")
+eq(e1.caret, 4, "the caret goes to the first tab stop")
+let e2 = SnippetExpander.expand(["print($1)", "$0"], indent: "    ")
+eq(e2.text, "print()\n    ", "later lines get the indent")
+eq(e2.caret, 6, "tab stop $1 sits inside the parentheses")
+let e3 = SnippetExpander.expand(["${1|let,var|} x = \\$5 $TM_FILENAME ${UNKNOWN:fallback}"])
+eq(e3.text, "let x = $5  fallback", "choices, escapes, variables")
+eq(SnippetExpander.expand(["done"]).caret, 4, "no tab stop: the end")
+eq(SnippetExpander.expand(["a ${1:b ${2:c}} d"]).text, "a b c d", "nested placeholders")
+let sn = [Snippet(prefix: "pr", body: ["print($1)"], description: ""), Snippet(prefix: "prop", body: ["x"], description: "")]
+eq(SnippetMatch.find(in: "    prop", among: sn)?.prefix ?? "", "prop", "the longest matching prefix")
+eq(SnippetMatch.find(in: "    pr", among: sn)?.prefix ?? "", "pr", "a whole word at the end of the line")
+check(SnippetMatch.find(in: "expr", among: sn) == nil, "the middle of a word does not trigger a snippet")
+check(ThemeOverride.rgb("#ff8000")! == (1.0, 128.0 / 255, 0.0), "hex colour")
+check(ThemeOverride.rgb("red") == nil && ThemeOverride.rgb("#fff") == nil, "only #rrggbb")
+
+// ── modes and effort
+eq(AgentMode.manual.next, .edit, "shift+tab goes to the next mode")
+eq(AgentMode.auto.next, .manual, "…and wraps around")
+check(AgentMode.edit.autoEdit && AgentMode.auto.autoEdit && !AgentMode.manual.autoEdit && !AgentMode.plan.autoEdit, "who applies edits unasked")
+eq(EffortScale.positions(levels: [], supportsThinking: true), ["off", "on"], "no named levels: off / on")
+eq(EffortScale.positions(levels: ["low", "medium", "high"], supportsThinking: true), ["off", "low", "medium", "high"], "named levels")
+eq(EffortScale.positions(levels: ["low"], supportsThinking: false), [], "a model that does not reason has no control")
+check(EffortScale.setting(for: "off") == (false, nil), "off")
+check(EffortScale.setting(for: "high") == (true, "high"), "a level")
+eq(EffortScale.position(think: true, effort: nil, among: ["off", "low", "medium"]), "low", "reasoning on without a level shows the first level")
+eq(EffortScale.position(think: false, effort: "low", among: ["off", "low"]), "off", "thinking off wins")
+
+// ── context meter
+eq(ContextMeter.tokens(of: "abcdefg"), 2, "latin text: ~3.5 characters per token")
+eq(ContextMeter.tokens(of: "привет"), 4, "cyrillic costs more tokens per character")
+check(ContextMeter.fraction(used: 500, limit: 1000) == 0.5, "fraction")
+check(ContextMeter.fraction(used: 5000, limit: 1000) == 1.0, "clamped at full")
+check(ContextMeter.fraction(used: 5, limit: nil) == nil && ContextMeter.fraction(used: 5, limit: 0) == nil, "unknown limit")
+check(ContextMeter.level(0.3) == .ok && ContextMeter.level(0.7) == .warn && ContextMeter.level(0.9) == .full, "levels")
+eq(ContextMeter.short(12345), "12.3k", "short count")
+eq(ContextMeter.short(840), "840", "small count")
+
 // ── markdown blocks
 let md = """
 Here is the fix for `src/app.py`:

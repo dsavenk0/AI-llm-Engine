@@ -8,14 +8,15 @@ enum LayoutMode: String { case chat, ide }
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
-    case files, outline, git, chat, problems, terminal, github, preview
+    case files, outline, git, chat, problems, terminal, github, preview, extensions
     var id: String { rawValue }
     /// Modules that start switched off: they bring a web view / network, so they are opt-in.
-    static let offByDefault: Set<ModuleID> = [.preview]
+    static let offByDefault: Set<ModuleID> = [.preview, .extensions]
     var title: String {
         switch self {
         case .github: return "GitHub"
         case .preview: return "Preview (browser)"
+        case .extensions: return "Extensions (Open VSX)"
         case .files: return "Files"
         case .outline: return "Outline"
         case .git: return "Changes (git)"
@@ -91,6 +92,10 @@ final class Workspace: ObservableObject {
     @Published var inline: [InlineFile] = []         // files from elsewhere: their text travels with the message
     @Published var pictures: [Picture] = []
     @Published var visionSwitching = false
+    @Published var engineBusy: String?                // "Starting the model…" while the llm command works
+    @Published var installed: [InstalledModel] = []   // models on this Mac the engine can run
+    @Published var snippets: [String: [Snippet]] = [:]  // language → snippets from installed extensions
+    private var snippetsAsked: Set<String> = []
     @Published var remoteURL: String?                 // set while the assistant talks to another server
     @Published var needsProject = false               // a window with no folder yet: the welcome screen
     var onChooseProject: (() -> Void)?                // the window controller asks for a folder (non-blocking)
@@ -438,6 +443,138 @@ final class Workspace: ObservableObject {
             await self.loadDir("")
             for d in self.expanded where !d.isEmpty { await self.loadDir(d) }
             await self.loadAllFiles()
+        }
+    }
+
+    // MARK: extensions (Open VSX): themes and snippets
+
+    /// Snippets for a language, asked once per language while the module is on.
+    func loadSnippets(for language: String) {
+        guard ModuleSettings.shared.isOn(.extensions), !language.isEmpty, !snippetsAsked.contains(language) else { return }
+        snippetsAsked.insert(language)
+        Task {
+            if let r: SnippetsResponse = try? await backend.get("/api/extensions/snippets?language=\(backend.encoded(language))") {
+                snippets[language] = r.snippets
+            }
+        }
+    }
+
+    /// Forget what was loaded (after an install or removal) so the next file asks again.
+    func resetSnippets() { snippets = [:]; snippetsAsked = [] }
+
+    func applyExtensionTheme(id: String, label: String) {
+        guarded("Theme") {
+            let t: ThemeOverride = try await self.backend.get(
+                "/api/extensions/theme?id=\(self.backend.encoded(id))&label=\(self.backend.encoded(label))")
+            ThemeSettings.shared.mode = t.dark ? .dark : .light
+            ThemeSettings.shared.custom = t
+            self.say("Theme: \(t.label)")
+        }
+    }
+
+    // MARK: discarding uncommitted work
+
+    /// Puts files back to the last commit (new files are deleted). `paths == nil` discards everything.
+    /// Always asks first: git cannot bring this back.
+    func discardChanges(_ paths: [String]?) {
+        let changed = git?.files ?? []
+        let list = paths ?? changed.map(\.path)
+        guard !list.isEmpty else { return }
+        let fresh = changed.filter { list.contains($0.path) && $0.status == "untracked" }.count
+        let unsaved = open.filter { $0.dirty && list.contains($0.path) }.count
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = paths == nil ? "Discard all \(list.count) changes?"
+                                     : "Discard changes in \(Paths.displayName(list[0]))?"
+        var info = "Modified files go back to the last commit. This cannot be undone."
+        if fresh > 0 { info += " \(fresh) new file(s) will be deleted." }
+        if unsaved > 0 { info += " Unsaved edits to these files in the editor are lost too." }
+        a.informativeText = info
+        a.addButton(withTitle: "Discard"); a.addButton(withTitle: "Cancel")
+        a.buttons.first?.hasDestructiveAction = true
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        guarded("Discard") {
+            struct Result: Decodable { let git: GitStatus; let discarded: [String] }
+            var body: [String: Any] = ["confirm": true]
+            if let p = paths { body["paths"] = p } else { body["all"] = true }
+            let r: Result = try await self.backend.request("POST", "/api/git/discard", body: body)
+            self.git = r.git
+            for f in self.open where r.discarded.contains(f.path) {
+                if let fr: FileResponse = try? await self.backend.get("/api/file?path=\(self.backend.encoded(f.path))"),
+                   let t = fr.text {
+                    f.text = t; f.saved = t; f.mtime = fr.mtime ?? f.mtime; f.version += 1
+                    await self.analyze(f)
+                } else { self.open.removeAll { $0.path == f.path } }          // a new file: gone
+            }
+            if let a = self.activePath, !self.open.contains(where: { $0.path == a }) { self.activePath = self.open.last?.path }
+            self.tree = [:]
+            await self.loadDir("")
+            for d in self.expanded where !d.isEmpty { await self.loadDir(d) }
+            await self.loadAllFiles()
+            self.say("Discarded \(r.discarded.count) change(s)")
+        }
+    }
+
+    // MARK: starting and stopping the model (the same `llm` command the menu bar app and the terminal use)
+
+    struct InstalledModel: Decodable, Identifiable, Hashable {
+        let name: String
+        let size: Double?
+        let supported: Bool?
+        var id: String { name }
+    }
+
+    /// Runs `llm <args>` and returns (success, standard output). Never blocks the main thread.
+    private func runCLI(_ args: [String]) async -> (Bool, Data) {
+        await Task.detached { [llmRoot] () -> (Bool, Data) in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: llmRoot + "/llm")
+            p.arguments = args
+            p.currentDirectoryURL = URL(fileURLWithPath: llmRoot)
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = FileHandle.nullDevice
+            p.standardInput = FileHandle.nullDevice
+            do { try p.run() } catch { return (false, Data()) }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (p.terminationStatus == 0, data)
+        }.value
+    }
+
+    func loadInstalled() async {
+        let (ok, data) = await runCLI(["models", "--json"])
+        guard ok, let text = String(data: data, encoding: .utf8),
+              let line = text.split(separator: "\n").last(where: { $0.hasPrefix("[") }),
+              let list = try? JSONDecoder().decode([InstalledModel].self, from: Data(line.utf8)) else { return }
+        installed = list.filter { $0.supported != false }
+    }
+
+    /// Starts the model — `name` selects another installed one first (which also restarts a running engine).
+    func startModel(_ name: String? = nil) {
+        guard engineBusy == nil, remoteURL == nil else { return }
+        engineBusy = name.map { "Loading \($0)…" } ?? "Starting the model…"
+        Task {
+            var ok = true
+            if let n = name {
+                ok = await runCLI(["use", n]).0
+                if ok, engine != nil { _ = await runCLI(["stop"]) }
+            }
+            if ok { ok = await runCLI(["start"]).0 }          // returns when the model answers (or fails)
+            if let info: InfoResponse = try? await backend.get("/api/info") { engine = info.engine }
+            engineBusy = nil
+            say(ok ? "The model is running" : "The model did not start — see ./llm logs", bad: !ok)
+        }
+    }
+
+    func stopModel() {
+        guard engineBusy == nil else { return }
+        engineBusy = "Stopping…"
+        Task {
+            _ = await runCLI(["stop"])
+            engine = nil
+            engineBusy = nil
+            say("The model is stopped")
         }
     }
 

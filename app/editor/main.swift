@@ -4,7 +4,10 @@ import AppKit
 import SwiftUI
 
 /// What LLMBar posts to a running editor to get one more window.
-let newWindowNotification = Notification.Name("local.llm-engine.editor.new-window")
+/// LLMBar posts this to open another window. A test may give its own name (LLM_EDITOR_NEW_WINDOW_NAME) so its
+/// request never reaches an editor a person is using.
+let newWindowNotification = Notification.Name(
+    ProcessInfo.processInfo.environment["LLM_EDITOR_NEW_WINDOW_NAME"] ?? "local.llm-engine.editor.new-window")
 
 @MainActor
 final class EditorWindowController: NSObject, NSWindowDelegate {
@@ -182,7 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return a[i + 1]
     }
 
-    /// `--snapshot out.png [--layout ide|chat] [--open-file rel] [--theme light|dark] [--bottom tab]`: renders the
+    /// `--snapshot out.png [--layout ide|chat] [--open-file rel] [--theme light|dark] [--bottom tab] [--size WxH] [--resize WxH]`: renders the
     /// window's own view hierarchy to a PNG (no screen-recording permission needed) and quits. For checking the
     /// look of a build without a person at the screen.
     private func scheduleSnapshot(to path: String) {
@@ -190,11 +193,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Task { @MainActor in
             guard let c = self.controllers.last else { exit(2) }
             for _ in 0..<150 where c.ws.starting { try? await Task.sleep(nanoseconds: 100_000_000) }
+            if let z = self.value(after: "--size") {                        // WxH of the content, in points
+                let p = z.split(separator: "x").compactMap { Double($0) }
+                if p.count == 2 { c.window.setContentSize(NSSize(width: p[0], height: p[1])) }
+            }
             if let l = self.value(after: "--layout") { c.ws.mode = l == "ide" ? .ide : .chat }
             if let f = self.value(after: "--open-file") { c.ws.openFile(f) }
             if let b = self.value(after: "--bottom") { c.ws.showPanel(b) }
             if CommandLine.arguments.contains("--all-modules") { ModuleID.allCases.forEach { if !ModuleSettings.shared.isOn($0) { ModuleSettings.shared.toggle($0) } } }
             try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if let z = self.value(after: "--resize") {                      // widen/narrow after the file is shown
+                let p = z.split(separator: "x").compactMap { Double($0) }
+                if p.count == 2 { c.window.setContentSize(NSSize(width: p[0], height: p[1])) }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            if CommandLine.arguments.contains("--modes-panel") {           // the Modes popover on its own
+                let store = ChatStore(ws: c.ws)
+                let host = NSHostingView(rootView: ModesPanel(ws: c.ws, store: store, shown: .constant(true))
+                    .background(Palette.panel).environment(\.colorScheme, ThemeSettings.shared.isDark ? .dark : .light))
+                host.frame = NSRect(origin: .zero, size: host.fittingSize)
+                c.window.contentView = host
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
             guard let view = c.window.contentView,
                   let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(3) }
             if ProcessInfo.processInfo.environment["LLM_EDITOR_DEBUG_VIEWS"] != nil {
@@ -205,12 +225,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                         if let tv = v as? NSTextView {
                             let attrs = tv.textStorage?.attributes(at: 40, effectiveRange: nil) ?? [:]
                             print("  attrs:", attrs[.foregroundColor] as Any, "typing:", tv.typingAttributes[.foregroundColor] as Any,
-                                  "textColor:", tv.textColor as Any, "layer:", tv.layer?.opacity as Any, "appearance:", tv.effectiveAppearance.name.rawValue)
+                                  "textColor:", tv.textColor as Any, "textkit2:", tv.textLayoutManager != nil, "layer:", tv.layer?.opacity as Any, "appearance:", tv.effectiveAppearance.name.rawValue)
                         }
                     }
                     v.subviews.forEach { walk($0, me) }
                 }
                 walk(view, [])
+            }
+            if ProcessInfo.processInfo.environment["LLM_EDITOR_DEBUG_FRAMES"] != nil {
+                func dump(_ v: NSView, _ depth: Int) {
+                    let r = v.convert(v.bounds, to: nil)
+                    let name = "\(type(of: v))"
+                    if let ruler = v as? NSRulerView {
+                        print("  RULER frame=\(ruler.frame) bounds=\(ruler.bounds) thickness=\(ruler.ruleThickness) "
+                              + "required=\(ruler.requiredThickness)")
+                    }
+                    if let clip = v as? NSClipView, clip.documentView is NSTextView {
+                        print("  CLIP bounds=\(clip.bounds) frame=\(clip.frame) doc=\(clip.documentView!.frame)")
+                    }
+                    if depth <= 30, r.width > 60, !name.hasPrefix("_NSInspectorBar") {
+                        print(String(repeating: " ", count: min(depth, 24)), name.prefix(70),
+                              "x=\(Int(r.minX))..\(Int(r.maxX)) y=\(Int(r.minY))..\(Int(r.maxY)) clip=\(v.clipsToBounds)")
+                    }
+                    v.subviews.forEach { dump($0, depth + 1) }
+                }
+                dump(view, 0)
+            }
+            // what the compositor really shows (layer tiles included), for the window's own pixels only —
+            // cacheDisplay below redraws everything and so hides stale-layer defects
+            if let out = ProcessInfo.processInfo.environment["LLM_EDITOR_WINDOW_CAPTURE"],
+               let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") {
+                typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+                c.window.orderFrontRegardless()
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                let f = unsafeBitCast(sym, to: Capture.self)
+                if let img = f(CGRect.null, 8, UInt32(c.window.windowNumber), 1)?.takeRetainedValue(),
+                   let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: out))
+                    print("WINDOW-CAPTURE \(out) \(img.width)x\(img.height)")
+                } else { print("WINDOW-CAPTURE failed") }
             }
             view.cacheDisplay(in: view.bounds, to: rep)
             guard let png = rep.representation(using: .png, properties: [:]) else { exit(4) }

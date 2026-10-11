@@ -12,6 +12,7 @@ enum AgentEvent: Equatable {
     case approval(id: String, kind: String, path: String?, old: String?, new: String?, command: String?, dangerous: String?)
     case question(id: String, question: String, options: [String])
     case toolResult(id: String, name: String, ok: Bool, summary: String)
+    case image(path: String, prompt: String)          // a picture the assistant generated, saved in the project
     case done
     case error(String)
 
@@ -41,6 +42,7 @@ enum AgentEvent: Equatable {
         case "tool_result":
             return .toolResult(id: s("id") ?? "", name: s("name") ?? "", ok: obj["ok"] as? Bool ?? true,
                                summary: s("summary") ?? "")
+        case "image": return s("path").map { .image(path: $0, prompt: s("prompt") ?? "") }
         case "done": return .done
         case "error": return .error(s("message") ?? "error")
         default: return nil
@@ -51,7 +53,7 @@ enum AgentEvent: Equatable {
 // MARK: - "Explored 3 searches, read 2 files, ran 1 command"
 
 struct ActivityCounts: Equatable, Codable {
-    var searches = 0, explores = 0, reads = 0, edits = 0, commands = 0, questions = 0
+    var searches = 0, explores = 0, reads = 0, edits = 0, commands = 0, questions = 0, webs = 0, images = 0
 
     mutating func add(category: String) {
         switch category {
@@ -61,6 +63,8 @@ struct ActivityCounts: Equatable, Codable {
         case "edit": edits += 1
         case "command": commands += 1
         case "question": questions += 1
+        case "web": webs += 1
+        case "image": images += 1
         default: break
         }
     }
@@ -74,6 +78,8 @@ struct ActivityCounts: Equatable, Codable {
             .compactMap { $0 }
         var parts: [String] = []
         if !looked.isEmpty { parts.append("Explored " + looked.joined(separator: ", ")) }
+        if let w = n(webs, "web request", "web requests") { parts.append("made " + w) }
+        if let i = n(images, "image", "images") { parts.append("generated " + i) }
         if let e = n(edits, "edit", "edits") { parts.append("made " + e) }
         if let c = n(commands, "command", "commands") { parts.append("ran " + c) }
         if parts.isEmpty { return "" }
@@ -517,5 +523,193 @@ struct UTF8Stream {
         let head = pending.prefix(end)
         pending = Data(pending.suffix(from: pending.startIndex + end))
         return String(decoding: head, as: UTF8.self)
+    }
+}
+
+// MARK: - extensions from Open VSX: a colour theme and snippets (declarative parts only)
+
+/// A VS Code theme converted by the backend: background/foreground and a colour per token kind.
+struct ThemeOverride: Codable, Equatable {
+    var label: String
+    var id: String
+    var dark: Bool
+    var background: String
+    var foreground: String
+    var kinds: [String: String]
+
+    /// "#rrggbb" → 0…1 components; nil for anything else.
+    static func rgb(_ hex: String) -> (Double, Double, Double)? {
+        guard hex.count == 7, hex.hasPrefix("#"), let v = Int(hex.dropFirst(), radix: 16) else { return nil }
+        return (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
+    }
+}
+
+struct Snippet: Codable, Equatable, Hashable {
+    let prefix: String
+    let body: [String]
+    let description: String
+}
+
+enum SnippetExpander {
+    /// A VS Code snippet body → plain text plus the caret position (UTF-16 offset into the text): at the first
+    /// tab stop ($1, ${1:default}), else at $0, else at the end. Variables ($TM_FILENAME…) expand to nothing —
+    /// or to their default. `indent` is put in front of every line after the first.
+    static func expand(_ body: [String], indent: String = "") -> (text: String, caret: Int) {
+        let src = Array(body.joined(separator: "\n" + indent))
+        var out = "", stops: [Int: Int] = [:], i = 0
+        parse(src, &i, nil, &out, &stops, 0)
+        let first = stops.keys.filter { $0 > 0 }.min()
+        return (out, first.flatMap { stops[$0] } ?? stops[0] ?? out.utf16.count)
+    }
+
+    private static func parse(_ s: [Character], _ i: inout Int, _ close: Character?, _ out: inout String,
+                              _ stops: inout [Int: Int], _ depth: Int) {
+        func stop(_ n: Int) { if stops[n] == nil { stops[n] = out.utf16.count } }
+        while i < s.count {
+            let c = s[i]
+            if let close, c == close { return }
+            if c == "\\", i + 1 < s.count, "$}\\".contains(s[i + 1]) { out.append(s[i + 1]); i += 2; continue }
+            guard c == "$", i + 1 < s.count else { out.append(c); i += 1; continue }
+            let n = s[i + 1]
+            if n.isASCII, n.isNumber {                                  // $1
+                var j = i + 1, num = ""
+                while j < s.count, s[j].isASCII, s[j].isNumber { num.append(s[j]); j += 1 }
+                if let k = Int(num) { stop(k) }
+                i = j
+            } else if n == "{" {
+                var j = i + 2, name = ""
+                while j < s.count, s[j].isLetter || s[j].isNumber || s[j] == "_" { name.append(s[j]); j += 1 }
+                if j < s.count, s[j] == "}" {                           // ${1} / ${VAR}
+                    if let k = Int(name) { stop(k) }
+                    i = j + 1
+                } else if j < s.count, s[j] == ":" {                    // ${1:default}
+                    if let k = Int(name) { stop(k) }
+                    var k = j + 1
+                    if depth < 8 { parse(s, &k, "}", &out, &stops, depth + 1) }
+                    i = k < s.count ? k + 1 : k
+                } else if j < s.count, s[j] == "|" {                    // ${1|one,two|}: the first choice
+                    if let k = Int(name) { stop(k) }
+                    j += 1
+                    var first = "", seenComma = false
+                    while j < s.count, s[j] != "|" {
+                        if s[j] == "," { seenComma = true } else if !seenComma { first.append(s[j]) }
+                        j += 1
+                    }
+                    out += first
+                    while j < s.count, s[j] != "}" { j += 1 }
+                    i = min(j + 1, s.count)
+                } else { out.append(c); i += 1 }
+            } else if n.isLetter || n == "_" {                          // $TM_FILENAME …
+                var j = i + 1
+                while j < s.count, s[j].isLetter || s[j].isNumber || s[j] == "_" { j += 1 }
+                i = j
+            } else { out.append(c); i += 1 }
+        }
+    }
+}
+
+enum SnippetMatch {
+    private static func isWord(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+
+    /// The snippet (the longest prefix wins) that ends `lineBeforeCaret` as a whole word.
+    static func find(in lineBeforeCaret: String, among snippets: [Snippet]) -> Snippet? {
+        let chars = Array(lineBeforeCaret)
+        var best: Snippet?
+        for s in snippets where !s.prefix.isEmpty && lineBeforeCaret.hasSuffix(s.prefix) {
+            let start = chars.count - s.prefix.count
+            if start > 0, isWord(chars[start - 1]), let f = s.prefix.first, isWord(f) { continue }
+            if best == nil || s.prefix.count > best!.prefix.count { best = s }
+        }
+        return best
+    }
+}
+
+// MARK: - how much the assistant may do on its own, and how hard it thinks
+
+enum AgentMode: String, CaseIterable, Codable, Identifiable {
+    case manual, edit, plan, auto
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .manual: return "Manual"
+        case .edit: return "Edit automatically"
+        case .plan: return "Plan"
+        case .auto: return "Auto"
+        }
+    }
+    var short: String { self == .edit ? "Edit" : title }
+    var detail: String {
+        switch self {
+        case .manual: return "Asks for approval before every edit and command."
+        case .edit: return "Applies file edits right away; commands still ask."
+        case .plan: return "Explores the project and presents a plan; changes nothing until you switch mode."
+        case .auto: return "Runs edits and commands that pass a safety check; pauses for anything risky."
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .manual: return "hand.raised"
+        case .edit: return "chevron.left.forwardslash.chevron.right"
+        case .plan: return "list.bullet.clipboard"
+        case .auto: return "bolt"
+        }
+    }
+    /// Shift+Tab
+    var next: AgentMode {
+        let all = AgentMode.allCases
+        return all[(all.firstIndex(of: self)! + 1) % all.count]
+    }
+    /// File edits are applied without asking.
+    var autoEdit: Bool { self == .edit || self == .auto }
+}
+
+/// The Effort control: "off", then the model's levels (or a single "on" when it names none).
+enum EffortScale {
+    static func positions(levels: [String], supportsThinking: Bool) -> [String] {
+        guard supportsThinking else { return [] }
+        return ["off"] + (levels.isEmpty ? ["on"] : levels)
+    }
+
+    static func setting(for position: String) -> (think: Bool, effort: String?) {
+        switch position {
+        case "off": return (false, nil)
+        case "on": return (true, nil)
+        default: return (true, position)
+        }
+    }
+
+    static func position(think: Bool, effort: String?, among positions: [String]) -> String {
+        guard think else { return "off" }
+        if let e = effort, positions.contains(e) { return e }
+        return positions.contains("on") ? "on" : (positions.dropFirst().first ?? "on")
+    }
+}
+
+// MARK: - how full the context window is
+
+enum ContextMeter {
+    /// The system prompt and the tool definitions every request carries.
+    static let overhead = 1800
+
+    /// A rough token count without a tokenizer: ~3.5 characters per token for Latin text and code, ~1.6 for
+    /// Cyrillic, CJK and the like.
+    static func tokens(of text: String) -> Int {
+        var ascii = 0, other = 0
+        for u in text.unicodeScalars { if u.isASCII { ascii += 1 } else { other += 1 } }
+        return Int((Double(ascii) / 3.5 + Double(other) / 1.6).rounded(.up))
+    }
+
+    static func fraction(used: Int, limit: Int?) -> Double? {
+        guard let l = limit, l > 0 else { return nil }
+        return min(1.0, Double(used) / Double(l))
+    }
+
+    enum Level { case ok, warn, full }
+    static func level(_ f: Double) -> Level { f >= 0.85 ? .full : (f >= 0.6 ? .warn : .ok) }
+
+    /// "12.3k" / "840"
+    static func short(_ n: Int) -> String {
+        n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
     }
 }

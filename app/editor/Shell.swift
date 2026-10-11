@@ -108,6 +108,7 @@ private struct Toolbar: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var modules: ModuleSettings
     @State private var showRemote = false
+    @State private var showExtensions = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -121,6 +122,24 @@ private struct Toolbar: View {
             }.pickerStyle(.segmented).frame(width: 150).labelsHidden()
             Spacer()
             Menu {
+                if ws.remoteURL == nil {
+                    if ws.engine == nil {
+                        Button("Start the model") { ws.startModel() }.disabled(ws.engineBusy != nil)
+                    } else {
+                        Button("Stop the model") { ws.stopModel() }.disabled(ws.engineBusy != nil)
+                    }
+                    Menu("Choose a model") {
+                        if ws.installed.isEmpty { Text("No models found") }
+                        ForEach(ws.installed) { m in
+                            Button { ws.startModel(m.name) } label: {
+                                let size = m.size.map { String(format: "  ·  %.1f GB", $0) } ?? ""
+                                if m.name == ws.engine?.model { Label(m.name + size, systemImage: "checkmark") }
+                                else { Text(m.name + size) }
+                            }
+                        }
+                    }.disabled(ws.engineBusy != nil)
+                    Divider()
+                }
                 Button("This Mac's engine") { ws.useLocalEngine() }.disabled(ws.remoteURL == nil)
                 Button("Another server (OpenRouter, other computer)…") { showRemote = true }
                 if let u = ws.remoteURL { Divider(); Text("Now: \(u)") }
@@ -129,11 +148,15 @@ private struct Toolbar: View {
                     Circle().fill(ws.engine == nil ? Palette.magenta : Palette.phosphor).frame(width: 8, height: 8)
                         .shadow(color: (ws.engine == nil ? Palette.magenta : Palette.phosphor).opacity(0.7), radius: 3)
                     if ws.remoteURL != nil { Image(systemName: "cloud").font(.caption) }
-                    Text(ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") } ?? "model not running")
+                    if ws.engineBusy != nil { ProgressView().controlSize(.mini) }
+                    Text(ws.engineBusy ?? ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") }
+                         ?? "model not running")
                         .font(.callout).lineLimit(1)
                 }.foregroundColor(.secondary)
             }.menuStyle(.borderlessButton).fixedSize().help("Where the assistant's model runs")
             .sheet(isPresented: $showRemote) { RemoteSheet(ws: ws, shown: $showRemote) }
+            .sheet(isPresented: $showExtensions) { ExtensionsSheet(ws: ws, shown: $showExtensions) }
+            .onAppear { Task { await ws.loadInstalled() } }
             Button { ws.bottomVisible.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }
                 .buttonStyle(.plain).help("Problems and terminal (⌘J)")
             Menu {
@@ -142,6 +165,10 @@ private struct Toolbar: View {
                         modules.toggle(m)
                         if m == .preview, modules.isOn(.preview) { ws.showPanel("preview") }      // switching it on shows it
                     })).disabled(m == .files)
+                }
+                if modules.isOn(.extensions) {
+                    Divider()
+                    Button("Extensions (Open VSX)…") { showExtensions = true }
                 }
             } label: { Image(systemName: "square.grid.2x2") }.menuStyle(.borderlessButton).fixedSize().help("Modules")
             Menu {
@@ -392,12 +419,12 @@ private struct IDELayout: View {
             }.frame(minWidth: 190, idealWidth: 250, maxWidth: 400)
             EditorArea(ws: ws).frame(minWidth: 380)
             if modules.isOn(.outline) || modules.isOn(.chat) {
-                VStack(spacing: 0) {
+                // a split, so the outline's height is the person's to drag (it was a fixed stack that grew greedily)
+                VSplitView {
                     if modules.isOn(.outline) {
-                        OutlineModuleView(ws: ws).frame(minHeight: 120, idealHeight: 220)
-                        Divider()
+                        OutlineModuleView(ws: ws).frame(minHeight: 70, idealHeight: 150).clipped()
                     }
-                    if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat) }
+                    if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat, showSwitcher: true).frame(minHeight: 160).clipped() }
                 }.frame(minWidth: 280, idealWidth: 360)
             }
         }
@@ -444,9 +471,11 @@ private struct EditorSurface: View {
     @ObservedObject var file: OpenFile
     var body: some View {
         CodeEditor(file: file,
+                   snippets: ws.snippets[file.language] ?? [],
                    onEdit: { f in Task { await ws.analyze(f) } },
                    onCursor: { l, c in ws.cursor = (l, c) })
             .id(file.path)
+            .onAppear { ws.loadSnippets(for: file.language) }
     }
 }
 

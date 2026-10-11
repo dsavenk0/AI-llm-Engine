@@ -161,7 +161,7 @@ private struct OutlineList: View {
                         Text("\(sym.line)").font(.caption).foregroundColor(.secondary)
                     }.padding(.leading, CGFloat(depth) * 12)
                 }.buttonStyle(.plain)
-            }.listStyle(.plain)
+            }.listStyle(.plain).clipped()
         }
     }
 }
@@ -306,7 +306,12 @@ struct GitModuleView: View {
                     if let a = g.ahead, a > 0 { Text("↑\(a)").foregroundColor(.secondary) }
                     if let b = g.behind, b > 0 { Text("↓\(b)").foregroundColor(.secondary) }
                     Spacer()
-                    Button { Task { await ws.refreshGit() } } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain)
+                    if !(g.files ?? []).isEmpty {
+                        Button { ws.discardChanges(nil) } label: { Image(systemName: "arrow.uturn.backward") }
+                            .buttonStyle(.plain).help("Discard all changes…")
+                    }
+                    Button { Task { await ws.refreshGit() } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain).help("Refresh")
                 }
                 if (g.files ?? []).isEmpty {
                     Text("Working tree clean").foregroundColor(.secondary).frame(maxWidth: .infinity, minHeight: 60)
@@ -319,6 +324,8 @@ struct GitModuleView: View {
                             Text(label(f.status)).bold().foregroundColor(color(f.status)).frame(width: 14)
                             Button { showDiff(f.path) } label: { Text(f.path).lineLimit(1) }.buttonStyle(.plain)
                             Spacer()
+                            Button { ws.discardChanges([f.path]) } label: { Image(systemName: "arrow.uturn.backward") }
+                                .buttonStyle(.plain).foregroundColor(.secondary).help("Discard changes in this file…")
                         }
                     }.listStyle(.plain)
                 }
@@ -386,6 +393,141 @@ struct GitModuleView: View {
             let r: PushResponse = try await ws.backend.request("POST", "/api/git/push", body: ["confirm": true])
             ws.git = r.git
             ws.say("Pushed")
+        }
+    }
+}
+
+// MARK: - Extensions (Open VSX): search, install, use a theme. Only themes and snippets are used.
+
+struct ExtensionsSheet: View {
+    @ObservedObject var ws: Workspace
+    @Binding var shown: Bool
+    @ObservedObject private var theme = ThemeSettings.shared
+    @State private var query = ""
+    @State private var hits: [ExtensionHit] = []
+    @State private var installed: [InstalledExtension] = []
+    @State private var busy: String?
+    @State private var note: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                AccentCaption(text: "Extensions · Open VSX")
+                Spacer()
+                if theme.custom != nil {
+                    Button("Back to the built-in colours") { theme.custom = nil }.buttonStyle(.borderless)
+                }
+                Button("Close") { shown = false }.keyboardShortcut(.cancelAction)
+            }
+            Text("Colour themes and snippets are used (type a snippet's prefix and press Tab). An extension's own code is never run here.")
+                .font(.caption).foregroundColor(.secondary)
+            HStack {
+                TextField("Search open-vsx.org (a theme name, a language…)", text: $query)
+                    .textFieldStyle(.roundedBorder).onSubmit(search)
+                Button("Search", action: search).disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
+            }
+            if let n = note { Text(n).font(.caption).foregroundColor(Palette.yellow) }
+            List {
+                if !installed.isEmpty {
+                    Section("Installed") {
+                        ForEach(installed) { e in installedRow(e) }
+                    }
+                }
+                if !hits.isEmpty {
+                    Section("Search results") {
+                        ForEach(hits) { h in hitRow(h) }
+                    }
+                }
+            }.listStyle(.inset)
+            if let b = busy { HStack { ProgressView().controlSize(.small); Text(b).font(.caption) } }
+        }
+        .padding(16).frame(minWidth: 640, minHeight: 480)
+        .onAppear { Task { await reload() } }
+    }
+
+    private func hitRow(_ h: ExtensionHit) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(h.displayName).bold()
+                    Text(h.id + " " + h.version).font(.caption).foregroundColor(.secondary)
+                    if h.verified { Image(systemName: "checkmark.seal").font(.caption).foregroundColor(Palette.accent) }
+                }
+                Text(h.description).font(.caption).foregroundColor(.secondary).lineLimit(2)
+                Text("\(h.downloads) downloads").font(.caption2).foregroundColor(.secondary)
+            }
+            Spacer()
+            if installed.contains(where: { $0.id == h.id }) {
+                Text("Installed").font(.caption).foregroundColor(.secondary)
+            } else {
+                Button("Install") { install(h) }.disabled(busy != nil)
+            }
+        }
+    }
+
+    private func installedRow(_ e: InstalledExtension) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(e.displayName).bold()
+                Text(e.id + " " + e.version).font(.caption).foregroundColor(.secondary)
+                Spacer()
+                Button("Remove") { remove(e) }.buttonStyle(.borderless).disabled(busy != nil)
+            }
+            Text(e.detail).font(.caption).foregroundColor(.secondary)
+            if e.has_code || !e.skipped.isEmpty {
+                let what = ([e.has_code ? "its code" : nil] + e.skipped.map { Optional($0) }).compactMap { $0 }
+                Text("Not used: " + what.joined(separator: ", ")).font(.caption2).foregroundColor(.secondary)
+            }
+            if !e.themes.isEmpty {
+                HStack {
+                    ForEach(e.themes, id: \.self) { t in
+                        Button(t.label) { ws.applyExtensionTheme(id: e.id, label: t.label); shown = false }
+                            .buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
+            }
+        }.padding(.vertical, 2)
+    }
+
+    private func reload() async {
+        if let r: InstalledExtensionsResponse = try? await ws.backend.get("/api/extensions/installed") { installed = r.extensions }
+    }
+
+    private func search() {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty, busy == nil else { return }
+        busy = "Searching open-vsx.org…"; note = nil
+        Task {
+            defer { busy = nil }
+            do {
+                let r: ExtensionSearchResponse = try await ws.backend.get("/api/extensions/search?q=\(ws.backend.encoded(q))")
+                hits = r.results
+                if r.results.isEmpty { note = "Nothing found" }
+            } catch { note = error.localizedDescription }
+        }
+    }
+
+    private func install(_ h: ExtensionHit) {
+        busy = "Installing \(h.displayName)…"; note = nil
+        Task {
+            defer { busy = nil }
+            do {
+                try await ws.backend.post("/api/extensions/install",
+                                          body: ["namespace": h.namespace, "name": h.name, "version": h.version, "confirm": true])
+                await reload()
+                ws.resetSnippets()
+                let e = installed.first { $0.id == h.id }
+                note = e.map { "\($0.displayName): " + $0.detail } ?? "Installed"
+            } catch { note = error.localizedDescription }
+        }
+    }
+
+    private func remove(_ e: InstalledExtension) {
+        Task {
+            try? await ws.backend.post("/api/extensions/remove", body: ["id": e.id])
+            if theme.custom?.id == e.id { theme.custom = nil }
+            ws.resetSnippets()
+            await reload()
         }
     }
 }

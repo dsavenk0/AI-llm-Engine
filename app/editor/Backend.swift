@@ -59,7 +59,10 @@ struct SearchHit: Decodable, Identifiable, Hashable {
     var id: String { "\(path):\(line)" }
 }
 struct SearchResponse: Decodable { let hits: [SearchHit] }
-struct EngineInfo: Decodable { let model: String?, state: String?, context: Int?, vision: Bool?, vision_capable: Bool? }
+struct EngineInfo: Decodable {
+    let model: String?, state: String?, context: Int?, vision: Bool?, vision_capable: Bool?
+    let efforts: [String]?, thinking_supported: Bool?
+}
 struct GitHubStatus: Decodable {
     let installed: Bool, authenticated: Bool
     let user: String?, repo: String?, remote: String?
@@ -82,6 +85,33 @@ struct InfoResponse: Decodable {
     let root: String, name: String, engine: EngineInfo?, git: GitStatus
     let remote: Bool?, endpoint: String?
 }
+
+struct ExtensionHit: Decodable, Identifiable, Hashable {
+    let id: String, namespace: String, name: String, version: String
+    let displayName: String, description: String
+    let downloads: Int
+    let verified: Bool
+}
+struct ExtensionSearchResponse: Decodable { let results: [ExtensionHit] }
+struct ExtensionTheme: Decodable, Hashable { let label: String, uiTheme: String }
+struct ExtensionSnippetFile: Decodable, Hashable { let language: String }
+struct InstalledExtension: Decodable, Identifiable, Hashable {
+    let id: String, name: String, displayName: String, version: String, description: String
+    let themes: [ExtensionTheme], snippets: [ExtensionSnippetFile]
+    let skipped: [String]
+    let has_code: Bool
+    var detail: String {
+        var parts: [String] = []
+        if !themes.isEmpty { parts.append("\(themes.count) theme\(themes.count == 1 ? "" : "s")") }
+        if !snippets.isEmpty { parts.append("snippets: " + Set(snippets.map(\.language)).sorted().joined(separator: ", ")) }
+        if parts.isEmpty { parts.append("nothing this editor can use") }
+        return parts.joined(separator: " · ")
+    }
+}
+struct InstalledExtensionsResponse: Decodable { let extensions: [InstalledExtension] }
+struct InstallExtensionResponse: Decodable { let extension_: InstalledExtension
+    enum CodingKeys: String, CodingKey { case extension_ = "extension" } }
+struct SnippetsResponse: Decodable { let snippets: [Snippet] }
 
 struct BackendError: LocalizedError {
     let message: String
@@ -194,13 +224,16 @@ final class Backend: @unchecked Sendable {
     /// Streams the agent's events for one user turn. Cancelling the consuming task closes the connection,
     /// which the backend notices (and abandons any pending approval).
     func agent(messages: [[String: String]], attachments: [String], inline: [[String: String]] = [],
-               images: [[String: String]] = [], think: Bool, autoEdit: Bool) -> AsyncThrowingStream<AgentEvent, Error> {
+               images: [[String: String]] = [], think: Bool, autoEdit: Bool,
+               web: Bool = false, mode: String? = nil, effort: String? = nil) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { cont in
             let task = Task {
                 do {
                     var r = try make("POST", "/api/agent", body: ["messages": messages, "attachments": attachments,
                                                                   "inline": inline, "images": images,
-                                                                  "think": think, "auto_edit": autoEdit])
+                                                                  "think": think, "auto_edit": autoEdit, "web": web,
+                                                                  "mode": mode ?? (autoEdit ? "edit" : "manual"),
+                                                                  "effort": effort ?? ""])
                     r.timeoutInterval = 3600
                     let (bytes, resp) = try await URLSession.shared.bytes(for: r)
                     if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
