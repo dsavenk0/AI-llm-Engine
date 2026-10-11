@@ -485,6 +485,11 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 START = time.time()
 
 
+def _cache_size(s):
+    """argparse type for --disk-cache-gb: a GB number, or "auto" for 10% of free disk space."""
+    return s if s.strip().lower() == "auto" else float(s)
+
+
 def main():
     global ENGINE, ARGS
     ap = argparse.ArgumentParser(description="MLX engine for Qwen3.5 / JANG-Hadamard models")
@@ -501,7 +506,8 @@ def main():
     ap.add_argument("--no-speculative", action="store_true", help="disable prompt-lookup speculative decoding")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
-    ap.add_argument("--disk-cache-gb", type=float, default=8, help="SSD prefix cache budget in GB (0 = off)")
+    ap.add_argument("--disk-cache-gb", type=_cache_size, default=8,
+                    help="SSD prefix cache budget in GB, or \"auto\" for 10%% of free disk space (0 = off)")
     ap.add_argument("--disk-cache-dir", default="", help="where the SSD prefix cache lives (default: "
                     "~/.cache/ai-llm-engine/prefix) — point it at a faster/bigger external SSD if you have one")
     tune = ap.add_argument_group("fine tuning (defaults come from the model's presets)")

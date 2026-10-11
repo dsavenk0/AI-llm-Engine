@@ -55,7 +55,7 @@ DEFAULTS = {
     "prefill_step": 1024,
     "speculative": True,         # prompt-lookup speculative decoding
     "idle_sleep": 15,            # minutes of inactivity before the model is unloaded (0 = never)
-    "disk_cache_gb": 8,          # SSD prefix cache budget (0 = off)
+    "disk_cache_gb": 8,          # SSD prefix cache budget: GB number, "auto" (10% of free disk), or 0 = off
     "disk_cache_dir": "",        # where it lives (empty = ~/.cache/ai-llm-engine/prefix) — e.g. an external SSD
     "advanced": {},              # fine tuning: temperature, top_p, top_k, min_p, presence_penalty,
                                  # draft_max, ngram_min, cache_limit_mb (missing/null = engine default)

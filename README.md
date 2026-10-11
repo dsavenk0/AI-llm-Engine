@@ -94,7 +94,8 @@ embeddings and quantized gate projections.
   the start of the answer) is written to `~/.cache/ai-llm-engine/prefix/` (configurable) when the model goes to sleep
   or the server shuts down cleanly — not after every single message, since a growing conversation's snapshot point is
   different every turn and writing the whole thing to disk each time would be wasteful SSD wear for a cache that's
-  only a speed optimization. The budget is 8 GB by default, and the least recently used entries go first. A long
+  only a speed optimization. The budget is 8 GB by default (set it to `"auto"` for 10% of free disk space, or 0 to
+  turn the cache off), and the least recently used entries go first. A long
   agent system prompt is prefilled once and then restored from disk across sleeps, restarts and model switches, with
   output identical to a cold run.
 

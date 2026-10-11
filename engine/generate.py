@@ -4,6 +4,7 @@ import gc
 import hashlib
 import json
 import os
+import shutil
 import threading
 import time
 from collections import deque
@@ -248,13 +249,21 @@ class Engine:
                        "prefill_s": 0.0, "decode_s": 0.0, "drafted": 0, "accepted": 0, "since": time.time()}
         self.history = deque(maxlen=60)
         self.store = None
-        if disk_cache_gb > 0:
+        root = os.path.expanduser(disk_cache_dir) if disk_cache_dir else \
+            os.path.expanduser("~/.cache/ai-llm-engine/prefix")
+        gb = disk_cache_gb
+        if isinstance(gb, str) and gb.strip().lower() == "auto":
+            os.makedirs(root, exist_ok=True)
+            free = shutil.disk_usage(root).free
+            gb = max(1.0, free * 0.10 / GiB)  # 10% of free disk space, floor 1 GB
+            log(f"disk cache: auto → {gb:.1f} GB (10% of {free / GiB:.0f} GB free on {root})")
+        elif isinstance(gb, str):
+            gb = float(gb)
+        if gb > 0:
             from .prefix_store import PrefixStore
             with open(os.path.join(path, "config.json"), "rb") as f:
                 mid = os.path.basename(path.rstrip("/")) + "-" + hashlib.sha1(f.read()).hexdigest()[:8]
-            root = os.path.expanduser(disk_cache_dir) if disk_cache_dir else \
-                os.path.expanduser("~/.cache/ai-llm-engine/prefix")
-            self.store = PrefixStore(os.path.join(root, mid), int(disk_cache_gb * GiB), log=log)
+            self.store = PrefixStore(os.path.join(root, mid), int(gb * GiB), log=log)
         self._warmup()
 
     # ───────────────────────── sleep / wake ─────────────────────────

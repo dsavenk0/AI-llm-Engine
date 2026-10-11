@@ -752,9 +752,21 @@ struct SettingsTab: View {
                 field(L("Sleep after idle, min", "Сон после простоя, мин"), int({ e.g("idle_sleep", 15) }, { e.setG("idle_sleep", $0) }),
                       hint: L("Unloads the weights (frees ~7 GB); the next request wakes the model in ~2 s. 0 = never.",
                               "Выгружает веса (освобождает ~7 ГБ); следующий запрос будит модель за ~2 с. 0 = никогда."))
-                field(L("SSD prefix cache, GB", "Кэш префиксов на SSD, ГБ"), int({ e.g("disk_cache_gb", 8) }, { e.setG("disk_cache_gb", $0) }),
-                      hint: L("Long prompts (agent system prompts) are restored from disk instead of re-prefilled. 0 = off.",
-                              "Длинные промпты (системные промпты агентов) восстанавливаются с диска без пересчёта. 0 = выкл."))
+                field(L("SSD prefix cache, GB or \"auto\"", "Кэш префиксов на SSD, ГБ или \"auto\""), Binding(
+                        get: {
+                            if let s = e.config["disk_cache_gb"] as? String { return s }
+                            if let n = e.config["disk_cache_gb"] as? Int { return "\(n)" }
+                            return "8"
+                        },
+                        set: { v in
+                            let t = v.trimmingCharacters(in: .whitespaces)
+                            if t.lowercased() == "auto" { e.setG("disk_cache_gb", "auto") }
+                            else if let n = Int(t.filter(\.isNumber)) { e.setG("disk_cache_gb", n) }
+                        }),
+                      hint: L("Long prompts (agent system prompts) are restored from disk instead of re-prefilled. "
+                              + "\"auto\" = 10% of free disk space. 0 = off.",
+                              "Длинные промпты (системные промпты агентов) восстанавливаются с диска без пересчёта. "
+                              + "\"auto\" = 10% свободного места на диске. 0 = выкл."))
                 HStack {
                     Text(L("SSD cache folder", "Папка SSD-кэша")).font(.system(size: 12)).foregroundColor(HUD.text)
                     Spacer()
