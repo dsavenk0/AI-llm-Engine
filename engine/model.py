@@ -47,32 +47,34 @@ class QLinear(nn.Module):
 
 
 class PTQ1Linear(nn.Module):
-    """A PTQ1_0 (1.75-bit ternary) linear layer: the packed blocks stay packed in the layout the
-    Metal kernel streams (see ptq1.pack). Experimental — see ptq1.py."""
+    """A 1.75-bit ternary linear layer (PTQ1_0 or TQ1_G128): the packed blocks stay packed in the
+    layout the Metal kernel streams (see ptq1.pack). Experimental — see ptq1.py."""
 
-    def __init__(self, in_dims, out_dims):
+    def __init__(self, in_dims, out_dims, scheme="ptq1"):
         super().__init__()
         from .ptq1 import TILE
         self.out_dims = out_dims
+        self.scheme = scheme
         self.weight = mx.zeros(((out_dims + TILE - 1) // TILE, in_dims // 128, TILE, 28), dtype=mx.uint8)
 
     def __call__(self, x):
         from .ptq1 import linear
-        return linear(x, self.weight, self.out_dims)
+        return linear(x, self.weight, self.out_dims, self.scheme)
 
 
 class PTQ1Embedding(nn.Module):
     """Token embedding stored as PTQ1_0 rows: only the rows asked for are unpacked."""
 
-    def __init__(self, num, dims):
+    def __init__(self, num, dims, scheme="ptq1"):
         super().__init__()
         self.dims = dims
+        self.scheme = scheme
         self.weight = mx.zeros((num, dims // 128 * 28), dtype=mx.uint8)
 
     def __call__(self, ids):
         from .ptq1 import dequantize_rows
         rows = self.weight[ids.reshape(-1)]
-        return dequantize_rows(rows).reshape(*ids.shape, self.dims)
+        return dequantize_rows(rows, self.scheme).reshape(*ids.shape, self.dims)
 
 
 class FLinear(nn.Module):
@@ -278,14 +280,15 @@ class Ops:
         nh, nkv, hd = a["num_attention_heads"], a["num_key_value_heads"], a["head_dim"]
         inv = dk ** -0.5
         self.had = had
+        scheme = a.get("ternary_scheme", "ptq1")
 
         def qmm(x, w, s, b, n=None):
             # What `w` is comes from its shape, so one compiled block serves every layer even when
             # layers are quantized differently (mixed 4/6/8-bit, float, mx modes).
             if s is None:
-                if w.dtype == mx.uint8:        # PTQ1_0 packed blocks; n = output rows (the layout pads)
+                if w.dtype == mx.uint8:        # 1.75-bit packed blocks; n = output rows (the layout pads)
                     from .ptq1 import linear
-                    return linear(x, w, n)
+                    return linear(x, w, n, scheme)
                 return x @ w.T                 # unquantized weight
             K = x.shape[-1]
             bits, gs = w.shape[-1] * 32 // K, K // s.shape[-1]
@@ -532,13 +535,19 @@ class Model(nn.Module):
         shapes = keys if isinstance(keys, dict) else {}
         hint = qcfg.get("mode")
 
+        # 1.75-bit ternary storage: PTQ1_0 ships `.weight` uint8 blocks, TQ1_G128 `.codes` + `.scales`
+        scheme = "tq1" if any(k.endswith(".codes") for k in shapes) else "ptq1"
+        a["ternary_scheme"] = scheme
+
         def is_ptq1(name):
+            if f"language_model.{name}.codes" in shapes:
+                return True
             w = shapes.get(f"language_model.{name}.weight")
             return w is not None and w[1] == mx.uint8 and f"language_model.{name}.scales" not in shapes
 
         def q(i, o, name):
             if is_ptq1(name):
-                return PTQ1Linear(i, o)
+                return PTQ1Linear(i, o, scheme)
             spec = module_spec(shapes, f"language_model.{name}", i, hint)
             if spec is None and not shapes and "bits" in qcfg:  # no header available: the global config
                 spec = (qcfg["bits"], qcfg["group_size"], hint or "affine")
@@ -548,7 +557,7 @@ class Model(nn.Module):
 
         def qe(n, d, name):
             if is_ptq1(name):
-                return PTQ1Embedding(n, d)
+                return PTQ1Embedding(n, d, scheme)
             spec = module_spec(shapes, f"language_model.{name}", d, hint)
             if spec is None and not shapes and "bits" in qcfg:
                 spec = (qcfg["bits"], qcfg["group_size"], hint or "affine")

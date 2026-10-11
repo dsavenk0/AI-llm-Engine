@@ -754,6 +754,57 @@ class TestPTQ1Model(unittest.TestCase):
         self.assertIsNone(st["think_forced"])
 
 
+class TestTQ1Model(TestPTQ1Model):
+    """The same checks on a TQ1_G128 bundle (inductiveML "ternel" layout: `.codes` in
+    [tile][group][slot][row] order + raw fp16 `.scales`, model_type ternel_hadamard_qwen35)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from tests.synth import make_ptq1_bundle
+        cls.q, cls.f = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_ptq1_bundle(cls.q, seed=5, fmt="tq1")
+        make_ptq1_bundle(cls.f, seed=5, twin=True, fmt="tq1")
+
+    def test_it_is_a_tq1_model_in_the_packed_layout(self):
+        eng = self.engine(self.q, ptq1=True)
+        self.assertEqual(eng.model.args["ternary_scheme"], "tq1")
+        w = eng.model.language_model.model.layers[0].mlp.gate_up_proj.weight
+        self.assertEqual((w.dtype, w.ndim, tuple(w.shape[2:])), (mx.uint8, 4, (1024, 28)))
+        # rows that are not a multiple of 256 (the vocabulary, k/v) load too: the artifact never pads
+        self.assertEqual(eng.model.language_model.lm_head.out_dims, 320)
+
+    def test_a_scales_tensor_missing_from_the_shard_is_refused(self):
+        import tempfile
+        from tests.synth import make_ptq1_bundle
+        d = tempfile.mkdtemp()
+        make_ptq1_bundle(d, seed=6, fmt="tq1")
+        path = os.path.join(d, "model.safetensors")
+        t = mx.load(path)
+        victim = next(k for k in t if k.endswith(".scales"))
+        del t[victim]
+        mx.save_safetensors(path, t)
+        with self.assertRaises(ValueError) as ctx:
+            self.engine(d, ptq1=True)
+        self.assertIn("scales", str(ctx.exception))
+
+    def test_corrupt_code_bytes_are_refused(self):
+        import tempfile
+        from tests.synth import make_ptq1_bundle
+        d = tempfile.mkdtemp()
+        make_ptq1_bundle(d, seed=6, fmt="tq1")
+        path = os.path.join(d, "model.safetensors")
+        t = mx.load(path)
+        victim = next(k for k in t if k.endswith(".codes"))
+        c = np.array(t[victim])
+        c[0, 0, 3, 0] = 250                       # base-3 bytes stop at 242
+        t[victim] = mx.array(c)
+        mx.save_safetensors(path, t)
+        with self.assertRaises(ValueError) as ctx:
+            self.engine(d, ptq1=True)
+        self.assertIn("TQ1", str(ctx.exception))
+
+
 class TestStopStrings(unittest.TestCase):
     """A stop string ends the answer and is not part of it; text that might still become a stop
     string is held back, and released if it never does."""

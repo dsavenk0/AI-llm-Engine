@@ -216,6 +216,8 @@ class TestModelRoutes(unittest.TestCase):
         self.assertEqual(r({"model_type": "qwen3_5", "text_config": {"model_type": "qwen3_5_text"}}), "native")
         self.assertEqual(r({"model_type": "prism_hadamard_qwen35"}), "native")
         self.assertEqual(r({"model_type": "prism_hadamard_qwen35_ptq1", "schema": "prism_hadamard_qwen35_ptq1_v1"}), "ptq1")
+        # inductiveML's lossless 1.75-bit repack: its text_config is plain qwen3_5, the top-level type decides
+        self.assertEqual(r({"model_type": "ternel_hadamard_qwen35", "text_config": {"model_type": "qwen3_5_text"}}), "ptq1")
         self.assertEqual(r({"model_type": "qwen3"}), "mlxlm")
         self.assertEqual(r({"model_type": "glm4_moe"}), "mlxlm")
         self.assertEqual(r({"model_type": "qwen3_5", "text_config": {"num_experts": 8}}), "mlxlm")  # MoE → not native
@@ -224,6 +226,7 @@ class TestModelRoutes(unittest.TestCase):
         h = llm.hub_route
         self.assertEqual(h(["mlx", "safetensors", "prism_hadamard_qwen35", "ternary"]), "native")
         self.assertEqual(h(["custom", "safetensors", "prism_hadamard_qwen35_ptq1", "mlx"]), "ptq1")
+        self.assertEqual(h(["mlx", "safetensors", "ternel_hadamard_qwen35", "qwen3_5", "ternary", "vision"]), "ptq1")
         self.assertEqual(h(["mlx", "safetensors", "qwen3"]), "mlxlm")
         self.assertEqual(h(["mlx", "safetensors", "qwen3_5_moe"]), "mlxlm")
         self.assertEqual(h(["gguf", "qwen3_5"]), "none")

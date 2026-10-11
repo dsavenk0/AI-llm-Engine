@@ -9,6 +9,13 @@
 # the ternary expansion of b/256 — not plain base-3 positional notation), the
 # weight is (trit - 1) * d.
 #
+# The same 28-byte block also carries TQ1_G128 (inductiveML / "ternel" bundles, 1.75 bits too):
+# 25 payload bytes of five plain base-3 digits (weight 5j+n = digit n of byte j, little end
+# first), one tail byte of three digits (weights 125..127), then the fp16 scale. Only the
+# trit order differs, so both formats run through the same tiled layout and kernels; `scheme`
+# ("ptq1" | "tq1") picks the decode. A tq1 bundle stores [tile][group][slot][row] codes and
+# raw fp16 scale bits separately; from_tq1() turns them back into row-major blocks.
+#
 # Two ideas make this faster than MLX's own 2-bit qmm:
 #
 # 1. Lookup-table GEMV instead of per-weight decoding. Every row shares the same
@@ -68,7 +75,7 @@ TILE = TG * RPT  # rows per tile of the packed layout
 CH = 8           # blocks of x staged in threadgroup memory at a time
 MAX_SPLITS = 4   # K is split across threadgroups when there are few row tiles
 
-_SRC = """
+_SRC_PTQ1 = """
     // w is the tiled layout [n_tile, NB, TG*RPT, 28]; rows past N are zero padding
     const uint tid = thread_position_in_threadgroup.x;
     const uint split = threadgroup_position_in_grid.y;
@@ -149,12 +156,36 @@ _SRC = """
     }
 """
 
-_kernel = mx.fast.metal_kernel(
-    name="engine_ptq1_lut_qmv",
-    input_names=["x", "w"],
-    output_names=["y"],
-    source=_SRC,
-)
+
+
+def _tq1_lut_source(src):
+    """The TQ1_G128 variant of the lookup-table kernel: only the byte -> (sub-table slots) split
+    and the activation offsets of a payload byte change (plain base-3, five consecutive weights)."""
+    def sub(a, b):
+        nonlocal src
+        assert a in src, a
+        src = src.replace(a, b, 1)
+    sub("""        plo = t[0] + 3u * t[1] + 9u * t[2];
+        phi = t[3] + 3u * t[4];""", """        plo = tid % 27u;                       // digits 0..2 of the byte
+        phi = min(tid / 27u, 8u);              // digits 3..4 (bytes > 242 never occur)""")
+    sub("""            const uint o0 = j < 16 ? j : (j < 24 ? 80 + (j - 16) : 120 + (j - 24));
+            const uint st = j < 16 ? 16u : (j < 24 ? 8u : 2u);
+            const float a0""", """            const uint o0 = 5u * j, st = 1u;      // byte j holds weights 5j .. 5j+4
+            const float a0""")
+    sub("""            const uint o0 = j < 16 ? j : (j < 24 ? 80 + (j - 16) : 120 + (j - 24));
+            const uint st = j < 16 ? 16u : (j < 24 ? 8u : 2u);
+            const float a3""", """            const uint o0 = 5u * j, st = 1u;
+            const float a3""")
+    sub("""            // qh bytes only use 4 of the 5 trit slots: no 5th term for j >= 24
+            shi[e] = a3 * float(xb[o0 + 3 * st]) + (j < 24 ? a4 * float(xb[o0 + 4 * st]) : 0.0f);""",
+        """            // the tail byte (j = 25) holds only three digits: weights 125..127
+            shi[e] = j < 25 ? a3 * float(xb[o0 + 3 * st]) + a4 * float(xb[o0 + 4 * st]) : 0.0f;""")
+    return src
+
+
+_SRC = {"ptq1": _SRC_PTQ1, "tq1": _tq1_lut_source(_SRC_PTQ1)}
+_kernels = {name: mx.fast.metal_kernel(name=f"engine_{name}_lut_qmv", input_names=["x", "w"],
+                                       output_names=["y"], source=src) for name, src in _SRC.items()}
 
 
 def pack(w):
@@ -171,7 +202,7 @@ def pack(w):
     return mx.contiguous(w.reshape(n_tile, TILE, nb, 28).transpose(0, 2, 1, 3))
 
 
-def ptq1_matvec(x, wt, n):
+def ptq1_matvec(x, wt, n, scheme="ptq1"):
     """x: [K] or [1, K] float16/float32; wt: pack()ed weights; n: number of rows.
     Returns [n] in x's dtype."""
     n_tile, nb = wt.shape[0], wt.shape[1]
@@ -179,7 +210,7 @@ def ptq1_matvec(x, wt, n):
     assert x.shape[-1] == K and wt.shape[2:] == (TILE, 28), (x.shape, wt.shape)
     # few row tiles (narrow matrices) can't fill the GPU on their own: split K as well
     splits = max(1, min(MAX_SPLITS, nb // 2, (32 + n_tile - 1) // n_tile))
-    (y,) = _kernel(
+    (y,) = _kernels[scheme](
         inputs=[x.reshape(-1).astype(mx.float16), wt],
         template=[("RPT", RPT), ("TG", TG), ("KS", splits), ("CH", CH), ("K", K), ("N", n)],
         grid=(n_tile * TG, splits, 1),
@@ -191,7 +222,7 @@ def ptq1_matvec(x, wt, n):
     return (y[0] if splits == 1 else y.sum(axis=0)).astype(x.dtype)
 
 
-_DEQ_SRC = """
+_DEQ_HEAD = """
     // one thread = one (row, block): 28 bytes in, 128 half weights out
     const uint tid = thread_position_in_grid.x;
     constexpr int NB = K / 128;
@@ -213,6 +244,9 @@ _DEQ_SRC = """
     const float d = float(as_type<half2>(qw[6]).y);
     device half* o = out + (long(r) * NB + b) * 128;
     const uint p3[5] = {1u, 3u, 9u, 27u, 81u};
+"""
+_DEQ_BODY = {
+    "ptq1": """
     for (int j = 0; j < 16; ++j) {
         const uint byte = (qw[j >> 2] >> (8 * (j & 3))) & 0xFFu;
         for (int n = 0; n < 5; ++n)
@@ -228,31 +262,42 @@ _DEQ_SRC = """
         for (int n = 0; n < 4; ++n)
             o[120 + 2 * n + h] = half((float((((byte * p3[n]) & 0xFFu) * 3u) >> 8) - 1.0f) * d);
     }
-"""
-_deq = mx.fast.metal_kernel(name="engine_ptq1_dequant", input_names=["w"], output_names=["out"], source=_DEQ_SRC)
+""",
+    "tq1": """
+    for (int j = 0; j < 26; ++j) {
+        const uint byte = (qw[j >> 2] >> (8 * (j & 3))) & 0xFFu;
+        const int digits = j < 25 ? 5 : 3;   // the tail byte holds weights 125..127
+        for (int n = 0; n < digits; ++n)
+            o[5 * j + n] = half((float((byte / p3[n]) % 3u) - 1.0f) * d);
+    }
+""",
+}
+_DEQ_SRC = {name: _DEQ_HEAD + body for name, body in _DEQ_BODY.items()}
+_deqs = {name: mx.fast.metal_kernel(name=f"engine_{name}_dequant", input_names=["w"], output_names=["out"],
+                                    source=src) for name, src in _DEQ_SRC.items()}
 
 
-def _dequant(w, rows, k, tiled):
-    (out,) = _deq(inputs=[w], template=[("ROWS", rows), ("K", k), ("TILED", tiled), ("TG", TG), ("RPT", RPT)],
+def _dequant(w, rows, k, tiled, scheme="ptq1"):
+    (out,) = _deqs[scheme](inputs=[w], template=[("ROWS", rows), ("K", k), ("TILED", tiled), ("TG", TG), ("RPT", RPT)],
                   grid=(((rows * (k // 128) + 255) // 256) * 256, 1, 1), threadgroup=(256, 1, 1),
                   output_shapes=[(rows, k)], output_dtypes=[mx.float16])
     return out
 
 
-def dequantize(wt, n):
+def dequantize(wt, n, scheme="ptq1"):
     """Packed (tiled) weights -> fp16 [n, K]. Whole matrix: use only for small ones / tests."""
-    return _dequant(wt, wt.shape[0] * TILE, wt.shape[1] * 128, True)[:n]
+    return _dequant(wt, wt.shape[0] * TILE, wt.shape[1] * 128, True, scheme)[:n]
 
 
-def dequantize_rows(w):
+def dequantize_rows(w, scheme="ptq1"):
     """Row-major PTQ1 rows [R, K/128*28] (e.g. embedding rows picked by token id) -> fp16 [R, K]."""
-    return _dequant(w, w.shape[0], w.shape[1] // 28 * 128, False)
+    return _dequant(w, w.shape[0], w.shape[1] // 28 * 128, False, scheme)
 
 
 CHUNK_BYTES = 96 * 2**20  # fp16 weights materialized at a time in the matmul path
 
 
-def ptq1_matmul(x, wt, n):
+def ptq1_matmul(x, wt, n, scheme="ptq1"):
     """x: [..., K] with more than one row. Dequantizes the matrix a few tiles at a time and uses
     MLX's matmul, so the temporary fp16 weights stay small."""
     K = wt.shape[1] * 128
@@ -262,22 +307,29 @@ def ptq1_matmul(x, wt, n):
     for t0 in range(0, wt.shape[0], tiles):
         chunk = wt[t0:t0 + tiles]
         rows = min(chunk.shape[0] * TILE, n - t0 * TILE)
-        outs.append(flat @ _dequant(chunk, chunk.shape[0] * TILE, K, True)[:rows].T)
+        outs.append(flat @ _dequant(chunk, chunk.shape[0] * TILE, K, True, scheme)[:rows].T)
     y = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=-1)
     return y.reshape(*x.shape[:-1], n).astype(x.dtype)
 
 
-def linear(x, wt, n):
+def linear(x, wt, n, scheme="ptq1"):
     """y = x @ W.T for packed weights `wt` and `n` output rows: the lookup-table kernel for a
     single row, dequantize + matmul for more."""
     if x.size // x.shape[-1] == 1:
-        return ptq1_matvec(x, wt, n).reshape(*x.shape[:-1], n)
-    return ptq1_matmul(x, wt, n)
+        return ptq1_matvec(x, wt, n, scheme).reshape(*x.shape[:-1], n)
+    return ptq1_matmul(x, wt, n, scheme)
 
 
-def dequantize_ref(w):
+def dequantize_ref(w, scheme="ptq1"):
     """NumPy reference decode (for tests): row-major uint8 [N, K/128*28] -> float32 [N, K]."""
     import numpy as np
+    if scheme == "tq1":
+        blocks = np.asarray(w, np.uint8).reshape(-1, 28)
+        pay = blocks[:, :26].astype(np.uint32)
+        d = blocks[:, 26:28].copy().view(np.float16).astype(np.float32)
+        digits = np.stack([(pay // 3 ** n) % 3 for n in range(5)], axis=-1)      # [B, 26, 5]
+        wts = digits.reshape(-1, 130)[:, :128].astype(np.float32) - 1.0         # 25*5 + 3 = 128 columns
+        return (wts * d).reshape(w.shape[0], -1)
     order = []
     for n in range(5):
         for m in range(16):
@@ -296,3 +348,25 @@ def dequantize_ref(w):
     t = (((pay[:, order[:, 0]] * pow3[order[:, 1]]) & 0xFF) * 3) >> 8
     out = (t.astype(np.float32) - 1.0) * d
     return out.reshape(w.shape[0], -1)
+
+
+TQ1_SLOTS = 26    # payload bytes per group: 25 of five digits + one tail byte of three
+
+
+def from_tq1(codes, scales):
+    """TQ1_G128 storage -> row-major 28-byte blocks [N, K/128*28] uint8 (what pack() takes).
+
+    codes:  uint8  [tiles, groups, 26, tile]  (a group's payload bytes, one row per lane)
+    scales: uint16 [tiles, groups, tile]      (raw fp16 bits)
+    Rejects code bytes no packer emits (> 242, tail > 26): they would decode as silent noise."""
+    if codes.ndim != 4 or codes.shape[2] != TQ1_SLOTS or codes.dtype != mx.uint8:
+        raise ValueError(f"TQ1 codes must be uint8 [tiles, groups, {TQ1_SLOTS}, tile], got {codes.dtype} {tuple(codes.shape)}")
+    t, g, _, tile = codes.shape
+    if tuple(scales.shape) != (t, g, tile) or scales.dtype not in (mx.uint16, mx.float16):
+        raise ValueError(f"TQ1 scales must be uint16 {(t, g, tile)}, got {scales.dtype} {tuple(scales.shape)}")
+    if mx.max(codes[:, :, :TQ1_SLOTS - 1]).item() > 242 or mx.max(codes[:, :, TQ1_SLOTS - 1]).item() > 26:
+        raise ValueError("TQ1 codes contain bytes outside the base-3 range (corrupt or not TQ1_G128)")
+    pay = codes.transpose(0, 3, 1, 2)                                  # [t, tile, g, 26]
+    sc = scales.transpose(0, 2, 1)                                     # [t, tile, g]
+    sc = mx.contiguous(sc).view(mx.uint8).reshape(t, tile, g, 2)       # little-endian fp16 bytes
+    return mx.concatenate([pay, sc], axis=-1).reshape(t * tile, g * 28)

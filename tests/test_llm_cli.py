@@ -100,6 +100,10 @@ class TestInspect(State):
         d = os.path.join(self.cfg["dirs"][0], "p")
         self.assertEqual(llm.inspect_model(write_model(d, config={"schema": "prism_hadamard_qwen35_ptq1_v1",
                                                                   "quantization": {}}))["route"], "ptq1")
+        d3 = os.path.join(self.cfg["dirs"][0], "t")
+        m = llm.inspect_model(write_model(d3, config={"model_type": "ternel_hadamard_qwen35",
+                                                      "text_config": {"model_type": "qwen3_5_text"}}))
+        self.assertEqual((m["route"], m["format"], m["supported"]), ("ptq1", "TQ1", True))
         d2 = os.path.join(self.cfg["dirs"][0], "g")
         m = llm.inspect_model(write_model(d2, config={"model_type": "glm4", "text_config": {}}))
         self.assertEqual((m["route"], m["supported"]), ("mlxlm", True))

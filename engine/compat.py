@@ -41,7 +41,7 @@ def _json(path):
         return {}
 
 
-NATIVE_TYPES = ("qwen3_5", "qwen3_5_text")
+NATIVE_TYPES = ("qwen3_5", "qwen3_5_text", "ternel_hadamard_qwen35")
 
 
 def pick_backend(path, requested="auto"):

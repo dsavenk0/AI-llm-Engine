@@ -1230,7 +1230,7 @@ struct ModelsTab: View {
                                 badge("⬇ \(r.downloads >= 1000 ? "\(r.downloads / 1000)K" : "\(r.downloads)")", HUD.dim)
                                 switch r.route {
                                 case "native": badge(L("engine ✓", "движок ✓"), HUD.phosphor)
-                                case "ptq1": badge(L("PTQ1 · experimental", "PTQ1 · эксперим."), HUD.cyan)
+                                case "ptq1": badge(L("1.75-bit · experimental", "1.75 бит · эксперим."), HUD.cyan)
                                 case "mlxlm": badge(L("via mlx-lm", "через mlx-lm"), HUD.cyan)
                                 default: badge(L("not supported", "не поддерживается"), HUD.dim)
                                 }

@@ -517,7 +517,7 @@ def main():
                     help="auto: the native engine for Qwen3.5-hybrid bundles, the optional mlx-lm backend "
                          "for every other MLX architecture")
     ap.add_argument("--ptq1", choices=("on", "off"), default="off",
-                    help="experimental: run PTQ1_0 (1.75-bit ternary) bundles on the Metal lookup-table kernel")
+                    help="experimental: run PTQ1_0 / TQ1_G128 (1.75-bit ternary) bundles on the Metal lookup-table kernel")
     ap.add_argument("--no-vision", action="store_true")
     ap.add_argument("--no-speculative", action="store_true", help="disable prompt-lookup speculative decoding")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")

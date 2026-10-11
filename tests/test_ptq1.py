@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import mlx.core as mx  # noqa: E402
-from engine.ptq1 import TILE, dequantize_ref, pack, ptq1_matvec  # noqa: E402
+from engine.ptq1 import TILE, dequantize, dequantize_ref, from_tq1, linear, pack, ptq1_matvec  # noqa: E402
 
 
 def make_weights(n, k, seed=0):
@@ -137,6 +137,117 @@ class TestPTQ1Matvec(unittest.TestCase):
             mx.eval(y)
             ref = dequantize_ref(w) @ np.asarray(x.astype(mx.float32))
             self.assert_matches(np.asarray(y.astype(mx.float32)), ref, f"byte_index={byte_index}")
+
+
+def tq1_blocks(n, k, seed=0, digits=None):
+    """Random TQ1_G128 blocks, row-major [n, k/128*28]: 25 payload bytes of five base-3 digits, a
+    tail byte of three, an fp16 scale. Returns (blocks, digits [n, k/128, 128])."""
+    rng = np.random.default_rng(seed)
+    nb = k // 128
+    if digits is None:
+        digits = rng.integers(0, 3, size=(n, nb, 128))
+    pad = np.concatenate([digits, np.zeros((n, nb, 2), digits.dtype)], axis=-1).reshape(n, nb, 26, 5)
+    pay = (pad * np.array([1, 3, 9, 27, 81])).sum(-1).astype(np.uint8)
+    d = (rng.random((n, nb)).astype(np.float32) * 0.1 + 0.01).astype(np.float16)
+    return np.concatenate([pay, d.view(np.uint8).reshape(n, nb, 2)], axis=-1).reshape(n, nb * 28), digits
+
+
+def tq1_truth(blocks, digits):
+    """What the format says, spelled out: weight (row, 128*g + c) = (digit c - 1) * scale."""
+    n, nb, _ = digits.shape
+    d = blocks.reshape(n, nb, 28)[:, :, 26:28].copy().view(np.float16).astype(np.float32)
+    return ((digits.astype(np.float32) - 1.0) * d).reshape(n, nb * 128)
+
+
+class TestTQ1Format(unittest.TestCase):
+    """TQ1_G128 (inductiveML): same 28-byte block as PTQ1_0, plain base-3 payload."""
+
+    def test_a_hand_built_block_decodes_to_the_digits_written_in_it(self):
+        blk = np.zeros((1, 28), np.uint8)
+        blk[0, 0] = 1 + 2 * 3 + 0 * 9 + 1 * 27 + 2 * 81   # digits (1, 2, 0, 1, 2) -> weights 0, +1, -1, 0, +1
+        blk[0, 25] = 2 + 1 * 3 + 0 * 9                      # tail: digits (2, 1, 0) -> columns 125..127
+        blk[0, 26:28] = np.array([0.5], np.float16).view(np.uint8)
+        w = dequantize_ref(blk, "tq1")[0]
+        np.testing.assert_array_equal(w[:5], [0, 0.5, -0.5, 0, 0.5])
+        np.testing.assert_array_equal(w[125:], [0.5, 0, -0.5])
+        # every payload byte that is 0 means digits all 0 -> weight -scale, not 0
+        self.assertEqual(float(w[5]), -0.5)
+
+    def test_the_reference_matches_the_spelled_out_truth(self):
+        blocks, digits = tq1_blocks(37, 512, seed=2)
+        np.testing.assert_array_equal(dequantize_ref(blocks, "tq1"), tq1_truth(blocks, digits))
+
+    def test_the_two_formats_read_the_same_bytes_differently(self):
+        blocks, _ = tq1_blocks(8, 256, seed=3)
+        self.assertGreater(np.abs(dequantize_ref(blocks, "tq1") - dequantize_ref(blocks, "ptq1")).max(), 0.01)
+        x = mx.random.normal((256,)).astype(mx.float16)
+        a = np.asarray(ptq1_matvec(x, pack(mx.array(blocks)), 8, "tq1").astype(mx.float32))
+        b = np.asarray(ptq1_matvec(x, pack(mx.array(blocks)), 8, "ptq1").astype(mx.float32))
+        self.assertGreater(np.abs(a - b).max(), 0.01)
+
+
+class TestTQ1Kernels(unittest.TestCase):
+    def assert_close(self, got, ref, msg=""):
+        tol = 1e-3 * np.abs(ref) + 1e-4 * np.abs(ref).mean() + 1e-5
+        bad = np.abs(got - ref) > tol
+        self.assertFalse(bad.any(), f"{msg}: {int(bad.sum())} off, worst {float(np.abs(got - ref).max()):.3g}")
+
+    def check(self, n, k, seed=0):
+        blocks, digits = tq1_blocks(n, k, seed)
+        truth = tq1_truth(blocks, digits)
+        wt = pack(mx.array(blocks))
+        x = mx.random.normal((k,)).astype(mx.float16)
+        y = ptq1_matvec(x, wt, n, "tq1")
+        mx.eval(y)
+        self.assert_close(np.asarray(y.astype(mx.float32)), truth @ np.asarray(x.astype(mx.float32)), f"matvec {n}x{k}")
+        # the dequantizing path (prefill) reproduces the weights exactly, and linear() routes by rows
+        np.testing.assert_allclose(np.asarray(dequantize(wt, n, "tq1").astype(mx.float32)), truth, rtol=1e-3, atol=1e-6)
+        X = mx.random.normal((3, k)).astype(mx.float16)
+        Y = np.asarray(linear(X, wt, n, "tq1").astype(mx.float32))
+        self.assert_close(Y, np.asarray(X.astype(mx.float32)) @ truth.T, f"matmul {n}x{k}")
+
+    def test_shapes_around_the_tile_and_block_edges(self):
+        for n, k in ((1, 128), (4, 256), (255, 384), (1025, 640), (300, 128 * 33), (130, 128 * 37)):
+            self.check(n, k, seed=n)
+
+    def test_every_byte_value_in_every_kind_of_payload_position(self):
+        """256 rows, one per byte value, with the byte under test moved through a first slot, a
+        middle one, the last full slot and the tail slot. Legal values only go to 242 (tail 26);
+        the rest are clamped by the loader, but the kernel must not read out of its tables."""
+        base = np.random.default_rng(9).integers(0, 3, size=(1, 1, 128))
+        blocks, _ = tq1_blocks(1, 128, digits=base)
+        for slot in (0, 7, 24, 25):
+            w = np.tile(blocks, (243, 1))
+            hi = 27 if slot == 25 else 243
+            w[:, slot] = np.arange(243, dtype=np.uint8) % hi
+            x = mx.random.normal((128,)).astype(mx.float16)
+            y = ptq1_matvec(x, pack(mx.array(w)), 243, "tq1")
+            mx.eval(y)
+            ref = dequantize_ref(w, "tq1") @ np.asarray(x.astype(mx.float32))
+            self.assert_close(np.asarray(y.astype(mx.float32)), ref, f"slot {slot}")
+
+    def test_from_tq1_restores_row_major_blocks_for_both_tile_shapes(self):
+        for n, tile in ((512, 256), (384, 384), (128, 128)):
+            blocks, _ = tq1_blocks(n, 384, seed=n)
+            nb = 3
+            b = blocks.reshape(n, nb, 28)
+            tiles = n // tile
+            codes = np.ascontiguousarray(b[:, :, :26].reshape(tiles, tile, nb, 26).transpose(0, 2, 3, 1))
+            scales = np.ascontiguousarray(b[:, :, 26:].copy().view(np.uint16).reshape(tiles, tile, nb).transpose(0, 2, 1))
+            out = from_tq1(mx.array(codes), mx.array(scales))
+            np.testing.assert_array_equal(np.asarray(out), blocks)
+
+    def test_from_tq1_refuses_bytes_no_packer_writes(self):
+        codes = np.zeros((1, 1, 26, 8), np.uint8)
+        scales = np.zeros((1, 1, 8), np.uint16)
+        from_tq1(mx.array(codes), mx.array(scales))        # all-zero is legal
+        for slot, bad in ((0, 243), (24, 255), (25, 27)):
+            c = codes.copy()
+            c[0, 0, slot, 3] = bad
+            with self.assertRaises(ValueError, msg=f"slot {slot} byte {bad}"):
+                from_tq1(mx.array(c), mx.array(scales))
+        with self.assertRaises(ValueError):                # wrong slot count (a PTQ1_0 `qs` array)
+            from_tq1(mx.array(np.zeros((1, 1, 24, 8), np.uint8)), mx.array(scales))
 
 
 if __name__ == "__main__":

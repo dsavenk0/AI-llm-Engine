@@ -151,10 +151,14 @@ def _legal_bytes(n_trits):
     return np.array(sorted({-(-v * 256 // mod) for v in range(mod)}), dtype=np.uint8)
 
 
-def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML):
+def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="ptq1"):
     """A tiny prism_hadamard_qwen35_ptq1_v1 checkpoint: every large matrix PTQ1_0 (or, with
     twin=True, its exact dequantization in fp16 under an ordinary Hadamard config), per-module
-    +-1 sign vectors, text-only, `model.*` / `lm_head.*` key names like the real repo."""
+    +-1 sign vectors, text-only, `model.*` / `lm_head.*` key names like the real repo.
+
+    fmt="tq1" writes the TQ1_G128 layout of the inductiveML "ternel" bundles instead: plain base-3
+    payload bytes stored as `.codes` [tile][group][slot][row] plus raw fp16 `.scales`, with the
+    `language_model.` key prefix and model_type ternel_hadamard_qwen35."""
     from engine.ptq1 import dequantize_ref
     os.makedirs(path, exist_ok=True)
     vocab = build_tokenizer(path)
@@ -168,17 +172,31 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML):
     def ptq(name, out, inp, embedding=False):
         nb = inp // 128
         w = np.zeros((out, nb, 28), np.uint8)
-        w[:, :, :24] = rng.choice(qs_legal, size=(out, nb, 24))
-        w[:, :, 24:26] = rng.choice(qh_legal, size=(out, nb, 2))
+        if fmt == "tq1":
+            digits = rng.integers(0, 3, size=(out, nb, 26, 5))
+            digits[:, :, 25, 3:] = 0                      # the tail byte holds weights 125..127 only
+            w[:, :, :26] = (digits * np.array([1, 3, 9, 27, 81])).sum(-1).astype(np.uint8)
+        else:
+            w[:, :, :24] = rng.choice(qs_legal, size=(out, nb, 24))
+            w[:, :, 24:26] = rng.choice(qh_legal, size=(out, nb, 2))
         d = (rng.random((out, nb)) * 0.04 + 0.005).astype(np.float16)
         w[:, :, 26:28] = d.view(np.uint8).reshape(out, nb, 2)
-        w = w.reshape(out, nb * 28)
+        rows_blocks = w.reshape(out, nb * 28)
+        key = f"language_model.{name}" if fmt == "tq1" else name
         if twin:
-            t[f"{name}.weight"] = mx.array(dequantize_ref(w)).astype(mx.float16)
-        else:
-            t[f"{name}.weight"] = mx.array(w)
+            t[f"{name}.weight"] = mx.array(dequantize_ref(rows_blocks, fmt)).astype(mx.float16)
+        elif fmt == "tq1":
+            tile = 256 if out % 256 == 0 else out        # the artifact never pads rows
+            tiles = out // tile
+            t[f"{key}.codes"] = mx.array(np.ascontiguousarray(
+                w[:, :, :26].reshape(tiles, tile, nb, 26).transpose(0, 2, 3, 1)))
+            t[f"{key}.scales"] = mx.array(np.ascontiguousarray(
+                d.view(np.uint16).reshape(tiles, tile, nb).transpose(0, 2, 1)))
             modules.append({"path": name, "block": block, "embedding": embedding, "dtype": "float16"})
-        t[f"{name}.signs"] = mx.array(signs_by_width[inp])
+        else:
+            t[f"{name}.weight"] = mx.array(rows_blocks)
+            modules.append({"path": name, "block": block, "embedding": embedding, "dtype": "float16"})
+        t[f"{key}.signs" if (fmt == "tq1" and not twin) else f"{name}.signs"] = mx.array(signs_by_width[inp])
 
     def vec(name, n, value=1.0):
         t[name] = mx.full((n,), value, dtype=mx.float32)
@@ -228,6 +246,10 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML):
                "eos_token_id": [1, 2]}
         # float twin has no PTQ norm policy: PTQ1 norms are final-form, so declare them unshifted
         cfg["jang_norms_pre_shifted"] = True
+    elif fmt == "tq1":
+        cfg = {"model_type": "ternel_hadamard_qwen35", "base_model_type": "qwen3_5", "schema_version": 2,
+               "text_config": text_config, "eos_token_id": [1, 2], "gdn_activation_layout": "grouped",
+               "tensor_namespace": "mlx-vlm-qwen3_5", "modules": modules}
     else:
         cfg = {"schema": "prism_hadamard_qwen35_ptq1_v1", "model_type": "prism_hadamard_qwen35_ptq1",
                "text_config": text_config, "eos_token_id": [1, 2],

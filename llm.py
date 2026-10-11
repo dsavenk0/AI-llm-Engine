@@ -164,18 +164,20 @@ def _json(path):
 
 NATIVE_TYPES = ("qwen3_5", "qwen3_5_text", "prism_hadamard_qwen35")
 PTQ1_SCHEMA = "prism_hadamard_qwen35_ptq1"
+TQ1_TYPE = "ternel_hadamard_qwen35"   # inductiveML 1.75-bit repacks (TQ1_G128): same engine option
 
 
 def engine_route(cfgj, tags=()):
     """Which engine runs this model: "native" (Qwen3.5-hybrid dense family, incl. Prism/JANG
-    Hadamard bundles), "ptq1" (the same family in the experimental PTQ1 format) or "mlxlm"
+    Hadamard bundles), "ptq1" (the same family in an experimental 1.75-bit ternary format: PTQ1_0
+    or TQ1_G128) or "mlxlm"
     (anything else MLX, through the optional mlx-lm backend). `cfgj` is the local config.json;
     for a hub repo that has not been downloaded, pass its tags instead."""
     text = cfgj.get("text_config") or {}
     kinds = {cfgj.get("model_type"), text.get("model_type"), *tags}
     schema = str(cfgj.get("schema", ""))
-    if schema.startswith(PTQ1_SCHEMA) or PTQ1_SCHEMA in kinds:
-        return "ptq1"
+    if schema.startswith(PTQ1_SCHEMA) or PTQ1_SCHEMA in kinds or TQ1_TYPE in kinds:
+        return "ptq1"   # checked before "native": a TQ1 repo also carries the qwen3_5 tag
     moe = text.get("num_experts") or cfgj.get("num_experts") or any("moe" in str(k) for k in kinds)
     if kinds & set(NATIVE_TYPES) and not moe:
         return "native"
@@ -220,7 +222,7 @@ def inspect_model(path):
         name = parts[parts.index("snapshots") - 1].removeprefix("models--").split("--", 1)[-1]
     fmt = f"JANG {jang.get('profile', '')}".strip() if jang else (f"MLX {q['bits']}-bit" if q.get("bits") else "fp")
     if route == "ptq1":
-        fmt = "PTQ1"
+        fmt = "TQ1" if cfgj.get("model_type") == TQ1_TYPE else "PTQ1"
     return {"path": path, "name": name, "size": size, "format": fmt, "type": mtype, "route": route,
             "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl,
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
@@ -1141,7 +1143,7 @@ def search_cmd(query, as_json=False):
         print(json.dumps(res, ensure_ascii=False)); return True
     for i, m in enumerate(res, 1):
         size = f"{m['size']:.1f} GB" if m["size"] is not None else "?"
-        ok = {"native": G(T("✓ engine")), "ptq1": Y(T("✓ engine (PTQ1, experimental)")),
+        ok = {"native": G(T("✓ engine")), "ptq1": Y(T("✓ engine (1.75-bit, experimental)")),
               "mlxlm": CY(T("via mlx-lm"))}.get(m["route"], DIM(T("not supported")))
         print(f" {i:>2}) {B(m['id'])}  {size}  ⬇{m['downloads']}  {ok}" + (G("  " + T("downloaded")) if m["local"] else ""))
     if sys.stdin.isatty() and res:

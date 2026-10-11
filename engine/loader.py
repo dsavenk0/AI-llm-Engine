@@ -49,7 +49,7 @@ def _split_key(k):
 
 
 _ST_DTYPES = {"F32": mx.float32, "F16": mx.float16, "BF16": mx.bfloat16, "U8": mx.uint8, "U32": mx.uint32,
-              "I32": mx.int32, "I8": mx.int8, "BOOL": mx.bool_, "F64": mx.float32}
+              "I32": mx.int32, "I8": mx.int8, "BOOL": mx.bool_, "F64": mx.float32, "U16": mx.uint16}
 
 
 def canonical(k):
@@ -75,11 +75,28 @@ def read_shapes(files):
     return shapes
 
 
+TQ1_MODEL_TYPE = "ternel_hadamard_qwen35"
+
+
+def _join_tq1(shard):
+    """TQ1_G128 stores each matrix as `X.codes` (+ `X.scales`, `X.signs`). Replace every codes/scales
+    pair in this shard by one row-major `X.weight` of 28-byte blocks, the form PTQ1_0 bundles use,
+    so fusing, the repack and the kernels need no second path."""
+    from .ptq1 import from_tq1
+    for raw in [k for k in shard if k.endswith(".codes")]:
+        base = raw[:-len(".codes")]
+        if base + ".scales" not in shard:
+            raise ValueError(f"{base}: TQ1 codes without their scales in the same shard")
+        weight = from_tq1(shard.pop(raw), shard.pop(base + ".scales"))
+        mx.eval(weight)
+        shard[base + ".weight"] = weight
+
+
 def load(path, vision=True, log=print, ptq1=False):
     t0 = time.time()
     config = _json(os.path.join(path, "config.json"))
     jang = _json(os.path.join(path, "jang_config.json"))
-    if config.get("model_type") not in ("qwen3_5",) and config.get("text_config", {}).get("model_type") not in ("qwen3_5_text", "qwen3_5"):
+    if config.get("model_type") not in ("qwen3_5", TQ1_MODEL_TYPE) and config.get("text_config", {}).get("model_type") not in ("qwen3_5_text", "qwen3_5"):
         raise ValueError(f"unsupported model_type {config.get('model_type')!r} (engine supports qwen3_5)")
     if "text_config" not in config:
         config = {"text_config": config, **{k: v for k, v in config.items() if k != "text_config"}}
@@ -87,9 +104,11 @@ def load(path, vision=True, log=print, ptq1=False):
     if tc.get("num_experts", 0):
         raise ValueError("MoE Qwen3.5 variants are not supported by this engine")
     qcfg = config.get("quantization") or config.get("quantization_config") or {}
-    is_ptq1 = qcfg.get("format") == "PTQ1_0" or str(config.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1")
+    is_tq1 = config.get("model_type") == TQ1_MODEL_TYPE
+    is_ptq1 = (qcfg.get("format") == "PTQ1_0" or str(config.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1")
+               or is_tq1)
     if is_ptq1 and not ptq1:
-        raise ValueError("this is a PTQ1_0 (1.75-bit ternary) bundle — supported as an experimental option: "
+        raise ValueError("this is a 1.75-bit ternary bundle (PTQ1_0 / TQ1_G128) — supported as an experimental option: "
                          "enable Settings → Advanced → \"Experimental: PTQ1 models\" (or pass --ptq1 on)")
 
     files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
@@ -112,8 +131,11 @@ def load(path, vision=True, log=print, ptq1=False):
     shift_decided = bool(layout.get("language_norms")) or "jang_norms_pre_shifted" in config
     if is_ptq1:
         # GGUF-derived: norm weights are already in final form (means 0.8-1.9 in the real file), and
-        # the Hadamard block size is listed per module in config["modules"].
-        shift, shift_decided = False, True
+        # the Hadamard block size is listed per module in config["modules"]. A TQ1_G128 bundle is a
+        # repack of a Prism MLX checkpoint: its norms keep that source's convention, so they go
+        # through the same value heuristic as any unstamped Prism bundle.
+        if not is_tq1:
+            shift, shift_decided = False, True
         blocks = {m.get("block") for m in config.get("modules", []) if m.get("block")}
         if len(blocks) == 1:
             had_cfg = {"block_size": blocks.pop()}
@@ -123,6 +145,8 @@ def load(path, vision=True, log=print, ptq1=False):
     signs, pending, loaded = {}, {}, set()
     for f in files:
         shard = mx.load(f)
+        if is_tq1:
+            _join_tq1(shard)
         out = {}
         for raw in list(shard):
             v = shard.pop(raw)  # drop the shard's reference so fused parts can be freed early
