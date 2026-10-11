@@ -11,7 +11,7 @@ Three small, hand-written suites — no dataset downloads, no new dependencies:
 - math: grade-school word problems (GSM8K-style), scored by extracting the final number.
 - code: short HumanEval-style function-completion problems, scored by actually running the
   model's code against a few assert statements (pass/fail, like HumanEval's pass@1).
-- sanity: trivial direct questions, run with thinking on when the model supports it. These
+- sanity: trivial direct questions, in the model's default reasoning mode. These
   must finish with finish_reason == "stop", not "length" — this is exactly what the
   think-budget / repetition-loop guard (Engine.generate's think_budget, is_repeating) is
   for: short, simple prompts are what a reasoning model gets stuck looping on instead of
@@ -27,12 +27,19 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 BASELINE = os.path.join(ROOT, "tests", "eval_baseline.json")
 
 from tests.perf import model_key, model_paths  # noqa: E402 — same --model/env resolution as perf.py
+
+# Token budget per reply. Deliberately generous: with thinking on, a small model spends a few
+# hundred tokens reasoning even about a one-line sum, and a tight limit makes the engine's
+# think-budget guard cut it off mid-calculation — the eval would then be scoring the cutoff,
+# not the model. (A 0.8B model answered 34 instead of 48 at 300 tokens and got it right at 1500.)
+MAX_REPLY = 1536
 
 MATH_INSTRUCTION = " Think if you need to, then end your reply with a line formatted exactly: Answer: <number>"
 MATH_PROBLEMS = [
@@ -128,9 +135,15 @@ SANITY = [
 
 
 def extract_number(text):
+    """The number on the requested "Answer: <number>" line; failing that, the last number on
+    the reply's last non-empty line (models that bold it or add a unit). Deliberately NOT
+    "the last number anywhere": on a reply cut off mid-reasoning that grabs list numbering
+    or an intermediate figure and scores a truncation as a wrong answer."""
     m = re.findall(r"Answer:\s*\$?(-?\d+(?:\.\d+)?)", text)
-    if not m:
-        m = re.findall(r"-?\d+(?:\.\d+)?", text)
+    if m:
+        return float(m[-1])
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    m = re.findall(r"-?\d+(?:\.\d+)?", lines[-1]) if lines else []
     return float(m[-1]) if m else None
 
 
@@ -148,12 +161,23 @@ def run_code_problem(problem, completion):
         return False
 
 
+GREEDY = False  # --greedy: temperature 0 instead of the model's own sampling presets
+THINK = None    # --think on|off: force the reasoning mode; auto (None) follows the model's template
+
+
 def ask(eng, prompt, max_tokens, thinking):
     eng.cache = None
     text, _, thinking_open = eng.build_prompt([{"role": "user", "content": prompt}], thinking=thinking)
     ids, _ = eng.encode(text, [])
     out, st = "", None
-    for item in eng.generate(ids, sampling={"temperature": 0}, max_tokens=max_tokens, thinking_open=thinking_open):
+    # The model's own presets (e.g. temperature 1.0 / top_p 0.95 for Qwen3.5 thinking) with a
+    # fixed seed: reproducible, but not greedy — Qwen's model cards warn greedy decoding sends
+    # reasoning models into endless repetition, and a benchmark that provokes that on purpose
+    # measures the decoding mode rather than the model.
+    sampling = {"temperature": 0} if GREEDY else {
+        k: v for k, v in (eng.sampling[bool(thinking_open)] or {}).items()
+        if k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty")}
+    for item in eng.generate(ids, sampling=sampling, seed=0, max_tokens=max_tokens, thinking_open=thinking_open):
         if isinstance(item, dict):
             st = item
         else:
@@ -164,33 +188,49 @@ def ask(eng, prompt, max_tokens, thinking):
 def measure_one(path):
     from engine.generate import Engine
 
-    eng = Engine(path, vision=False, max_context=4096, max_tokens=512, log=lambda *a: None)
-    think = eng.supports_thinking
+    eng = Engine(path, vision=False, max_context=4096, max_tokens=MAX_REPLY, log=lambda *a: None)
+    think = THINK  # None = the model's own default (what a client that says nothing gets)
     res = {"math_correct": 0, "math_total": len(MATH_PROBLEMS),
            "code_correct": 0, "code_total": len(CODE_PROBLEMS),
-           "sanity_correct": 0, "sanity_total": len(SANITY), "sanity_finished_cleanly": 0}
+           "sanity_correct": 0, "sanity_total": len(SANITY), "sanity_finished_cleanly": 0,
+           "think_forced": 0, "truncated": 0}
     fails = []
 
+    def note(st, what):
+        """Count replies where the engine force-closed the reasoning or ran out of tokens, so a
+        score drop can be told apart from a model that simply got the answer wrong."""
+        if st and st.get("think_forced"):
+            res["think_forced"] += 1
+            fails.append(f"{what}: reasoning force-closed ({st['think_forced']})")
+        if st and st.get("finish_reason") == "length":
+            res["truncated"] += 1
+            fails.append(f"{what}: hit the token limit")
+
     for q, expected in MATH_PROBLEMS:
-        out, _ = ask(eng, q + MATH_INSTRUCTION, 300, think)
+        out, st = ask(eng, q + MATH_INSTRUCTION, MAX_REPLY, think)
         got = extract_number(out)
         ok = got is not None and abs(got - expected) < 1e-6
         res["math_correct"] += int(ok)
+        note(st, f"math {expected}")
         if not ok:
             fails.append(f"math: expected {expected}, got {got!r} — {out[-120:]!r}")
 
     for prob in CODE_PROBLEMS:
-        out, _ = ask(eng, prob["prompt"], 400, think)
+        out, st = ask(eng, prob["prompt"], MAX_REPLY, think)
         ok = run_code_problem(prob, out)
         res["code_correct"] += int(ok)
+        note(st, f"code {prob['name']}")
         if not ok:
             fails.append(f"code: {prob['name']} failed")
 
     for q, expected in SANITY:
-        out, st = ask(eng, q, 300, think)
-        res["sanity_correct"] += int(expected in out.lower())
+        out, st = ask(eng, q, MAX_REPLY, think)
+        # NFKD turns subscript/superscript digits (H₂O) into plain ones before matching
+        folded = unicodedata.normalize("NFKD", out).lower()
+        res["sanity_correct"] += int(expected in folded)
         res["sanity_finished_cleanly"] += int(bool(st) and st.get("finish_reason") == "stop")
-        if expected not in out.lower():
+        note(st, f"sanity {expected!r}")
+        if expected not in folded:
             fails.append(f"sanity: {q!r} -> {out[:80]!r}")
 
     res["fails"] = fails
@@ -206,7 +246,14 @@ def main():
     ap.add_argument("--tolerance", type=int, default=1,
                     help="allowed drop in correct answers per suite before it's a regression (default 1)")
     ap.add_argument("-v", "--verbose", action="store_true", help="print every failing problem")
+    ap.add_argument("--greedy", action="store_true",
+                    help="temperature 0 instead of the model's sampling presets (reasoning models loop on it)")
+    ap.add_argument("--think", choices=("auto", "on", "off"), default="auto",
+                    help="reasoning mode: auto = the model's own template default (small Qwen3.5 models: off)")
     args = ap.parse_args()
+    global GREEDY, THINK
+    GREEDY = args.greedy
+    THINK = {"auto": None, "on": True, "off": False}[args.think]
 
     paths = model_paths(args)
     base_all = {}
@@ -234,6 +281,9 @@ def main():
             print(line)
         print(f"sanity finished cleanly (not cut off mid-thought): "
               f"{res['sanity_finished_cleanly']}/{res['sanity_total']}")
+        total = res["math_total"] + res["code_total"] + res["sanity_total"]
+        print(f"replies where reasoning was force-closed: {res['think_forced']}/{total}"
+              f" · hit the token limit: {res['truncated']}/{total}")
         if args.verbose and res["fails"]:
             print("  " + "\n  ".join(res["fails"]))
 
