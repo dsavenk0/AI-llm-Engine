@@ -21,17 +21,40 @@ func L(_ en: String, _ ru: String) -> String { useRussian ? ru : en }
 
 /// Light/dark is resolved from the "theme" setting (system / dark / light).
 var lightTheme = false
+/// True while the system's Liquid Glass backs the panel (macOS 26+, "Liquid glass" on): cards then
+/// carry their own light backing so text stays readable over the clear glass.
+var glassActive = false
+/// The glass setting as it was when the panel was built. The window's view hierarchy is created once;
+/// swapping it live made a view cycle (infinite recursion in cursorUpdate: → crash), so a change of
+/// the setting is applied at the next launch and the settings tab says so.
+var glassAtLaunch: Bool? = nil
+/// Density of the card backing in glass mode (0.22 … 0.62 across the transparency slider): the window
+/// itself stays nearly clear and the blocks carry the legibility — still glass, never a solid plate.
+var glassCardShade = 0.39
+
+func relaunchApp() {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    p.arguments = ["-n", Bundle.main.bundlePath]
+    try? p.run()
+    NSApp.terminate(nil)
+}
 
 enum HUD {
     static var cyan: Color { lightTheme ? Color(red: 0.0, green: 0.45, blue: 0.62) : Color(red: 0.0, green: 0.90, blue: 1.0) }
     static var phosphor: Color { lightTheme ? Color(red: 0.0, green: 0.56, blue: 0.45) : Color(red: 0.30, green: 0.95, blue: 0.76) }  // mint
     static var magenta: Color { lightTheme ? Color(red: 0.82, green: 0.08, blue: 0.40) : Color(red: 1.0, green: 0.18, blue: 0.53) }
-    static var amber: Color { lightTheme ? Color(red: 0.78, green: 0.42, blue: 0.0) : Color(red: 1.0, green: 0.64, blue: 0.16) }
+    static var amber: Color { yellow }   // warnings / "busy" use the same cyberpunk yellow — no separate orange
+    /// Cyberpunk yellow: the one warm colour (replaces the former orange). Details, bars and warnings; never large fills.
+    static var yellow: Color { lightTheme ? Color(red: 0.70, green: 0.56, blue: 0.0) : Color(red: 1.0, green: 0.94, blue: 0.0) }
     static var ink: Color { lightTheme ? Color(red: 0.97, green: 0.98, blue: 0.99) : Color(red: 0.02, green: 0.04, blue: 0.06) }
     static var text: Color { lightTheme ? Color(red: 0.05, green: 0.09, blue: 0.13) : Color(red: 0.86, green: 0.95, blue: 0.98) }
     static var dim: Color { lightTheme ? Color(red: 0.36, green: 0.43, blue: 0.48) : Color(red: 0.45, green: 0.58, blue: 0.64) }
     static var glow: Double { lightTheme ? 0.25 : 1.0 }   // neon glow is for dark glass only
-    static var panel: Color { lightTheme ? Color.white.opacity(0.42) : Color.black.opacity(0.20) }
+    static var panel: Color {
+        if glassActive { return lightTheme ? Color.white.opacity(glassCardShade * 0.9) : Color.black.opacity(glassCardShade) }
+        return lightTheme ? Color.white.opacity(0.42) : Color.black.opacity(0.20)
+    }
     static var track: Color { lightTheme ? Color.black.opacity(0.07) : Color.white.opacity(0.06) }
 
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
@@ -39,21 +62,41 @@ enum HUD {
     }
 }
 
-/// Hairline-framed glass card.
+/// Hairline-framed glass card. In Liquid Glass mode it is "dark glass": a graded dark fill whose density
+/// follows the transparency slider, a specular sheen along the top and a light rim.
 struct Card<Content: View>: View {
     var glow: Color = HUD.cyan
     @ViewBuilder let content: Content
+
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
+
+    @ViewBuilder private var backing: some View {
+        if glassActive {
+            let d = glassCardShade
+            ZStack {
+                shape.fill(LinearGradient(
+                    colors: lightTheme
+                        ? [Color.white.opacity(min(1, d * 0.80)), Color(red: 0.86, green: 0.91, blue: 0.95).opacity(min(1, d * 0.95))]
+                        : [Color(red: 0.16, green: 0.22, blue: 0.30).opacity(min(1, d * 0.80)), Color(red: 0.03, green: 0.06, blue: 0.10).opacity(min(1, d * 0.95))],
+                    startPoint: .top, endPoint: .bottom))
+                // specular sheen: light catching the upper edge of the glass
+                shape.fill(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.45 : 0.18), .clear],
+                                          startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.5)))
+                shape.strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.9 : 0.38), glow.opacity(0.30), glow.opacity(0.12)],
+                                                  startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            }
+        } else {
+            shape.fill(HUD.panel)
+                .overlay(shape.strokeBorder(LinearGradient(colors: [glow.opacity(0.45), glow.opacity(0.08)],
+                                                           startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) { content }
             .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(HUD.panel)
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(LinearGradient(colors: [glow.opacity(0.45), glow.opacity(0.08)],
-                                                     startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
-            )
+            .background(backing)
     }
 }
 
@@ -219,6 +262,8 @@ struct ModelInfo: Identifiable, Hashable {
     let size: Double
     let vision, thinking, thinkingDefault, supported: Bool
     let efforts: [String]
+    var route = "native"            // native · ptq1 (experimental) · mlxlm (optional mlx-lm backend)
+    var problems: [String] = []     // why the engine cannot run it, when supported == false
     var id: String { path }
 }
 
@@ -243,6 +288,10 @@ final class EngineState: ObservableObject {
            let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { config = j }
         let theme = config["theme"] as? String ?? "system"
         lightTheme = theme == "light" || (theme == "system" && NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua)
+        if glassAtLaunch == nil { glassAtLaunch = config["glass"] as? Bool ?? false }
+        let gt = min(0.85, max(0.15, config["glass_transparency"] as? Double ?? 0.55))
+        glassCardShade = 0.22 + (0.85 - gt) * (0.40 / 0.70)
+        if #available(macOS 26.0, *) { glassActive = glassAtLaunch ?? false } else { glassActive = false }
         let lang = config["lang"] as? String ?? "auto"
         useRussian = lang == "ru" || (lang == "auto" && (Locale.preferredLanguages.first?.hasPrefix("ru") ?? false))
     }
@@ -258,14 +307,17 @@ final class EngineState: ObservableObject {
     func setG(_ k: String, _ v: Any?) { config[k] = v; saveConfig() }
 
     var modelPath: String { config["model"] as? String ?? "" }
-    func m<T>(_ k: String, _ def: T) -> T {
-        ((config["models"] as? [String: Any])?[modelPath] as? [String: Any])?[k] as? T ?? def
+    /// per-model settings, for any model (not only the active one)
+    func mm<T>(_ path: String, _ k: String, _ def: T) -> T {
+        ((config["models"] as? [String: Any])?[path] as? [String: Any])?[k] as? T ?? def
     }
-    func setM(_ k: String, _ v: Any) {
+    func setMM(_ path: String, _ k: String, _ v: Any) {
         var all = config["models"] as? [String: Any] ?? [:]
-        var mine = all[modelPath] as? [String: Any] ?? [:]
-        mine[k] = v; all[modelPath] = mine; config["models"] = all; saveConfig()
+        var mine = all[path] as? [String: Any] ?? [:]
+        mine[k] = v; all[path] = mine; config["models"] = all; saveConfig()
     }
+    func m<T>(_ k: String, _ def: T) -> T { mm(modelPath, k, def) }
+    func setM(_ k: String, _ v: Any) { setMM(modelPath, k, v) }
     func adv(_ k: String) -> String {
         guard let v = (config["advanced"] as? [String: Any])?[k], !(v is NSNull) else { return "" }
         return "\(v)"
@@ -300,12 +352,13 @@ final class EngineState: ObservableObject {
                           format: $0["format"] as? String ?? "", size: $0["size"] as? Double ?? 0,
                           vision: $0["vision"] as? Bool ?? false, thinking: $0["thinking"] as? Bool ?? false,
                           thinkingDefault: $0["thinking_default"] as? Bool ?? true,
-                          supported: $0["supported"] as? Bool ?? false, efforts: $0["efforts"] as? [String] ?? [])
+                          supported: $0["supported"] as? Bool ?? false, efforts: $0["efforts"] as? [String] ?? [],
+                          route: $0["route"] as? String ?? "native", problems: $0["problems"] as? [String] ?? [])
             }
         }
     }
 
-    func command(_ args: [String], label: String) {
+    func command(_ args: [String], label: String, then: (() -> Void)? = nil) {
         busy = label
         message = nil
         CLI.run(args) { code, out in
@@ -316,6 +369,7 @@ final class EngineState: ObservableObject {
             }
             self.loadConfig()
             self.poll()
+            then?()
         }
     }
 }
@@ -709,6 +763,12 @@ struct SettingsTab: View {
 
     var model: ModelInfo? { e.models.first { $0.path == e.modelPath } }
 
+    /// the glass setting differs from what this launch built the window with (macOS 26 only)
+    var glassNeedsRestart: Bool {
+        if #available(macOS 26.0, *) { return e.g("glass", false) != (glassAtLaunch ?? false) }
+        return false
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             Card {
@@ -796,6 +856,31 @@ struct SettingsTab: View {
                               [("auto", L("System", "Системный")), ("en", "English"), ("ru", "Русский")])
                 labeledPicker(L("Theme", "Тема"), Binding(get: { e.g("theme", "system") }, set: { e.setG("theme", $0); e.loadConfig(); e.onTheme?() }),
                               [("system", L("System", "Системная")), ("dark", L("Dark", "Тёмная")), ("light", L("Light", "Светлая"))])
+                toggle(L("Liquid glass background", "Фон «жидкое стекло»"), Binding(get: { e.g("glass", false) }, set: { e.setG("glass", $0) }),
+                       hint: L("A lighter, see-through panel that lets the desktop show through. Off by default.",
+                               "Более лёгкая прозрачная панель, сквозь которую виден рабочий стол. По умолчанию выключено."))
+                if glassNeedsRestart {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.clockwise.circle.fill").foregroundColor(HUD.amber)
+                        Text(L("Restart LLMBar to apply the background change.", "Перезапустите LLMBar, чтобы применить смену фона."))
+                            .font(.system(size: 11)).foregroundColor(HUD.text).fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                        Button(action: relaunchApp) {
+                            Text(L("Restart", "Перезапустить")).font(.system(size: 11, weight: .semibold)).foregroundColor(HUD.text)
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                        }.buttonStyle(StrongButton(color: HUD.amber))
+                    }
+                }
+                if e.g("glass", false) {
+                    HStack(spacing: 10) {
+                        Text(L("Transparency", "Прозрачность")).font(.system(size: 12)).foregroundColor(HUD.text)
+                        Slider(value: Binding(get: { e.g("glass_transparency", 0.55) }, set: { e.setG("glass_transparency", $0); e.loadConfig() }),
+                               in: 0.15...0.85).tint(HUD.cyan)
+                        Text("\(Int(e.g("glass_transparency", 0.55) * 100))%").font(HUD.mono(10)).foregroundColor(HUD.dim).frame(width: 36, alignment: .trailing)
+                    }
+                    Hint(text: L("Higher = more see-through; lower keeps text easier to read over busy wallpapers.",
+                                 "Больше — прозрачнее; меньше — текст читается лучше на пёстрых обоях."))
+                }
             }
             Card(glow: HUD.amber) {
                 DisclosureGroup(isExpanded: $advanced) {
@@ -879,6 +964,7 @@ struct HubModel: Identifiable {
     let downloads: Int
     let size: Double?
     let compatible, local, fits: Bool
+    var route = "native"
 }
 
 final class Downloader: ObservableObject {
@@ -941,6 +1027,62 @@ struct ModelsTab: View {
     @State private var results: [HubModel] = []
     @State private var searching = false
     @State private var searchError: String? = nil
+    @State private var editing: String? = nil
+
+    /// what the row says besides size and format: why it cannot run, or which route it takes
+    func note(_ m: ModelInfo) -> String {
+        if !m.supported { return " · " + (m.problems.isEmpty ? L("unsupported", "не поддерживается") : m.problems.joined(separator: ", ")) }
+        switch m.route {
+        case "ptq1": return " · " + L("experimental", "экспериментально")
+        case "mlxlm": return " · mlx-lm"
+        default: return ""
+        }
+    }
+
+    func confirmDelete(_ m: ModelInfo) {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = L("Delete \(m.name)?", "Удалить \(m.name)?")
+        a.informativeText = L("\(String(format: "%.1f", m.size)) GB will be removed from disk. You can download it again later.",
+                              "С диска будет удалено \(String(format: "%.1f", m.size)) ГБ. Модель можно скачать снова.")
+        a.addButton(withTitle: L("Delete", "Удалить"))
+        a.addButton(withTitle: L("Cancel", "Отмена"))
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        e.command(["rm", m.path, "--yes"], label: "rm") { e.loadModels() }
+    }
+
+    /// per-model settings, editable without making the model active; applied on its next start
+    func modelSettings(_ m: ModelInfo) -> some View {
+        func num(_ label: String, _ key: String, _ def: Int) -> some View {
+            HStack {
+                Text(label).font(.system(size: 11)).foregroundColor(HUD.text)
+                Spacer()
+                TextField("", text: Binding(get: { "\(e.mm(m.path, key, def))" },
+                                            set: { if let v = Int($0.filter(\.isNumber)) { e.setMM(m.path, key, v) } }))
+                    .font(HUD.mono(11)).frame(width: 90).multilineTextAlignment(.trailing).textFieldStyle(.roundedBorder)
+            }
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            num(L("Context, tokens (0 = auto)", "Контекст, токенов (0 = авто)"), "context", 0)
+            num(L("Max output, tokens", "Макс. ответ, токенов"), "max_output", 8192)
+            if m.thinking {
+                Toggle(isOn: Binding(get: { e.mm(m.path, "thinking", m.thinkingDefault) },
+                                     set: { e.setMM(m.path, "thinking", $0) })) {
+                    Text(L("Reasoning by default", "Рассуждения по умолчанию")).font(.system(size: 11)).foregroundColor(HUD.text)
+                }.toggleStyle(.switch).tint(HUD.cyan)
+                if !m.efforts.isEmpty {
+                    Picker("", selection: Binding(get: { e.mm(m.path, "effort", "medium") }, set: { e.setMM(m.path, "effort", $0) })) {
+                        ForEach(m.efforts, id: \.self) { Text($0).tag($0) }
+                    }.pickerStyle(.segmented).labelsHidden()
+                }
+            }
+            Hint(text: m.path == e.modelPath && e.running
+                 ? L("Applied the next time this model starts", "Применится при следующем запуске модели")
+                 : L("Saved for this model", "Сохраняется для этой модели"))
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(HUD.track.opacity(0.35)))
+    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -948,24 +1090,40 @@ struct ModelsTab: View {
                 Caption(text: L("Installed", "Установленные"))
                 if e.models.isEmpty { Hint(text: L("No models yet — search the hub below", "Моделей пока нет — найдите ниже")) }
                 ForEach(e.models) { m in
-                    HStack(spacing: 8) {
-                        Circle().fill(m.path == e.modelPath ? HUD.phosphor : HUD.track).frame(width: 7, height: 7)
-                            .shadow(color: HUD.phosphor.opacity(m.path == e.modelPath ? HUD.glow : 0), radius: 3)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(m.name).font(.system(size: 12, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
-                            Text("\(String(format: "%.1f", m.size)) GB · \(m.format)" + (m.supported ? "" : L(" · unsupported", " · не поддерживается")))
-                                .font(HUD.mono(9)).foregroundColor(m.supported ? HUD.dim : HUD.magenta).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Circle().fill(m.path == e.modelPath ? HUD.phosphor : HUD.track).frame(width: 7, height: 7)
+                                .shadow(color: HUD.phosphor.opacity(m.path == e.modelPath ? HUD.glow : 0), radius: 3)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(m.name).font(.system(size: 12, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
+                                Text("\(String(format: "%.1f", m.size)) GB · \(m.format)" + note(m))
+                                    .font(HUD.mono(9)).foregroundColor(m.supported ? HUD.dim : HUD.magenta).lineLimit(1)
+                                    .help(m.supported ? "" : m.problems.joined(separator: ", "))
+                            }
+                            Spacer()
+                            if m.path == e.modelPath {
+                                Text(L("ACTIVE", "АКТИВНА")).font(HUD.mono(9, .semibold)).tracking(1.2).foregroundColor(HUD.phosphor)
+                            } else if m.supported {
+                                Button(action: {
+                                    e.setG("model", m.path)
+                                    if e.running { e.command(["restart"], label: "restart") }
+                                }) {
+                                    Text(L("Use", "Включить")).font(HUD.mono(10, .semibold)).lineLimit(1)
+                                        .padding(.horizontal, 12).padding(.vertical, 5)
+                                }.buttonStyle(NeonButton(color: HUD.cyan)).fixedSize().disabled(e.busy != nil)
+                                    .help(L("Make this the active model (restarts the engine if it runs)", "Сделать активной (движок перезапустится, если работает)"))
+                            }
+                            Menu {
+                                if m.supported {
+                                    Button(L("Model settings…", "Настройки модели…")) { editing = editing == m.path ? nil : m.path }
+                                }
+                                Button(L("Delete from disk…", "Удалить с диска…"), role: .destructive) { confirmDelete(m) }
+                                    .disabled(m.path == e.modelPath && e.running)
+                            } label: { Image(systemName: "ellipsis.circle") }
+                                .menuStyle(.borderlessButton).fixedSize().foregroundColor(HUD.dim)
+                                .help(m.path == e.modelPath && e.running ? L("Stop the engine to delete the active model", "Остановите движок, чтобы удалить активную модель") : "")
                         }
-                        Spacer()
-                        if m.path == e.modelPath {
-                            Text(L("ACTIVE", "АКТИВНА")).font(HUD.mono(9, .semibold)).tracking(1.2).foregroundColor(HUD.phosphor)
-                        } else if m.supported {
-                            Button(L("Use", "Включить")) {
-                                e.setG("model", m.path)
-                                if e.running { e.command(["restart"], label: "restart") }
-                            }.buttonStyle(NeonButton(color: HUD.cyan)).font(HUD.mono(10, .semibold)).disabled(e.busy != nil)
-                                .help(L("Make this the active model (restarts the engine if it runs)", "Сделать активной (движок перезапустится, если работает)"))
-                        }
+                        if editing == m.path { modelSettings(m) }
                     }
                 }
             }
@@ -1001,7 +1159,12 @@ struct ModelsTab: View {
                             HStack(spacing: 6) {
                                 badge(r.size.map { String(format: "%.1f GB", $0) } ?? "? GB", HUD.dim)
                                 badge("⬇ \(r.downloads >= 1000 ? "\(r.downloads / 1000)K" : "\(r.downloads)")", HUD.dim)
-                                badge(r.compatible ? L("engine ✓", "движок ✓") : L("other engine", "другой движок"), r.compatible ? HUD.phosphor : HUD.dim)
+                                switch r.route {
+                                case "native": badge(L("engine ✓", "движок ✓"), HUD.phosphor)
+                                case "ptq1": badge(L("PTQ1 · experimental", "PTQ1 · эксперим."), HUD.cyan)
+                                case "mlxlm": badge(L("via mlx-lm", "через mlx-lm"), HUD.cyan)
+                                default: badge(L("not supported", "не поддерживается"), HUD.dim)
+                                }
                                 if r.size != nil { badge(r.fits ? L("fits RAM", "влезет") : L("too big", "не влезет"), r.fits ? HUD.cyan : HUD.magenta) }
                             }
                         }
@@ -1013,7 +1176,7 @@ struct ModelsTab: View {
                                 .buttonStyle(.plain).font(.system(size: 16)).foregroundColor(r.compatible ? HUD.phosphor : HUD.dim)
                                 .disabled(dl.repo != nil)
                                 .help(r.compatible ? L("Download (resumable)", "Скачать (с докачкой)")
-                                                   : L("Downloads, but this engine cannot run it", "Скачается, но этот движок её не запустит"))
+                                                   : L("Downloads, but no backend here can run it", "Скачается, но ни один бэкенд её не запустит"))
                         }
                     }.padding(.vertical, 2)
                 }
@@ -1039,7 +1202,8 @@ struct ModelsTab: View {
             }
             results = arr.map {
                 HubModel(id: $0["id"] as? String ?? "?", downloads: $0["downloads"] as? Int ?? 0, size: $0["size"] as? Double,
-                         compatible: $0["compatible"] as? Bool ?? false, local: $0["local"] as? Bool ?? false, fits: $0["fits"] as? Bool ?? false)
+                         compatible: $0["compatible"] as? Bool ?? false, local: $0["local"] as? Bool ?? false, fits: $0["fits"] as? Bool ?? false,
+                         route: $0["route"] as? String ?? "native")
             }
         }
     }
@@ -1101,6 +1265,17 @@ struct ToolsTab: View {
 
 // MARK: - root
 
+/// A solid, high-contrast button for the one action that must never be missed or misread.
+struct StrongButton: ButtonStyle {
+    var color: Color
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(color.opacity(configuration.isPressed ? 0.60 : 0.34)))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(color, lineWidth: 1.2))
+    }
+}
+
 struct NeonButton: ButtonStyle {
     var color: Color
     func makeBody(configuration: Configuration) -> some View {
@@ -1113,10 +1288,71 @@ struct NeonButton: ButtonStyle {
     }
 }
 
+/// "About" card shown over the panel: what this is, version, who/license, links, and where it runs.
+struct AboutView: View {
+    @ObservedObject var e: EngineState
+    var close: () -> Void
+
+    private var version: String {
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return v ?? "dev"
+    }
+    private var ramGB: Int { Int((Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824).rounded()) }
+
+    private func row(_ k: String, _ v: String) -> some View {
+        HStack(alignment: .top) {
+            Text(k).font(HUD.mono(10)).foregroundColor(HUD.dim).frame(width: 78, alignment: .leading)
+            Text(v).font(HUD.mono(10)).foregroundColor(HUD.text).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea().onTapGesture(perform: close)
+            VStack(spacing: 12) {
+                if let icon = NSApp.applicationIconImage {
+                    Image(nsImage: icon).resizable().frame(width: 64, height: 64)
+                }
+                VStack(spacing: 3) {
+                    Text("AI-llm-Engine · LLMBar").font(.system(size: 15, weight: .semibold)).foregroundColor(HUD.text)
+                    Text(L("Version", "Версия") + " \(version)").font(HUD.mono(10)).foregroundColor(HUD.dim)
+                }
+                Text(L("A lightweight local inference engine for MLX models on Apple silicon, with an OpenAI-compatible API, and this menu-bar app to run it.",
+                       "Лёгкий локальный движок инференса MLX-моделей для Apple silicon с OpenAI-совместимым API и это приложение в строке меню для управления им."))
+                    .font(.system(size: 11)).foregroundColor(HUD.text).multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider().opacity(0.3)
+                VStack(alignment: .leading, spacing: 5) {
+                    row(L("API", "API"), e.apiURL)
+                    row(L("Runs on", "Работает на"), "macOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion) · \(ramGB) GB")
+                    row(L("Author", "Автор"), "Denis Savenko")
+                    row(L("License", "Лицензия"), "Apache-2.0")
+                }
+                HStack(spacing: 14) {
+                    Link("GitHub", destination: URL(string: "https://github.com/dsavenk0/AI-llm-Engine")!)
+                    Link(L("Releases", "Релизы"), destination: URL(string: "https://github.com/dsavenk0/AI-llm-Engine/releases")!)
+                }.font(HUD.mono(11, .semibold)).foregroundColor(HUD.cyan)
+                Text("© 2026 AI-llm-Engine").font(HUD.mono(9)).foregroundColor(HUD.dim)
+                Button(action: close) {
+                    Text(L("Close", "Закрыть")).font(.system(size: 12, weight: .semibold)).foregroundColor(HUD.text)
+                        .padding(.horizontal, 18).padding(.vertical, 6)
+                }.buttonStyle(StrongButton(color: HUD.cyan))
+            }
+            .padding(18)
+            .frame(width: 320)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(lightTheme ? Color.white.opacity(0.92) : Color(red: 0.07, green: 0.09, blue: 0.12).opacity(0.96)))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(HUD.cyan.opacity(0.5), lineWidth: 0.8))
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var e: EngineState
     @ObservedObject var mon: SystemMonitor
     @State private var tab = 0
+    @State private var showAbout = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1142,45 +1378,100 @@ struct ContentView: View {
             if let msg = e.message {
                 Text(msg).font(HUD.mono(10)).foregroundColor(HUD.magenta).lineLimit(3)
             }
-            HStack {
-                Text("AI-llm-ENGINE · SECTION 9 HUD").font(HUD.mono(8, .medium)).tracking(1.6).foregroundColor(HUD.dim.opacity(0.7))
+            HStack(alignment: .bottom) {
+                // rights line: full-contrast dim text, level with the bottom edge of the button
+                Text("© 2026 AI-llm-Engine · Apache-2.0").font(HUD.mono(10)).foregroundColor(HUD.dim)
+                    .lineLimit(1).padding(.bottom, 2)
+                    .help(L("Open-source under the Apache License 2.0", "Открытый код под лицензией Apache 2.0"))
                 Spacer()
-                Button(L("Quit", "Выйти")) { NSApp.terminate(nil) }.buttonStyle(.plain).font(HUD.mono(10)).foregroundColor(HUD.dim)
-                    .help(L("Quit LLMBar; the model keeps running", "Закрыть LLMBar; модель продолжит работать"))
+                Button(action: { NSApp.terminate(nil) }) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "power").font(.system(size: 13, weight: .bold)).foregroundColor(HUD.text)
+                        Text(L("Quit", "Выйти")).font(.system(size: 13, weight: .semibold)).foregroundColor(HUD.text)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(StrongButton(color: HUD.magenta))
+                .help(L("Quit LLMBar; the model keeps running", "Закрыть LLMBar; модель продолжит работать"))
             }
+            .padding(.bottom, 4)
         }
         .padding(16)
         .frame(width: 392)
         .background(background)
+        .overlay { if showAbout { AboutView(e: e) { showAbout = false }.transition(.opacity) } }
+        .animation(.easeOut(duration: 0.15), value: showAbout)
         .environment(\.colorScheme, lightTheme ? .light : .dark)
         .tint(HUD.cyan)
         .onAppear { e.loadModels() }
         .background(Button("") { NSApp.keyWindow?.orderOut(nil) }.keyboardShortcut(.cancelAction).opacity(0))
     }
 
+    /// macOS 26+ has the real thing (NSGlassEffectView, installed behind this view by the window);
+    /// then only a legibility scrim is drawn here, scaled by the transparency slider.
+    var nativeGlass: Bool {
+        if #available(macOS 26.0, *) { return true }
+        return false
+    }
+
     var background: some View {
-        ZStack {
-            VisualEffect()
-            // light tint over the blur — the desktop should show through like frosted glass
-            LinearGradient(colors: lightTheme
-                           ? [Color(red: 0.97, green: 0.99, blue: 1.0).opacity(0.50), Color(red: 0.90, green: 0.94, blue: 0.96).opacity(0.42)]
-                           : [HUD.ink.opacity(0.55), Color(red: 0.03, green: 0.07, blue: 0.10).opacity(0.48)],
-                           startPoint: .top, endPoint: .bottom)
-            // specular sheen across the top
-            LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.35 : 0.07), .clear], startPoint: .top, endPoint: .center)
-            // scanlines
-            Canvas { ctx, size in
-                var y: CGFloat = 0
-                while y < size.height {
-                    ctx.fill(Path(CGRect(x: 0, y: y, width: size.width, height: 0.6)), with: .color(lightTheme ? .black.opacity(0.018) : .white.opacity(0.025)))
-                    y += 3
-                }
+        Group {
+            if nativeGlass && glassActive {
+                let t = min(0.85, max(0.15, e.g("glass_transparency", 0.55)))
+                // the window keeps a floor of dimming (the backdrop never shows through at full strength, so
+                // loose text such as the header stays legible); the cards add their own density on top
+                // (HUD.panel / glassCardShade). Continuous across the slider.
+                let shade = 0.32 + (0.85 - t) * (0.28 / 0.70)   // 0.32 … 0.60: the window never goes fully clear
+                Rectangle().fill(lightTheme ? Color.white.opacity(shade * 0.85) : Color.black.opacity(shade))
+                    .ignoresSafeArea()
+            } else {
+                classicBackground
             }
-            RadialGradient(colors: [HUD.cyan.opacity(0.10), .clear], center: .topTrailing, startRadius: 0, endRadius: 320)
-            // glass rim: a thin light edge that catches the "light" at the top
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.7 : 0.22), HUD.cyan.opacity(0.10), HUD.cyan.opacity(0.06)],
-                                             startPoint: .top, endPoint: .bottom), lineWidth: 1)
+        }
+    }
+
+    var classicBackground: some View {
+        let glass: Bool = !nativeGlass && e.g("glass", false)   // macOS 26 uses the system glass or none
+        let tint = 1 - min(0.85, max(0.15, e.g("glass_transparency", 0.55)))   // tint strength: 1 − transparency
+        return ZStack {
+            VisualEffect(glass: glass)
+            if glass {
+                // liquid glass: a thin tint (strength = what the slider leaves), a soft diagonal highlight
+                // and a two-line rim — no scanlines, so the glass stays clean
+                LinearGradient(colors: lightTheme
+                               ? [Color.white.opacity(tint * 0.55), Color(red: 0.88, green: 0.93, blue: 0.97).opacity(tint * 0.45)]
+                               : [HUD.ink.opacity(tint * 0.85), Color(red: 0.03, green: 0.07, blue: 0.10).opacity(tint * 0.70)],
+                               startPoint: .top, endPoint: .bottom)
+                LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.45 : 0.16), .clear, Color.white.opacity(lightTheme ? 0.12 : 0.04)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.85 : 0.40), Color.white.opacity(0.05),
+                                                          HUD.cyan.opacity(0.18)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.2)
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(Color.white.opacity(lightTheme ? 0.35 : 0.08), lineWidth: 0.6).padding(1.5)
+            } else {
+                // light tint over the blur — the desktop should show through like frosted glass
+                LinearGradient(colors: lightTheme
+                               ? [Color(red: 0.97, green: 0.99, blue: 1.0).opacity(0.50), Color(red: 0.90, green: 0.94, blue: 0.96).opacity(0.42)]
+                               : [HUD.ink.opacity(0.55), Color(red: 0.03, green: 0.07, blue: 0.10).opacity(0.48)],
+                               startPoint: .top, endPoint: .bottom)
+                // specular sheen across the top
+                LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.35 : 0.07), .clear], startPoint: .top, endPoint: .center)
+                // scanlines
+                Canvas { ctx, size in
+                    var y: CGFloat = 0
+                    while y < size.height {
+                        ctx.fill(Path(CGRect(x: 0, y: y, width: size.width, height: 0.6)), with: .color(lightTheme ? .black.opacity(0.018) : .white.opacity(0.025)))
+                        y += 3
+                    }
+                }
+                RadialGradient(colors: [HUD.cyan.opacity(0.10), .clear], center: .topTrailing, startRadius: 0, endRadius: 320)
+                // glass rim: a thin light edge that catches the "light" at the top
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.7 : 0.22), HUD.cyan.opacity(0.10), HUD.cyan.opacity(0.06)],
+                                                 startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            }
         }.ignoresSafeArea()
     }
 
@@ -1198,6 +1489,10 @@ struct ContentView: View {
                     .font(HUD.mono(10)).tracking(0.6).foregroundColor(e.running ? HUD.cyan : HUD.dim)
             }
             Spacer()
+            Button(action: { showAbout = true }) {
+                Image(systemName: "info.circle").font(.system(size: 13, weight: .regular)).frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundColor(HUD.dim).help(L("About", "О приложении"))
             if e.running {
                 iconButton("arrow.clockwise", L("Restart", "Перезапустить")) { e.command(["restart"], label: "restart") }
                 iconButton("power", L("Stop", "Остановить")) { e.command(["stop"], label: "stop") }
@@ -1226,14 +1521,18 @@ struct ContentView: View {
 }
 
 struct VisualEffect: NSViewRepresentable {
+    var glass = false
+    private var material: NSVisualEffectView.Material {
+        glass ? .underWindowBackground : (lightTheme ? .popover : .hudWindow)
+    }
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
-        v.material = lightTheme ? .popover : .hudWindow
+        v.material = material
         v.blendingMode = .behindWindow
         v.state = .active
         return v
     }
-    func updateNSView(_ v: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ v: NSVisualEffectView, context: Context) { v.material = material }
 }
 
 // MARK: - app shell (AppKit: status item, panel, window)
@@ -1268,6 +1567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let monitor = SystemMonitor()
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var window: NSWindow?
+    var hosting: NSHostingView<AnyView>?
     var fastTimer: Timer?
     var hiddenAt = Date.distantPast
 
@@ -1295,6 +1595,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applyTheme() {
         let a = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
         window?.appearance = a
+    }
+
+    /// The panel's content view, built once: the SwiftUI view directly, or — with "Liquid glass" on at
+    /// launch, macOS 26+ — wrapped in the system's NSGlassEffectView (real lensing and refraction).
+    func installContent() {
+        guard let w = window, let host = hosting else { return }
+        if #available(macOS 26.0, *), glassAtLaunch ?? false {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 16
+            // one style for the whole slider range (a style switch at some value was a visible jump);
+            // transparency is the continuous shade in ContentView.background
+            glass.style = .clear   // real see-through glass with edge refraction; legibility comes from the shade + card backing
+            // the content's own layer is rounded too, so nothing square can show at the corners
+            host.wantsLayer = true
+            host.layer?.cornerRadius = 16
+            host.layer?.cornerCurve = .continuous
+            host.layer?.masksToBounds = true
+            host.layer?.backgroundColor = NSColor.clear.cgColor
+            glass.contentView = host
+            w.contentView = glass
+            // the window shadow is computed from the window's alpha once; for glass it comes out as a
+            // sharp rectangle around the rounded panel — the glass draws its own edge, so go without
+            w.hasShadow = false
+        } else {
+            w.contentView = host
+            w.hasShadow = true
+        }
+        DispatchQueue.main.async { w.invalidateShadow() }
     }
 
     var uiVisible: Bool { window?.isVisible ?? false }
@@ -1340,16 +1668,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.isReleasedWhenClosed = false
             w.isOpaque = false
             w.backgroundColor = .clear  // let the vibrancy blur the desktop behind the panel
-            w.contentViewController = NSHostingController(rootView: ContentView(e: engine, mon: monitor)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).ignoresSafeArea())
+            hosting = NSHostingView(rootView: AnyView(ContentView(e: engine, mon: monitor)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).ignoresSafeArea()))
             w.delegate = self  // closes on Esc or when focus leaves
             window = w
+            installContent()
         }
         // under the icon if it is visible, else the top-right corner — always fully on screen
         if let w = window, !w.isVisible || anchorX != nil, let screen = NSScreen.main {
             let v = screen.visibleFrame
             // the frame is still empty before SwiftUI lays out — size from the content instead
-            var size = w.contentViewController?.view.fittingSize ?? .zero
+            var size = hosting?.fittingSize ?? .zero
             if size.width < 100 || size.height < 100 { size = NSSize(width: 392, height: 680) }
             let h = min(size.height, v.height - 8)
             // Under the icon when opened by a click on it; otherwise (launch, double-click) the

@@ -66,6 +66,9 @@ DEFAULTS = {
                                  # draft_max, ngram_min, cache_limit_mb (missing/null = engine default)
     "mem_limit": 88,             # % of system RAM the whole Mac may use; the engine trims/stops above it
     "lang": "auto",              # auto | en | ru
+    "theme": "system",           # LLMBar: system | dark | light
+    "glass": False,              # LLMBar: optional liquid-glass panel background
+    "glass_transparency": 0.55,  # LLMBar: 0.15 (denser) … 0.85 (more see-through)
     "models": {},
 }
 MODEL_DEFAULTS = {

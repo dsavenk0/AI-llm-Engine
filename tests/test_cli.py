@@ -310,3 +310,21 @@ class TestDeleteModel(unittest.TestCase):
         with mock.patch.object(llm, "ask_yn", lambda *a, **k: False):
             self.assertFalse(llm.delete_model(self.cfg, {"path": d, "name": "demo"}))
         self.assertTrue(os.path.isdir(d))
+
+
+class TestConfigKeepsAppSettings(unittest.TestCase):
+    """LLMBar writes UI settings into the same file the CLI loads and saves; the CLI must not drop them."""
+
+    def test_ui_keys_survive_a_load_save_roundtrip(self):
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "config.json")
+        with open(path, "w") as f:
+            json.dump({"theme": "light", "glass": True, "glass_transparency": 0.3, "port": 8123, "unknown": 1}, f)
+        with mock.patch.object(llm, "CFG_FILE", path), mock.patch.object(llm, "STATE", d):
+            c = llm.load_cfg()
+            self.assertEqual((c["theme"], c["glass"], c["glass_transparency"], c["port"]), ("light", True, 0.3, 8123))
+            llm.save_cfg(c)
+            again = llm.load_cfg()
+        self.assertEqual((again["theme"], again["glass"], again["glass_transparency"]), ("light", True, 0.3))
+        self.assertEqual((llm.DEFAULTS["theme"], llm.DEFAULTS["glass"]), ("system", False))

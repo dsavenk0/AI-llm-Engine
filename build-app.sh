@@ -15,7 +15,7 @@ swiftc -O -o "$APP/Contents/MacOS/LLMBar" "$ROOT/app/LLMBar.swift"
 
 echo "▸ Bundling engine + CLI…"
 for f in llm llm.py agent.py requirements.txt LICENSE NOTICE; do cp "$ROOT/$f" "$APP/Contents/Resources/llm/"; done
-for d in engine locales third_party; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
+for d in engine harness locales third_party; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
 find "$APP/Contents/Resources/llm" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -26,6 +26,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>LLMBar</string>
   <key>CFBundleDisplayName</key><string>LLMBar</string>
   <key>CFBundleIdentifier</key><string>local.llm-engine.llmbar</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 AI-llm-Engine · Apache-2.0</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key><string>APPL</string>
