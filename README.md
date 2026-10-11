@@ -181,6 +181,16 @@ read and search files, write files, make exact edits and run shell commands, all
 and commands show a diff or the command line and ask first; `/auto` approves them for the session. It speaks the
 user's language.
 
+Optional extras, each off until you ask (nothing is contacted or added to the prompt by default):
+
+| Command | What it does |
+|---|---|
+| `/web on` | `web_search` and `web_fetch`: search the internet (DuckDuckGo, no key; `LLM_SEARCH_URL` for a SearxNG) and read pages as clean text. Private/LAN addresses are refused; one question per session before anything goes out. |
+| `/mcp add context7`, `/mcp on` | MCP servers from `.llm/mcp.json` (stdio or HTTP): Context7 for current library docs, [Stitch](https://stitch.withgoogle.com/) for UI designs (`/mcp add stitch`, key in `STITCH_API_KEY`). Switch whole servers or single tools; `/mcp` shows status and what the tool definitions cost per request. |
+| `/fix-tests [command]` | Runs the tests, gives the model only the failing tests with tracebacks, lets it edit (each edit still asks), re-runs. Stops on green, after 5 rounds, or when two attempts change nothing. |
+| `/memory`, `/remember <note>` | Standing project instructions from `.llm/memory.md`, `AGENTS.md` or `CLAUDE.md`. |
+| `/compact` | Long sessions are compacted automatically at 70% of the context window; this does it now. |
+
 ### Editors: Continue, Kilo Code, opencode
 
 Nothing is tied to one editor. Run `./llm connect` and pick one, or name it directly:
@@ -251,7 +261,7 @@ compatibility for every model it finds.
 engine/   model.py (layers, Hadamard, fused ops) · loader.py · vision.py · gated_delta.py
           tokenizer.py · generate.py (cache, sampling) · server.py (HTTP)
 llm.py    CLI / menu (stdlib only) — locales/ru.json for Russian
-agent.py  terminal coding agent (stdlib only)
+agent.py  terminal coding agent (stdlib only) · harness/ optional web / MCP / memory / compaction / fix-tests modules
 app/      LLMBar.swift (menu-bar app)
 tools/    icon / DMG background / banner generators (Swift)
 build-app.sh, build-dmg.sh
