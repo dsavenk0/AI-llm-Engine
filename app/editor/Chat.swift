@@ -193,7 +193,6 @@ final class ChatStore: ObservableObject {
 struct ChatModuleView: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var store: ChatStore
-    @State private var draft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -210,7 +209,7 @@ struct ChatModuleView: View {
                 .onChange(of: store.items.count) { _ in proxy.scrollTo("end") }
             }
             Divider()
-            Composer(ws: ws, store: store, draft: $draft)
+            Composer(ws: ws, store: store, draft: $ws.draft)
         }
     }
 }

@@ -8,7 +8,7 @@ enum LayoutMode: String { case chat, ide }
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
-    case files, outline, git, chat
+    case files, outline, git, chat, problems, terminal
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -16,6 +16,8 @@ enum ModuleID: String, CaseIterable, Identifiable {
         case .outline: return "Outline"
         case .git: return "Changes (git)"
         case .chat: return "Assistant"
+        case .problems: return "Problems"
+        case .terminal: return "Terminal"
         }
     }
 }
@@ -48,7 +50,9 @@ final class OpenFile: ObservableObject, Identifiable {
     @Published var language: String
     @Published var spans: [Span]
     @Published var outline: [Symbol]
+    @Published var diagnostics: [Diagnostic] = []     // built-in checks + the language's parser, when run
     @Published var jumpLine: Int?          // set by the outline / search, consumed by the editor
+    var deepDiagnostics: [Diagnostic] = []
     var version = 0                        // bumped on every edit; stale analysis results are dropped
     var id: String { path }
     var dirty: Bool { text != saved }
@@ -83,6 +87,56 @@ final class Workspace: ObservableObject {
     @Published var cursor = (line: 1, col: 1)
     @Published var pendingApply: (code: String, hint: String?)?
     @Published var allFiles: [String] = []
+    @Published var problemSummary = (errors: 0, warnings: 0)
+    @Published var draft = ""                 // the assistant's composer text (shared so other modules can fill it)
+    var onAsk: (() -> Void)?                  // set by the shell: switch to the assistant and focus the composer
+    @Published var bottomVisible = false
+    @Published var bottomTab = "problems"
+    private var terminal: TerminalSession?
+
+    /// The shell is created the first time the panel asks for it (and only then started).
+    func terminalSession() -> TerminalSession {
+        if let t = terminal, t.cwd == root { return t }
+        terminal?.stop()
+        let t = TerminalSession(cwd: root)
+        terminal = t
+        return t
+    }
+    func showPanel(_ tab: String) { bottomTab = tab; bottomVisible = true }
+    func recountProblems() {
+        let all = open.flatMap(\.diagnostics)
+        problemSummary = (all.filter(\.isError).count, all.filter { !$0.isError }.count)
+    }
+
+    /// Put a question in the assistant's composer (with the file attached) and bring the assistant forward.
+    func ask(_ prompt: String, attach path: String? = nil) {
+        if let path { attach(path) }
+        draft = prompt
+        onAsk?()
+    }
+
+    /// "Fix this problem": the message, the code around it and the file.
+    func askAboutProblem(_ d: Diagnostic, in f: OpenFile) {
+        let lines = f.text.components(separatedBy: "\n")
+        let lo = max(1, d.line - 3), hi = min(lines.count, d.line + 3)
+        let excerpt = (lo...max(lo, hi)).map { n in
+            (n == d.line ? "› " : "  ") + String(format: "%4d  ", n) + (n - 1 < lines.count ? lines[n - 1] : "")
+        }.joined(separator: "\n")
+        ask("Fix this \(d.severity) in `\(f.path)` (line \(d.line), \(d.source)): \(d.message)\n\n```\n\(excerpt)\n```",
+            attach: f.path)
+    }
+
+    func askAboutProblems(of f: OpenFile) {
+        let list = f.diagnostics.prefix(15).map { "- line \($0.line): \($0.message) (\($0.source))" }.joined(separator: "\n")
+        ask("`\(f.path)` has these problems — please fix them:\n\n\(list)", attach: f.path)
+    }
+
+    func askAboutTerminal(_ output: String) {
+        let tail = output.components(separatedBy: "\n").suffix(60).joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        ask("This came out of the terminal in `\((root as NSString).lastPathComponent)`. What is wrong and how do I fix it?\n\n```\n\(tail)\n```",
+            attach: active?.path)
+    }
 
     private var pollTask: Task<Void, Never>?
 
@@ -127,7 +181,7 @@ final class Workspace: ObservableObject {
         }
     }
 
-    func shutdown() { pollTask?.cancel(); backend.stop() }
+    func shutdown() { pollTask?.cancel(); terminal?.stop(); backend.stop() }
 
     private func startPolling() {
         pollTask?.cancel()
@@ -175,6 +229,7 @@ final class Workspace: ObservableObject {
             f.jumpLine = line
             self.open.append(f)
             self.activePath = f.path
+            await self.analyze(f)                  // diagnostics for a file the moment it opens
         }
     }
 
@@ -188,6 +243,7 @@ final class Workspace: ObservableObject {
         }
         open.removeAll { $0.path == path }
         if activePath == path { activePath = open.last?.path }
+        recountProblems()
     }
 
     func save() {
@@ -220,6 +276,24 @@ final class Workspace: ObservableObject {
         guard let r: AnalyzeResponse = try? await backend.request("POST", "/api/analyze", body: ["path": f.path, "text": text]),
               f.version == v else { return }
         f.spans = r.spans; f.outline = r.outline; f.language = r.language
+        f.diagnostics = (r.diagnostics ?? []) + f.deepDiagnostics.filter { d in
+            !(r.diagnostics ?? []).contains { $0.line == d.line } }
+        recountProblems()
+        scheduleDeepCheck(f)
+    }
+
+    /// The language's own parser (swiftc/node/bash…), run once the buffer has been quiet for a moment.
+    private func scheduleDeepCheck(_ f: OpenFile) {
+        let v = f.version
+        Task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard f.version == v, f.text.utf8.count < 400_000 else { return }
+            guard let r: DiagnosticsResponse = try? await self.backend.request(
+                "POST", "/api/diagnostics", body: ["path": f.path, "text": f.text, "deep": true]), f.version == v else { return }
+            f.deepDiagnostics = r.diagnostics
+            f.diagnostics = r.diagnostics
+            self.recountProblems()
+        }
     }
 
     func refreshGit() async {

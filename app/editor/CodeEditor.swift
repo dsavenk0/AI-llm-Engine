@@ -29,6 +29,7 @@ enum Syntax {
 /// Draws 1-based line numbers next to the text view.
 final class LineNumberRuler: NSRulerView {
     private weak var textView: NSTextView?
+    var marks: [Int: Bool] = [:] { didSet { needsDisplay = true } }      // line → has an error (else a warning)
 
     init(textView: NSTextView, scrollView: NSScrollView) {
         self.textView = textView
@@ -68,6 +69,10 @@ final class LineNumberRuler: NSRulerView {
             let label = "\(line)" as NSString
             let size = label.size(withAttributes: attrs)
             label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y + (frag.height - size.height) / 2), withAttributes: attrs)
+            if let isError = marks[line] {
+                (isError ? NSColor.systemRed : NSColor.systemYellow).setFill()
+                NSBezierPath(ovalIn: NSRect(x: 5, y: y + (frag.height - 7) / 2, width: 7, height: 7)).fill()
+            }
             line += 1
             let next = NSMaxRange(lineRange)
             if next <= index { break }
@@ -135,6 +140,7 @@ struct CodeEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         private var shownPath = ""
         private var appliedSpans = -1
+        private var appliedDiag = -1
         private var applying = false
         private var timer: Timer?
 
@@ -160,7 +166,7 @@ struct CodeEditor: NSViewRepresentable {
                 tv.setSelectedRange(NSRange(location: min(sel.location, (f.text as NSString).length), length: 0))
                 applying = false
                 paint(f)
-            } else if appliedSpans != f.spans.count || f.spans.isEmpty { paint(f) }
+            } else if appliedSpans != f.spans.count || f.spans.isEmpty || appliedDiag != diagSignature(f) { paint(f) }
             if let line = f.jumpLine {
                 f.jumpLine = nil
                 let off = OffsetMap(f.text).lineStart(line, in: f.text)
@@ -185,8 +191,29 @@ struct CodeEditor: NSViewRepresentable {
                     storage.addAttribute(.font, value: NSFontManager.shared.convert(Syntax.font, toHaveTrait: .italicFontMask), range: r)
                 }
             }
+            // problems: a dotted underline in the severity colour, the message as a tooltip
+            var marks: [Int: Bool] = [:]
+            for d in f.diagnostics {
+                let start = OffsetMap.position(line: d.line, col: d.col, in: f.text)
+                var end = OffsetMap.position(line: d.line, col: max(d.col + 1, d.end_col ?? d.col + 1), in: f.text)
+                if end <= start { end = min(storage.length, start + 1) }
+                guard start < storage.length else { continue }
+                let r = NSRange(location: start, length: min(end, storage.length) - start)
+                let color = d.isError ? NSColor.systemRed : NSColor.systemYellow
+                storage.addAttributes([.underlineStyle: NSUnderlineStyle.single.rawValue | NSUnderlineStyle.patternDot.rawValue,
+                                       .underlineColor: color, .toolTip: "\(d.message)  (\(d.source))"], range: r)
+                marks[d.line] = (marks[d.line] ?? false) || d.isError
+            }
+            (tv.enclosingScrollView?.verticalRulerView as? LineNumberRuler)?.marks = marks
             storage.endEditing()
             appliedSpans = f.spans.count
+            appliedDiag = diagSignature(f)
+        }
+
+        private func diagSignature(_ f: OpenFile) -> Int {
+            var h = Hasher()
+            for d in f.diagnostics { h.combine(d.id) }
+            return h.finalize()
         }
 
         func textDidChange(_ n: Notification) {

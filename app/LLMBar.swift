@@ -1251,6 +1251,13 @@ struct ToolsTab: View {
                 tool("cpu", L("Coding agent", "Агент для кода"), L("Reads, searches, edits files and runs commands — asks first", "Читает, ищет, правит файлы и запускает команды — с подтверждением")) {
                     CLI.terminal("LLM_CWD=$HOME ./llm agent")
                 }
+                tool("chevron.left.forwardslash.chevron.right", L("Code editor", "Редактор кода"),
+                     L("Native editor with the assistant, git, terminal and problems — opens on demand",
+                       "Нативный редактор с ассистентом, git, терминалом и проблемами — открывается по требованию")) {
+                    CLI.run(["ui", "--choose"]) { code, out in
+                        if code != 0 { e.message = out.split(separator: "\n").suffix(2).joined(separator: "\n") }
+                    }
+                }
                 Menu {
                     Button("Continue") { e.command(["connect", "continue"], label: "connect continue") }
                     Button("Kilo Code") { e.command(["connect", "kilo"], label: "connect kilo") }

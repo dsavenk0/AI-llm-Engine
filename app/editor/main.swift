@@ -98,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func closeTab() { if let p = ws.activePath { ws.closeFile(p) } }
     @objc func toggleLayout() { ws.mode = ws.mode == .chat ? .ide : .chat }
     @objc func newChat() { chat.newChat(); ws.mode = .chat }
+    @objc func togglePanel() { ws.bottomVisible.toggle() }
+    @objc func showTerminal() { ws.showPanel("terminal") }
+    @objc func showProblems() { ws.showPanel("problems") }
     @objc func toggleModule(_ sender: NSMenuItem) {
         if let m = sender.representedObject as? ModuleID { ws.modules.toggle(m) }
     }
@@ -139,7 +142,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"),
         ]
         add("Edit", edit)
-        var view = [item("Switch Chat / Editor", #selector(toggleLayout), "e"), .separator()]
+        var view = [item("Switch Chat / Editor", #selector(toggleLayout), "e"),
+                    item("Show / Hide Panel", #selector(togglePanel), "j"),
+                    item("Problems", #selector(showProblems), "m", [.command, .shift]),
+                    item("Terminal", #selector(showTerminal), "`", .control), .separator()]
         for m in ModuleID.allCases {
             let i = item(m.title, #selector(toggleModule(_:)))
             i.representedObject = m

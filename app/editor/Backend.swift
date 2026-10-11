@@ -32,7 +32,13 @@ struct FileResponse: Decodable {
     let outline: [Symbol]?, spans: [Span]?
     let binary: Bool?, too_large: Bool?
 }
-struct AnalyzeResponse: Decodable { let language: String; let spans: [Span]; let outline: [Symbol] }
+struct AnalyzeResponse: Decodable {
+    let language: String
+    let spans: [Span]
+    let outline: [Symbol]
+    let diagnostics: [Diagnostic]?
+}
+struct DiagnosticsResponse: Decodable { let language: String; let diagnostics: [Diagnostic]; let deep: Bool }
 struct SaveResponse: Decodable { let mtime: Int64 }
 
 struct GitFile: Decodable, Identifiable, Hashable {

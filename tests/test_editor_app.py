@@ -27,6 +27,8 @@ class TestEditorApp(unittest.TestCase):
         os.makedirs(cls.project)
         with open(os.path.join(cls.project, "hello.py"), "w") as f:
             f.write("class Greeter:\n    def hello(self):\n        return 'hi'\n")
+        with open(os.path.join(cls.project, "broken.py"), "w") as f:
+            f.write("x = 1\ndef f(:\n    pass\n")
         env = dict(os.environ, GIT_AUTHOR_NAME="T", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="T",
                    GIT_COMMITTER_EMAIL="t@t", GIT_CONFIG_GLOBAL="/dev/null")
         for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "init"]):

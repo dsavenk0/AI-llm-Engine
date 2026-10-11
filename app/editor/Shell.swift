@@ -22,8 +22,15 @@ struct RootView: View {
                 VStack(spacing: 0) {
                     Toolbar(ws: ws, modules: modules)
                     Divider()
-                    if ws.mode == .chat { ChatLayout(ws: ws, chat: chat, modules: modules) }
-                    else { IDELayout(ws: ws, chat: chat, modules: modules) }
+                    VSplitView {
+                        Group {
+                            if ws.mode == .chat { ChatLayout(ws: ws, chat: chat, modules: modules) }
+                            else { IDELayout(ws: ws, chat: chat, modules: modules) }
+                        }.frame(minHeight: 200)
+                        if ws.bottomVisible {
+                            BottomPanel(ws: ws, modules: modules).frame(minHeight: 120, idealHeight: 240)
+                        }
+                    }
                     Divider()
                     StatusBar(ws: ws)
                 }
@@ -37,6 +44,11 @@ struct RootView: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: ws.toast)
+        .onAppear {
+            ws.onAsk = {                                  // a problem or terminal output was sent to the assistant
+                if !modules.isOn(.chat) { modules.toggle(.chat) }
+            }
+        }
         .sheet(isPresented: Binding(get: { ws.pendingApply != nil }, set: { if !$0 { ws.pendingApply = nil } })) {
             ApplySheet(ws: ws)
         }
@@ -65,6 +77,8 @@ private struct Toolbar: View {
                 Text(ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") } ?? "model not running")
                     .font(.callout).foregroundColor(.secondary).lineLimit(1)
             }
+            Button { ws.bottomVisible.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }
+                .buttonStyle(.plain).help("Problems and terminal (⌘J)")
             Menu {
                 ForEach(ModuleID.allCases) { m in
                     Toggle(m.title, isOn: Binding(get: { modules.isOn(m) }, set: { _ in modules.toggle(m) })).disabled(m == .files)
@@ -79,10 +93,124 @@ private struct StatusBar: View {
     var body: some View {
         HStack(spacing: 14) {
             if let f = ws.active { FileStatus(file: f, ws: ws) }
+            Button { ws.showPanel("problems") } label: { ProblemSummary(ws: ws) }.buttonStyle(.plain)
             Spacer()
             let dirty = ws.open.filter(\.dirty).count
             if dirty > 0 { Text("\(dirty) unsaved").foregroundColor(.orange) }
         }.font(.caption).foregroundColor(.secondary).padding(.horizontal, 12).frame(height: 22)
+    }
+}
+
+struct ProblemSummary: View {
+    @ObservedObject var ws: Workspace
+    var body: some View {
+        let s = ws.problemSummary
+        HStack(spacing: 8) {
+            Label("\(s.errors)", systemImage: "xmark.octagon").foregroundColor(s.errors > 0 ? .red : .secondary)
+            Label("\(s.warnings)", systemImage: "exclamationmark.triangle").foregroundColor(s.warnings > 0 ? .yellow : .secondary)
+        }.labelStyle(.titleAndIcon)
+    }
+}
+
+// MARK: - bottom panel: problems + terminal (each only when its module is on)
+
+private struct BottomPanel: View {
+    @ObservedObject var ws: Workspace
+    @ObservedObject var modules: ModuleSettings
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                if modules.isOn(.problems) {
+                    tab("problems", "Problems" + (ws.problemSummary.errors + ws.problemSummary.warnings > 0
+                                                  ? " \(ws.problemSummary.errors + ws.problemSummary.warnings)" : ""))
+                }
+                if modules.isOn(.terminal) { tab("terminal", "Terminal") }
+                Spacer()
+                Button { ws.bottomVisible = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+            }.padding(.horizontal, 10).padding(.vertical, 5).background(Color.primary.opacity(0.04))
+            Divider()
+            if ws.bottomTab == "terminal", modules.isOn(.terminal) {
+                TerminalPanel(ws: ws)
+            } else if modules.isOn(.problems) {
+                ProblemsView(ws: ws)
+            } else {
+                Text("Problems and Terminal are switched off (Modules menu)").foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private func tab(_ id: String, _ title: String) -> some View {
+        Button { ws.bottomTab = id } label: {
+            Text(title).fontWeight(ws.bottomTab == id ? .semibold : .regular)
+                .foregroundColor(ws.bottomTab == id ? .primary : .secondary)
+        }.buttonStyle(.plain)
+    }
+}
+
+private struct TerminalPanel: View {
+    @ObservedObject var ws: Workspace
+    var body: some View {
+        let s = ws.terminalSession()
+        VStack(spacing: 0) {
+            TerminalModuleView(session: s)
+            Divider()
+            HStack {
+                Spacer()
+                Button { ws.askAboutTerminal(s.buffer.text) } label: { Label("Ask the assistant about this output", systemImage: "sparkles") }
+                    .buttonStyle(.borderless)
+            }.font(.caption).padding(.horizontal, 10).padding(.vertical, 4)
+        }
+    }
+}
+
+struct ProblemsView: View {
+    @ObservedObject var ws: Workspace
+
+    var body: some View {
+        let total = ws.problemSummary.errors + ws.problemSummary.warnings
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if ws.open.isEmpty {
+                    Text("Open a file to see its problems").foregroundColor(.secondary).padding(14)
+                } else if total == 0 {
+                    Label("No problems in the open files", systemImage: "checkmark.circle").foregroundColor(.green).padding(14)
+                }
+                ForEach(ws.open) { f in FileProblems(ws: ws, file: f) }
+            }
+        }
+    }
+}
+
+private struct FileProblems: View {
+    @ObservedObject var ws: Workspace
+    @ObservedObject var file: OpenFile
+
+    var body: some View {
+        if !file.diagnostics.isEmpty {
+            HStack {
+                Image(systemName: "doc.text")
+                Text(file.path).bold()
+                Text("\(file.diagnostics.count)").foregroundColor(.secondary)
+                Spacer()
+                Button { ws.askAboutProblems(of: file) } label: { Label("Ask the assistant", systemImage: "sparkles") }
+                    .buttonStyle(.borderless)
+            }.font(.callout).padding(.horizontal, 10).padding(.top, 8)
+            ForEach(file.diagnostics) { d in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: d.isError ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(d.isError ? .red : .yellow)
+                    Text(d.message).lineLimit(2)
+                    Spacer()
+                    Text("\(d.source) · \(d.line):\(d.col)").font(.caption).foregroundColor(.secondary)
+                    Button { ws.askAboutProblem(d, in: file) } label: { Image(systemName: "sparkles") }
+                        .buttonStyle(.borderless).help("Send this problem to the assistant")
+                }
+                .padding(.horizontal, 10).padding(.vertical, 3).contentShape(Rectangle())
+                .onTapGesture { ws.activePath = file.path; file.jumpLine = d.line }
+            }
+        }
     }
 }
 

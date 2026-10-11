@@ -54,6 +54,38 @@ func runSelfTest(_ ws: Workspace, root: String) {
         } catch {}
         check(sawError, "agent stream delivers events (error when no model runs)")
 
+        // problems: a file with a syntax error is flagged, counted, and can be sent to the assistant
+        ws.openFile("broken.py")
+        for _ in 0..<50 where !ws.open.contains(where: { $0.path == "broken.py" }) { try? await Task.sleep(nanoseconds: 100_000_000) }
+        if let b = ws.open.first(where: { $0.path == "broken.py" }) {
+            for _ in 0..<30 where b.diagnostics.isEmpty { try? await Task.sleep(nanoseconds: 100_000_000) }
+            check(b.diagnostics.first?.line == 2 && b.diagnostics.first?.isError == true,
+                  "syntax error found on line 2: \(b.diagnostics.first?.message ?? "none")")
+            check(ws.problemSummary.errors >= 1, "problem counter: \(ws.problemSummary.errors)")
+            if let d = b.diagnostics.first {
+                var asked = false
+                ws.onAsk = { asked = true }
+                ws.askAboutProblem(d, in: b)
+                check(asked && ws.draft.contains("broken.py") && ws.draft.contains("line 2") && ws.draft.contains(d.message),
+                      "the problem is in the assistant's composer")
+                check(ws.attachments.contains("broken.py"), "and the file is attached")
+            }
+        } else { check(false, "broken.py opened") }
+
+        // terminal: a real shell on a pty, started lazily
+        let term = ws.terminalSession()
+        check(!term.running, "no shell before the panel is shown")
+        term.start()
+        term.send("echo pty_$((6*7))_ok\r")
+        for _ in 0..<80 where !term.buffer.text.contains("pty_42_ok") { try? await Task.sleep(nanoseconds: 100_000_000) }
+        check(term.buffer.text.contains("pty_42_ok"), "the shell ran a command and its output reached the buffer")
+        term.send("printf '\\033[31mred\\033[0m\\n'\r")
+        for _ in 0..<50 where !term.buffer.lines.contains(where: { $0.contains { $0.style.fg == .index(1) } }) {
+            try? await Task.sleep(nanoseconds: 100_000_000) }
+        check(term.buffer.lines.contains { $0.contains { $0.style.fg == .index(1) } }, "ANSI colour from the shell was parsed")
+        ws.askAboutTerminal(term.buffer.text)
+        check(ws.draft.contains("pty_42_ok") && ws.draft.contains("terminal"), "terminal output can be sent to the assistant")
+
         ws.shutdown()
         print(failures.isEmpty ? "SELFTEST OK" : "SELFTEST FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)

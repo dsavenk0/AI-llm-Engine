@@ -193,6 +193,24 @@ Optional extras, each off until you ask (nothing is contacted or added to the pr
 | automatic | `.llm/map.md` — a model-free map of the project (rebuilt only when files change) and `.llm/session.md` — the agent's own notes, saved on exit and read at start, so a restart does not re-scan the project. `/map` and `/save` do it on demand. |
 | `/compact` | Long sessions are compacted automatically at 70% of the context window; this does it now. |
 
+### Code editor (optional, native)
+
+`./build-editor.sh` builds `LLMEditor.app` (LLMBar's `build-app.sh` bundles it too); `./llm ui [folder]` opens it. It is a
+separate Swift app that only runs while you use it, and its parts are independent modules you can switch off
+(Files, Outline, Changes/git, Assistant, Problems, Terminal):
+
+- **Two layouts:** chat-first (chats, the conversation with *Explored…* activity, questions with options, approvals,
+  files on the right) and a classic editor (file tree, tabs, outline, assistant). Switch with ⌘E.
+- **Assistant:** an agent that searches and reads the project, asks you when something is ambiguous, and edits or runs
+  commands only after your approval (a diff or the command is shown first). Attach files to a message with 📎.
+- **Editor:** syntax colours and an outline for ~25 languages, line numbers, problems underlined as you type
+  (built-in checks, plus `swiftc -parse`, `node --check`, `bash -n` … when installed), unsaved-changes protection.
+- **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click.
+- **Git:** changes, diff, commit selected files, push (always asks first; it uses your own git credentials).
+
+The editor talks to a small local backend (`ui/server.py`, stdlib only, localhost + a random token, paths confined to
+the project) that the app starts and stops itself.
+
 ### Benchmarks
 
 `./llm eval` has two modes. Without arguments it runs the small built-in regression suite (math, code, sanity).

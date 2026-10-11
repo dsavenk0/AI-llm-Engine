@@ -120,5 +120,62 @@ let u = parseBackendURL("Editor UI for /tmp/x\n  http://127.0.0.1:53114/?token=a
 check(u?.port == 53114 && u?.token == "abc_DEF-123", "backend url")
 check(parseBackendURL("nothing here") == nil, "no url")
 
+
+// ── diagnostics positions
+let src = "let a = 1\nlet 😀b = (\nend"
+eq(OffsetMap.position(line: 1, col: 1, in: src), 0, "line 1 col 1")
+eq(OffsetMap.position(line: 2, col: 1, in: src), 10, "line 2 starts at 10")
+eq(OffsetMap.position(line: 2, col: 5, in: src), 14, "column counted in code points before the emoji")
+eq(OffsetMap.position(line: 2, col: 6, in: src), 16, "after the emoji: two UTF-16 units")
+eq(OffsetMap.position(line: 2, col: 99, in: src), 21, "past the end of the line clamps to its end (the newline)")
+eq(OffsetMap.position(line: 9, col: 1, in: src), (src as NSString).length, "past the end of the file")
+let dj = try! JSONDecoder().decode(Diagnostic.self, from: #"{"line":3,"col":4,"end_col":6,"severity":"error","message":"bad","source":"python"}"#.data(using: .utf8)!)
+check(dj.isError && dj.line == 3 && dj.end_col == 6, "diagnostic decodes")
+
+// ── terminal buffer
+func term(_ s: String, rows: Int = 24) -> TermBuffer { let t = TermBuffer(screenRows: rows); t.feed(s); return t }
+eq(term("hello\r\nworld").text, "hello\nworld", "CRLF")
+eq(term("abc\rX").text, "Xbc", "carriage return overwrites")
+eq(term("10%\r50%\r100%").text, "100%", "a progress bar stays on one line")
+eq(term("abc\u{08}\u{08}X").text, "aXc", "backspace then write")
+eq(term("hello world\u{1B}[6D\u{1B}[K").text, "hello", "move left, erase to end of line")
+eq(term("abcdef\u{1B}[3G\u{1B}[1K").text, "   def", "erase to start of line keeps the tail")
+eq(term("one\r\ntwo\u{1B}[2K\r\nthree").text, "one\n\nthree", "erase whole line")
+eq(term("a\tb").text, "a       b", "tab stops")
+eq(term("x\u{1B}]0;window title\u{07}y").text, "xy", "OSC title is swallowed")
+eq(term("x\u{1B}]8;;http://a\u{1B}\\link\u{1B}]8;;\u{1B}\\").text, "xlink", "OSC with ST terminator")
+eq(term("a\u{1B}[?2004hb\u{1B}[?25lc").text, "abc", "private modes are ignored")
+eq(term("\u{1B}(Bplain").text, "plain", "charset selection is swallowed")
+let split = TermBuffer(); split.feed("a\u{1B}["); split.feed("31mred\u{1B}"); split.feed("[0m ok")
+eq(split.text, "ared ok", "an escape sequence split across chunks")
+eq(split.lines[0][1].style.fg, TermColor.index(1), "the split sequence still applied")
+eq(split.lines[0][5].style, TermStyle(), "and reset restored the style")
+let col = term("\u{1B}[1;31mERR\u{1B}[0m \u{1B}[38;5;208morange\u{1B}[0m \u{1B}[38;2;1;2;3mrgb\u{1B}[0m \u{1B}[42mbg\u{1B}[0m")
+eq(col.lines[0][0].style, TermStyle(fg: .index(1), bold: true), "bold red")
+eq(col.lines[0][4].style.fg, TermColor.index(208), "256-colour")
+eq(col.lines[0][11].style.fg, TermColor.rgb(1, 2, 3), "true colour")
+eq(col.lines[0][15].style.bg, TermColor.index(2), "background")
+eq(term("\u{1B}[91mhi").lines[0][0].style.fg, TermColor.index(9), "bright foreground")
+let clear = term("old line\r\nanother\u{1B}[2J\u{1B}[Hnew")
+eq(clear.lineText(0), "new", "clear screen and home: output restarts at the top"); check(!clear.text.contains("old") && !clear.text.contains("another"), "the screen was really cleared")
+let cup = term("\u{1B}[3;5Hx", rows: 5)
+eq(cup.lineText(2), "    x", "cursor addressing")
+let many = TermBuffer(maxLines: 100)
+for i in 0..<500 { many.feed("line \(i)\r\n") }
+check(many.lines.count <= 100 && many.lineText(many.lines.count - 2) == "line 499", "scrollback is capped, newest kept")
+eq(term("日本語 ok ☃").text, "日本語 ok ☃", "non-ASCII text")
+eq(term("a\u{1B}[3Pb").text, "ab", "delete characters")
+eq(term("abc\r\u{1B}[2@XY").text, "XYabc", "insert blanks then overwrite")
+let (r, g, b) = TermColor.index(232).components()
+check(r == g && g == b && r < 0.1, "grayscale ramp")
+check(TermColor.index(196).components().0 > 0.9 && TermColor.index(196).components().1 == 0, "cube red")
+
+// ── UTF-8 across chunk boundaries
+var u8 = UTF8Stream()
+let bytes = Array("héllo 😀 ok".utf8)
+var out = ""
+for chunk in stride(from: 0, to: bytes.count, by: 2).map({ Data(bytes[$0..<min($0 + 2, bytes.count)]) }) { out += u8.decode(chunk) }
+eq(out, "héllo 😀 ok", "UTF-8 split every two bytes decodes without replacement characters")
+
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)
