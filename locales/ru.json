@@ -151,5 +151,6 @@
   "— compacted: {a} → {b} messages": "— сжато: {a} → {b} сообщений",
   "No project memory yet — /remember <note>": "Памяти проекта пока нет — /remember <заметка>",
   "Remembered.": "Запомнил.",
-  "Usage: /remember <note>": "Использование: /remember <заметка>"
+  "Usage: /remember <note>": "Использование: /remember <заметка>",
+  "packed JANG storage": "упакованное хранение JANG (ядра пока нет)"
 }

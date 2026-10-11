@@ -21,6 +21,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
 The manager itself is stdlib-only; the engine runs from ./.venv.
 Language: English by default, Russian via LLM_LANG=ru, the settings menu or a ru system locale.
 """
+import glob
 import http.client
 import json
 import os
@@ -155,6 +156,31 @@ def _json(path):
         return {}
 
 
+NATIVE_TYPES = ("qwen3_5", "qwen3_5_text", "prism_hadamard_qwen35")
+PTQ1_SCHEMA = "prism_hadamard_qwen35_ptq1"
+
+
+def engine_route(cfgj, tags=()):
+    """Which engine runs this model: "native" (Qwen3.5-hybrid dense family, incl. Prism/JANG
+    Hadamard bundles), "ptq1" (the same family in the experimental PTQ1 format) or "mlxlm"
+    (anything else MLX, through the optional mlx-lm backend). `cfgj` is the local config.json;
+    for a hub repo that has not been downloaded, pass its tags instead."""
+    text = cfgj.get("text_config") or {}
+    kinds = {cfgj.get("model_type"), text.get("model_type"), *tags}
+    schema = str(cfgj.get("schema", ""))
+    if schema.startswith(PTQ1_SCHEMA) or PTQ1_SCHEMA in kinds:
+        return "ptq1"
+    moe = text.get("num_experts") or cfgj.get("num_experts") or any("moe" in str(k) for k in kinds)
+    if kinds & set(NATIVE_TYPES) and not moe:
+        return "native"
+    return "mlxlm"
+
+
+def mlxlm_installed():
+    sp = glob.glob(os.path.join(os.path.dirname(os.path.dirname(VENV_PY)), "lib", "python*", "site-packages", "mlx_lm"))
+    return bool(sp)
+
+
 def inspect_model(path):
     cfgj = _json(os.path.join(path, "config.json"))
     if not cfgj:
@@ -169,13 +195,11 @@ def inspect_model(path):
     q = cfgj.get("quantization") or cfgj.get("quantization_config") or {}
     mtype = text.get("model_type") or cfgj.get("model_type", "?")
 
+    route = engine_route(cfgj)
     problems = []
-    if mtype not in ("qwen3_5", "qwen3_5_text"):
-        problems.append(T("architecture") + f" {mtype}")
-    if not q.get("bits"):
-        problems.append(T("not quantized"))
-    if text.get("num_experts"):
-        problems.append("MoE")
+    rt = jang.get("runtime", {})
+    if rt.get("requires_jang_ternary_packed_expansion") or rt.get("requires_jang_affine1_expansion"):
+        problems.append(T("packed JANG storage"))  # no kernel for it yet
 
     tpl = ""
     if "chat_template.jinja" in files:
@@ -189,7 +213,9 @@ def inspect_model(path):
     if "snapshots" in parts:  # standard HF cache: models--org--name/snapshots/<hash>
         name = parts[parts.index("snapshots") - 1].removeprefix("models--").split("--", 1)[-1]
     fmt = f"JANG {jang.get('profile', '')}".strip() if jang else (f"MLX {q['bits']}-bit" if q.get("bits") else "fp")
-    return {"path": path, "name": name, "size": size, "format": fmt, "type": mtype,
+    if route == "ptq1":
+        fmt = "PTQ1"
+    return {"path": path, "name": name, "size": size, "format": fmt, "type": mtype, "route": route,
             "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl,
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
             "efforts": efforts, "hadamard": bool(cfgj.get("hadamard") or jang.get("hadamard")),
