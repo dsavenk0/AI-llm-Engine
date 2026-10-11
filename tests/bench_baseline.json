@@ -1,0 +1,133 @@
+{
+  "date": "2026-10-11",
+  "models": {
+    "Qwen3.5-0.8B-4bit": {
+      "gsm8k@100/0": {
+        "correct": 42,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 5,
+        "think_forced": 0,
+        "tokens": 27686,
+        "seconds": 205.0
+      },
+      "mmlu@100/0": {
+        "correct": 38,
+        "total": 100,
+        "unparsed": 3,
+        "truncated": 5,
+        "think_forced": 0,
+        "tokens": 510,
+        "seconds": 16.3
+      },
+      "mmlu-pro@100/0": {
+        "correct": 10,
+        "total": 100,
+        "unparsed": 7,
+        "truncated": 13,
+        "think_forced": 0,
+        "tokens": 1006,
+        "seconds": 21.8
+      },
+      "arc@100/0": {
+        "correct": 52,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 1,
+        "think_forced": 0,
+        "tokens": 262,
+        "seconds": 11.3
+      },
+      "hellaswag@100/0": {
+        "correct": 35,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 0,
+        "think_forced": 0,
+        "tokens": 200,
+        "seconds": 14.4
+      },
+      "truthfulqa@100/0": {
+        "correct": 22,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 0,
+        "think_forced": 0,
+        "tokens": 200,
+        "seconds": 8.9
+      },
+      "winogrande@100/0": {
+        "correct": 42,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 0,
+        "think_forced": 0,
+        "tokens": 200,
+        "seconds": 6.1
+      },
+      "kmmlu@100/0": {
+        "correct": 27,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 0,
+        "think_forced": 0,
+        "tokens": 200,
+        "seconds": 8.1
+      },
+      "ceval@100/0": {
+        "correct": 29,
+        "total": 100,
+        "unparsed": 12,
+        "truncated": 17,
+        "think_forced": 0,
+        "tokens": 1254,
+        "seconds": 14.6
+      },
+      "mathqa@100/0": {
+        "correct": 25,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 2,
+        "think_forced": 0,
+        "tokens": 326,
+        "seconds": 8.4
+      },
+      "bbq@100/0": {
+        "correct": 37,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 0,
+        "think_forced": 0,
+        "tokens": 200,
+        "seconds": 7.2
+      },
+      "safetybench@100/0": {
+        "correct": 21,
+        "total": 35,
+        "unparsed": 0,
+        "truncated": 0,
+        "think_forced": 0,
+        "tokens": 70,
+        "seconds": 2.4
+      },
+      "humaneval@100/0": {
+        "correct": 16,
+        "total": 100,
+        "unparsed": 0,
+        "truncated": 2,
+        "think_forced": 0,
+        "tokens": 20549,
+        "seconds": 136.6
+      },
+      "mbpp@100/0": {
+        "correct": 17,
+        "total": 99,
+        "unparsed": 0,
+        "truncated": 3,
+        "think_forced": 0,
+        "tokens": 22160,
+        "seconds": 267.2
+      }
+    }
+  }
+}
