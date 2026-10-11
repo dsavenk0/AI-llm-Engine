@@ -102,7 +102,8 @@ def _join_tq1(shard):
         shard[base + ".weight"] = weight
 
 
-def load(path, vision=True, log=print, ptq1=False):
+def load(path, vision=True, log=print, ptq1=False, steer=None):
+    """`steer`: (direction file or folder, alpha or None) — an activation edit, see engine/steering.py."""
     t0 = time.time()
     config = _json(os.path.join(path, "config.json"))
     jang = _json(os.path.join(path, "jang_config.json"))
@@ -246,6 +247,14 @@ def load(path, vision=True, log=print, ptq1=False):
         model.set_hadamard(Hadamard(block, signs))
     elif signs:
         raise ValueError("bundle ships .signs tensors but declares no Hadamard contract")
+
+    if steer:
+        from . import steering
+        file, rec_alpha = steering.resolve(steer[0])
+        alpha = steer[1] if steer[1] is not None else (rec_alpha if rec_alpha is not None else 1.0)
+        d = steering.load_direction(file, tc["hidden_size"])
+        model.set_steer(steering.projector(d, alpha))
+        log(f"activation steering on: {os.path.basename(file)}, alpha {alpha:g}")
 
     model.ptq1 = is_ptq1
     model.eval()

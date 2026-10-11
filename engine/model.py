@@ -272,7 +272,7 @@ class Ops:
     same compiled graph.
     """
 
-    def __init__(self, a, had):
+    def __init__(self, a, had, steer=None):
         eps = a["rms_norm_eps"]
         nk, nv = a["linear_num_key_heads"], a["linear_num_value_heads"]
         dk, dv = a["linear_key_head_dim"], a["linear_value_head_dim"]
@@ -281,6 +281,8 @@ class Ops:
         inv = dk ** -0.5
         self.had = had
         scheme = a.get("ternary_scheme", "ptq1")
+        # activation steering (engine/steering.py): applied to what each layer writes into the residual
+        st = steer if steer is not None else (lambda y: y)
 
         def qmm(x, w, s, b, n=None):
             # What `w` is comes from its shape, so one compiled block serves every layer even when
@@ -314,7 +316,7 @@ class Ops:
         def mlp(h, nw, gw, gsc, gb, dw, dsc, db):
             gu = qmm(had.fwd(rms(h, nw)), gw, gsc, gb, 2 * a["intermediate_size"])
             i = gu.shape[-1] // 2
-            return h + qmm(had.fwd(swiglu(gu[..., :i], gu[..., i:])), dw, dsc, db, a["hidden_size"])
+            return h + st(qmm(had.fwd(swiglu(gu[..., :i], gu[..., i:])), dw, dsc, db, a["hidden_size"]))
 
         def gdn_pre(n, nr, conv_state, w, s, b, ba, convw, A_log, dt_bias):
             B, S, _ = n.shape
@@ -343,7 +345,7 @@ class Ops:
         def gdn_post(out, z, normw, x, w, s, b):
             B, S = x.shape[:2]
             o = swiglu(z.reshape(B, S, nv, dv), rms(out, normw)).astype(F16)
-            return x + qmm(had.fwd(o.reshape(B, S, -1)), w, s, b, a["hidden_size"])
+            return x + st(qmm(had.fwd(o.reshape(B, S, -1)), w, s, b, a["hidden_size"]))
 
         def attn_pre(nr, w, s, b, qnw, knw):
             B, L, _ = nr.shape
@@ -359,7 +361,7 @@ class Ops:
         def attn_post(o, gate, x, w, s, b):
             B, _, L, _ = o.shape
             o = o.transpose(0, 2, 1, 3).reshape(B, L, -1)
-            return x + qmm(had.fwd(o * mx.sigmoid(gate)), w, s, b, a["hidden_size"])
+            return x + st(qmm(had.fwd(o * mx.sigmoid(gate)), w, s, b, a["hidden_size"]))
 
         def head(h, nw, w, s, b):
             return qmm(had.fwd(rms(h, nw)), w, s, b, a["vocab_size"])
@@ -579,7 +581,12 @@ class Model(nn.Module):
 
     def set_hadamard(self, had):
         self.had = had
-        self.ops = Ops(self.args, had)
+        self.ops = Ops(self.args, had, getattr(self, "steer", None))
+
+    def set_steer(self, steer):
+        """`steer`: a function y → y' from engine/steering.projector, or None to switch it off."""
+        self.steer = steer
+        self.ops = Ops(self.args, self.had, steer)
 
     @property
     def layers(self):
@@ -589,7 +596,9 @@ class Model(nn.Module):
         return [SSMCache() if l.is_linear else KVCache() for l in self.layers]
 
     def embed(self, ids):
-        return self.had.inv(self.language_model.model.embed_tokens(ids))
+        h = self.had.inv(self.language_model.model.embed_tokens(ids))
+        steer = getattr(self, "steer", None)
+        return h if steer is None else steer(h)
 
     def commit(self, cache, m):
         """After a verify pass: keep the first m fed tokens in every cache."""
