@@ -77,6 +77,7 @@ DEFAULTS = {
     "log_level": "info",         # engine log: error | warning | info | debug | trace
     "fallback_model": True,      # a request naming another model is answered by the loaded one (off: 404)
     "prefill_guard": True,       # refuse a prompt that would not fit in free memory before prefilling it
+    "images_api": False,         # serve /v1/images/generations through mflux (./llm setup --images)
     "proxy_http": "",            # outgoing HTTP(S) (downloads, hub search, web tools); empty = none
     "proxy_https": "",
     "no_proxy": "",              # comma-separated hosts/CIDRs that bypass the proxy
@@ -547,6 +548,63 @@ def setup(compat=False):
     return r.returncode == 0
 
 
+IMAGES_VENV = os.path.join(DATA, ".venv-images")
+
+
+def setup_images():
+    """`./llm setup --images`: mflux (FLUX & co on MLX) in its own environment, so the engine's stays small.
+    The first image downloads its weights from Hugging Face (several GB; the model name decides)."""
+    py = os.path.join(IMAGES_VENV, "bin", "python")
+    if not os.path.exists(py):
+        print(T("Creating the image environment…"))
+        os.makedirs(DATA, exist_ok=True)
+        r = subprocess.run([find_python(), "-m", "venv", IMAGES_VENV])
+        if r.returncode != 0:
+            return False
+    print(T("Installing mflux…"))
+    r = subprocess.run([py, "-m", "pip", "install", "-q", "--upgrade", "mflux"], env=network_env(load_cfg()))
+    if r.returncode == 0:
+        print(G(T("Image generation installed. Try:  ./llm image \"a lighthouse at dusk\"")))
+    return r.returncode == 0
+
+
+def image_cmd(cfg, args):
+    """`./llm image "prompt" [--model schnell] [--size 1024x1024] [--steps N] [--seed N] [--out file.png]`."""
+    from engine import images
+    opts, words, i = {}, [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--model", "--size", "--steps", "--seed", "--out") and i + 1 < len(args):
+            opts[a[2:]] = args[i + 1]
+            i += 2
+        else:
+            words.append(a)
+            i += 1
+    prompt = " ".join(words).strip()
+    if not prompt:
+        prompt = input(T("Describe the image") + " › ").strip()
+    if not images.tool_path(DATA):
+        print(R(T("Image generation is not installed. Run:  ./llm setup --images"))); return False
+    if read_pid(ENGINE_PID) and RAM_GB < 24:
+        print(Y(T("The engine is running; on this Mac the language model and an image model do not fit together. "
+                  "Stop it first (./llm stop).")))
+        return False
+    out = os.path.abspath(opts.get("out") or os.path.join(os.environ.get("LLM_CWD") or os.getcwd(),
+                                                          f"image-{int(time.time())}.png"))
+    try:
+        kw = {"model": opts.get("model", images.DEFAULT_MODEL), "size": opts.get("size")}
+        if "steps" in opts: kw["steps"] = int(opts["steps"])
+        if "seed" in opts: kw["seed"] = int(opts["seed"])
+        print(DIM(T("Generating… (the first image downloads the model weights)")))
+        png = images.generate(prompt, data_dir=DATA, **kw)
+    except (images.ImageError, ValueError) as e:
+        print(R(str(e))); return False
+    with open(out, "wb") as f:
+        f.write(png)
+    print(G(T("Saved:") + f" {out}"))
+    return True
+
+
 def engine_cmd(cfg, m):
     mc = mcfg(cfg, m["path"])
     cmd = [VENV_PY, "-m", "engine.server", "--model", m["path"], "--name", served_name(m),
@@ -577,6 +635,8 @@ def engine_cmd(cfg, m):
         cmd += ["--fallback-model", "off"]
     if not cfg.get("prefill_guard", True):
         cmd += ["--prefill-guard", "off"]
+    if cfg.get("images_api"):
+        cmd += ["--images", "on"]
     return cmd
 
 
@@ -1538,7 +1598,9 @@ def main():
     set_lang(cfg["lang"])
     os.environ.update(network_env(cfg))      # hub search, downloads and the agent's web tools follow the proxy
     actions = {
-        "setup": lambda: setup(compat="--compat" in sys.argv), "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
+        "setup": lambda: setup_images() if "--images" in sys.argv else setup(compat="--compat" in sys.argv),
+        "image": lambda: image_cmd(cfg, sys.argv[2:]),
+        "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),
         "models": lambda: print(json.dumps(scan_models(cfg), ensure_ascii=False)) if arg == "--json"
         else list_models(cfg, scan_models(cfg)), "use": lambda: choose_model(cfg, arg or None),

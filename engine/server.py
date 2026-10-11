@@ -340,7 +340,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._error(400, "invalid JSON body")
         if path in ("/v1/chat/completions", "/chat/completions"):
             return self.chat(body)
+        if path in ("/v1/images/generations", "/images/generations"):
+            return self.images(body)
         self._error(404, f"unknown path {self.path}")
+
+    # ───────────────────────── images (optional: mflux) ─────────────────────────
+    def images(self, body):
+        """OpenAI-style /v1/images/generations through mflux. The text model is put to sleep first, so FLUX
+        and the language model are never resident together."""
+        import base64
+        from engine import images
+        if ARGS.images != "on":
+            return self._error(501, "image generation is switched off (start the engine with --images on)",
+                               "invalid_request_error", "images_disabled")
+        home = os.environ.get("LLM_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if not images.tool_path(home):
+            return self._error(501, "image generation is not installed — run: ./llm setup --images",
+                               "invalid_request_error", "images_not_installed")
+        try:
+            if int(body.get("n") or 1) != 1:
+                return self._error(400, "only n=1 is supported", "invalid_request_error")
+            with ENGINE.lock:                  # wait for a running request, then free the language model
+                if not ENGINE.sleeping:
+                    next(run_job(lambda: iter([ENGINE.sleep()])))
+            log("images: generating with mflux (the text model stays unloaded meanwhile)")
+            png = images.generate(body.get("prompt"), data_dir=home, model=body.get("model") or images.DEFAULT_MODEL,
+                                  size=body.get("size"), steps=body.get("steps"), seed=body.get("seed"))
+        except images.ImageError as e:
+            return self._error(e.status, str(e))
+        except (TypeError, ValueError) as e:
+            return self._error(400, f"bad request: {e}")
+        self._json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png).decode()}]})
 
     # ───────────────────────── chat ─────────────────────────
     def chat(self, body):
@@ -554,6 +584,8 @@ def main():
     ap.add_argument("--no-vision", action="store_true")
     ap.add_argument("--log-level", choices=("error", "warning", "info", "debug", "trace"), default="info",
                     help="what the engine writes to its log (each line is tagged with a group)")
+    ap.add_argument("--images", choices=("on", "off"), default="off",
+                    help="serve /v1/images/generations through mflux (./llm setup --images installs it)")
     ap.add_argument("--fallback-model", choices=("on", "off"), default="on",
                     help="a request that names a model other than the loaded one is answered by the loaded "
                          "model (on) or refused with 404 (off)")

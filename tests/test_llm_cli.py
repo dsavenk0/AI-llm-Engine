@@ -348,6 +348,39 @@ class TestStartStop(State):
         self.assertIn("setup --compat", out)
 
 
+class TestImageCommand(State):
+    def setUp(self):
+        super().setUp()
+        self.out = os.path.join(self.tmp, "o.png")
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
+
+    def test_without_the_tool_it_says_how_to_install(self):
+        with mock.patch.dict(os.environ, {"LLM_IMAGES_BIN": os.path.join(self.tmp, "missing")}):
+            ok, out = quiet(llm.image_cmd, self.cfg, ["a cat", "--out", self.out])
+        self.assertFalse(ok)
+        self.assertIn("setup --images", out)
+
+    def test_writes_the_png_where_asked(self):
+        import test_images
+        tool = test_images.fake_tool(self.tmp)
+        with mock.patch.dict(os.environ, {"LLM_IMAGES_BIN": tool}), mock.patch.object(llm, "read_pid", lambda p: None):
+            ok, out = quiet(llm.image_cmd, self.cfg, ["a", "red", "fox", "--model", "schnell", "--size", "512x512",
+                                                      "--seed", "3", "--out", self.out])
+        self.assertTrue(ok, out)
+        with open(self.out, "rb") as f:
+            self.assertEqual(f.read(), test_images.PNG)
+        self.assertIn("a red fox", open(os.path.join(self.tmp, "args.txt")).read())
+
+    def test_a_running_engine_on_a_small_mac_is_not_stacked_with_flux(self):
+        import test_images
+        tool = test_images.fake_tool(self.tmp)
+        with mock.patch.dict(os.environ, {"LLM_IMAGES_BIN": tool}), mock.patch.object(llm, "read_pid", lambda p: 123), \
+                mock.patch.object(llm, "RAM_GB", 16):
+            ok, out = quiet(llm.image_cmd, self.cfg, ["a cat", "--out", self.out])
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(self.out))
+
+
 class TestVisionSwitch(State):
     def setUp(self):
         super().setUp()

@@ -920,6 +920,9 @@ struct SettingsTab: View {
                 toggle(L("Prefill memory guard", "Защита памяти prefill"), Binding(get: { e.g("prefill_guard", true) }, set: { e.setG("prefill_guard", $0) }),
                        hint: L("Check free memory before a long prompt and refuse what would not fit (no out-of-memory crash).",
                                "Проверять память перед длинным промптом и отклонять то, что не влезет (без падения по памяти)."))
+                toggle(L("Image API (mflux)", "API изображений (mflux)"), Binding(get: { e.g("images_api", false) }, set: { e.setG("images_api", $0) }),
+                       hint: L("Serves /v1/images/generations through mflux; the language model unloads while an image is made. Install: ./llm setup --images",
+                               "Отдаёт /v1/images/generations через mflux; пока рисуется картинка, языковая модель выгружается. Установка: ./llm setup --images"))
                 labeledPicker(L("Log level", "Уровень журнала"), Binding(get: { e.g("log_level", "info") }, set: { e.setG("log_level", $0) }),
                               [("error", L("Error", "Ошибка")), ("warning", L("Warn", "Предупр.")), ("info", L("Info", "Инфо")),
                                ("debug", L("Debug", "Отладка")), ("trace", L("Trace", "Трасс."))])
@@ -1397,6 +1400,10 @@ struct ToolsTab: View {
                 }
                 tool("cpu", L("Coding agent", "Агент для кода"), L("Reads, searches, edits files and runs commands — asks first", "Читает, ищет, правит файлы и запускает команды — с подтверждением")) {
                     CLI.terminal("LLM_CWD=$HOME ./llm agent")
+                }
+                tool("photo", L("Images (mflux)", "Изображения (mflux)"),
+                     L("Generate an image from text with FLUX on MLX — installs on first use", "Картинка по тексту: FLUX на MLX — ставится при первом запуске")) {
+                    CLI.terminal("./llm image || (./llm setup --images && ./llm image)")
                 }
                 tool("chevron.left.forwardslash.chevron.right", L("Code editor", "Редактор кода"),
                      L("Native editor with the assistant, git, terminal and problems — opens on demand",

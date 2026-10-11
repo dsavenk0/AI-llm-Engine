@@ -198,5 +198,12 @@
   "empty to clear": "пусто — сбросить",
   "This model has no vision tower.": "У этой модели нет модуля изображений.",
   "Images: {state} for {name}": "Изображения: {state} для {name}",
-  "Search MLX models on ModelScope": "Поиск MLX-моделей на ModelScope"
+  "Search MLX models on ModelScope": "Поиск MLX-моделей на ModelScope",
+  "Creating the image environment…": "Создаю окружение для изображений…",
+  "Installing mflux…": "Устанавливаю mflux…",
+  "Image generation installed. Try:  ./llm image \"a lighthouse at dusk\"": "Генерация изображений установлена. Попробуйте:  ./llm image \"маяк на закате\"",
+  "Describe the image": "Опишите изображение",
+  "Image generation is not installed. Run:  ./llm setup --images": "Генерация изображений не установлена. Выполните:  ./llm setup --images",
+  "The engine is running; on this Mac the language model and an image model do not fit together. Stop it first (./llm stop).": "Движок запущен; на этом Mac языковая модель и модель изображений вместе не помещаются. Сначала остановите его (./llm stop).",
+  "Generating… (the first image downloads the model weights)": "Генерирую… (первый запуск скачивает веса модели)"
 }
