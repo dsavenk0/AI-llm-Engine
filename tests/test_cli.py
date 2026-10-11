@@ -101,3 +101,108 @@ class TestTranslations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDownloadFile(unittest.TestCase):
+    """download_file() against a local server that misbehaves the way real CDNs do."""
+
+    @classmethod
+    def setUpClass(cls):
+        import hashlib
+        import http.server
+        import threading
+
+        cls.data = os.urandom(300_000)
+        cls.sha = hashlib.sha256(cls.data).hexdigest()
+        outer = cls
+
+        class H(http.server.BaseHTTPRequestHandler):
+            log = []
+            cut = []        # per request: how many bytes to send before dropping the connection (None = all)
+            ignore_range = False
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                rng = self.headers.get("Range")
+                H.log.append(rng)
+                start = int(rng.split("=")[1].rstrip("-")) if rng and not H.ignore_range else 0
+                body = outer.data[start:]
+                self.send_response(206 if start else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                cut = H.cut.pop(0) if H.cut else None
+                if cut is not None:
+                    body = body[:cut]
+                self.wfile.write(body)
+                self.wfile.flush()
+                self.close_connection = True  # a short body with a full Content-Length: the early close
+
+        cls.H = H
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.url = f"http://127.0.0.1:{cls.srv.server_address[1]}/f.bin"
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "f.bin")
+        self.H.log.clear()
+        self.H.cut.clear()
+        self.H.ignore_range = False
+        p = mock.patch.object(llm.time, "sleep", lambda s: None)  # no backoff delays in tests
+        p.start()
+        self.addCleanup(p.stop)
+
+    def read(self, path=None):
+        with open(path or self.path, "rb") as f:
+            return f.read()
+
+    def test_a_connection_that_closes_early_is_resumed_not_accepted(self):
+        self.H.cut.append(120_000)  # the first response ends 120 KB in, with no error raised client-side
+        llm.download_file(self.url, self.path, len(self.data), self.sha)
+        self.assertEqual(self.read(), self.data)
+        self.assertEqual(self.H.log, [None, "bytes=120000-"])
+        self.assertFalse(os.path.exists(self.path + ".part"))
+
+    def test_a_short_file_under_the_final_name_is_resumed(self):
+        # what an earlier version of the downloader left behind after accepting a short read
+        with open(self.path, "wb") as f:
+            f.write(self.data[:50_000])
+        llm.download_file(self.url, self.path, len(self.data), self.sha)
+        self.assertEqual(self.read(), self.data)
+        self.assertEqual(self.H.log, ["bytes=50000-"])
+
+    def test_a_server_that_ignores_range_does_not_get_its_answer_appended(self):
+        with open(self.path + ".part", "wb") as f:
+            f.write(self.data[:50_000])
+        self.H.ignore_range = True
+        llm.download_file(self.url, self.path, len(self.data), self.sha)
+        self.assertEqual(self.read(), self.data)  # not 50 KB + the whole file
+
+    def test_a_wrong_checksum_is_refused_and_leaves_no_final_file(self):
+        with self.assertRaises(ValueError):
+            llm.download_file(self.url, self.path, len(self.data), "0" * 64)
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_a_server_that_always_cuts_off_fails_loudly(self):
+        self.H.cut.extend([10_000] * 10)
+        with self.assertRaises(OSError):
+            llm.download_file(self.url, self.path, len(self.data), self.sha, retries=2)
+        self.assertFalse(os.path.exists(self.path))  # never a short file under the final name
+
+    def test_unknown_size_still_downloads(self):
+        llm.download_file(self.url, self.path, 0)
+        self.assertEqual(self.read(), self.data)
+
+    def test_complete_file_is_left_alone(self):
+        with open(self.path, "wb") as f:
+            f.write(self.data)
+        llm.download_file(self.url, self.path, len(self.data), self.sha)
+        self.assertEqual(self.H.log, [])  # nothing fetched

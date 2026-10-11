@@ -21,6 +21,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
 The manager itself is stdlib-only; the engine runs from ./.venv.
 Language: English by default, Russian via LLM_LANG=ru, the settings menu or a ru system locale.
 """
+import http.client
 import json
 import os
 import re
@@ -30,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -850,6 +852,71 @@ def hf_search(query, limit=20):
              "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz, pr in zip(found, sizes, probes)]
 
 
+def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, retries=6):
+    """Fetch `url` into `path`, resuming with Range, and never leave a short or corrupt file
+    under the final name. `size` / `sha256` come from the hub listing (0 / None = unknown).
+
+    urllib's read(n) returns b"" on a connection that closed early instead of raising, so a
+    clean end of the read loop proves nothing: the size is checked and, when short, the
+    transfer is resumed. A server that answers a Range request with 200 (the whole file)
+    would otherwise be appended to the partial — start over in that case."""
+    on_chunk = on_chunk or (lambda n: None)
+    part = path + ".part"
+    if os.path.exists(path):
+        if (not size or os.path.getsize(path) == size) and not sha256:
+            return
+        if size and os.path.getsize(path) == size:
+            if _sha256(path) == sha256:
+                return
+            os.remove(path)  # same size, wrong content
+        else:
+            os.replace(path, part)  # a short file under the final name: resume it
+    attempt = 0
+    while True:
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        if size and have > size:
+            os.remove(part)
+            have = 0
+        if size and have == size:
+            break
+        req = urllib.request.Request(url, headers=dict(headers or {}))
+        if have:
+            req.add_header("Range", f"bytes={have}-")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                if have and getattr(r, "status", 206) != 206:
+                    have = 0
+                with open(part, "ab" if have else "wb") as out:
+                    while chunk := r.read(1 << 20):
+                        out.write(chunk)
+                        on_chunk(len(chunk))
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            attempt += 1
+            if attempt > retries:
+                raise
+            time.sleep(min(2 ** attempt, 30))
+            continue
+        got = os.path.getsize(part)
+        if not size or got == size:
+            break
+        attempt += 1
+        if attempt > retries:
+            raise OSError(f"the connection kept closing early ({got} of {size} bytes)")
+    if sha256 and _sha256(part) != sha256:
+        os.remove(part)
+        raise ValueError("checksum mismatch — the partial download was discarded, run it again")
+    os.replace(part, path)
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 24):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def hf_pull(repo, progress=False):
     """Download a repo into ~/.cache/huggingface/hub/<org>/<name> with resume (Range) and atomic renames."""
     info = _hf(f"/api/models/{repo}?blobs=true")
@@ -862,36 +929,39 @@ def hf_pull(repo, progress=False):
         print(R(T("Not enough disk space: need {need:.1f} GB, free {free:.1f} GB").format(need=total / 2**30, free=free / 2**30)))
         return False
     print(T("Downloading {repo} ({size:.1f} GB) → {dest}").format(repo=repo, size=total / 2**30, dest=dest), flush=True)
-    done, t0, last, rev = 0, time.time(), 0.0, info.get("sha", "main")
+    state = {"done": 0, "last": 0.0}
+    t0, rev = time.time(), info.get("sha", "main")
+    headers = {"User-Agent": "AI-llm-Engine"}
+    if os.environ.get("HF_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["HF_TOKEN"]
+
+    def tick(n, name):
+        state["done"] += n
+        now = time.time()
+        if now - state["last"] > 0.5:
+            state["last"] = now
+            if progress:
+                print(f"PROGRESS {min(state['done'], total)} {total} {name}", flush=True)
+            else:
+                speed = state["done"] / max(1e-6, now - t0) / 2**20
+                print(f"\r  {min(state['done'], total) / 2**30:5.2f} / {total / 2**30:.2f} GB  {speed:6.1f} MB/s  "
+                      f"{name[:40]:40s}", end="", flush=True)
+
     for f in files:
         name, size = f["rfilename"], f.get("size") or 0
         path = os.path.join(dest, name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.exists(path) and os.path.getsize(path) == size:
-            done += size
-            continue
-        part = path + ".part"
-        have = os.path.getsize(part) if os.path.exists(part) else 0
-        req = urllib.request.Request(f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{urllib.parse.quote(name)}",
-                                     headers={"User-Agent": "AI-llm-Engine"})
-        if os.environ.get("HF_TOKEN"):
-            req.add_header("Authorization", "Bearer " + os.environ["HF_TOKEN"])
-        if have:
-            req.add_header("Range", f"bytes={have}-")
-        done += have
-        with urllib.request.urlopen(req, timeout=60) as r, open(part, "ab" if have else "wb") as out:
-            while chunk := r.read(1 << 20):
-                out.write(chunk)
-                done += len(chunk)
-                now = time.time()
-                if now - last > 0.5:
-                    last = now
-                    if progress:
-                        print(f"PROGRESS {done} {total} {name}", flush=True)
-                    else:
-                        speed = done / max(1e-6, now - t0) / 2**20
-                        print(f"\r  {done / 2**30:5.2f} / {total / 2**30:.2f} GB  {speed:6.1f} MB/s  {name[:40]:40s}", end="", flush=True)
-        os.replace(part, path)
+        for q in (path, path + ".part"):  # what's already on disk counts as progress
+            if os.path.exists(q):
+                state["done"] += min(os.path.getsize(q), size or os.path.getsize(q))
+                break
+        url = f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{urllib.parse.quote(name)}"
+        try:
+            download_file(url, path, size, (f.get("lfs") or {}).get("sha256"), headers,
+                          lambda n, name=name: tick(n, name))
+        except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as e:
+            print("\n" + R(T("Download failed: {name}: {err}").format(name=name, err=e)))
+            return False
     if progress:
         print(f"PROGRESS {total} {total} done", flush=True)
     print("\n" + G(T("Downloaded: {dest}").format(dest=dest)))
