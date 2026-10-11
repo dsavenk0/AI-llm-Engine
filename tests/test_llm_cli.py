@@ -243,6 +243,33 @@ class TestStartStop(State):
         _, out4 = quiet(llm.stop, self.cfg)
         self.assertIn("Nothing is running", out4)
 
+    def test_a_gguf_the_builtin_decoder_cannot_load_is_retried_on_llama_cpp(self):
+        working = self.engine(0.2)
+        calls = []
+
+        def cmd(cfg, m):
+            calls.append(cfg.get("gguf_native", True))
+            if cfg.get("gguf_native", True):                      # the own decoder dies at once
+                return [sys.executable, "-c", "import sys; sys.exit(3)"]
+            return working(cfg, m)
+        native = lambda cfg, m: cfg.get("gguf_native", True)      # this fixture's model stands in for a GGUF
+        with mock.patch.object(llm, "engine_cmd", cmd), mock.patch.object(llm, "gguf_native", native), \
+                mock.patch.object(llm, "show_endpoints", lambda *a: None):
+            ok, out = quiet(llm.start, self.cfg, False)
+        self.assertTrue(ok, out)
+        self.assertEqual(calls, [True, False])                    # once natively, then through the gateway
+        self.assertIn("trying llama.cpp", out)
+        self.assertEqual(llm.health(self.cfg)["model"], "fake")
+        # no second attempt when the setting already says llama.cpp: a real failure is reported as one
+        calls.clear()
+        quiet(llm.stop, self.cfg)
+        with mock.patch.object(llm, "engine_cmd", lambda cfg, m: [sys.executable, "-c", "import sys; sys.exit(4)"]), \
+                mock.patch.object(llm, "gguf_native", lambda cfg, m: False), \
+                mock.patch.object(llm, "show_endpoints", lambda *a: None):
+            ok2, out2 = quiet(llm.start, self.cfg, False)
+        self.assertFalse(ok2)
+        self.assertNotIn("trying llama.cpp", out2)
+
     def test_a_stuck_engine_of_ours_on_the_port_is_replaced(self):
         stuck = subprocess.Popen([sys.executable, "-c",
                                   f"import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"

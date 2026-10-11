@@ -171,6 +171,112 @@ class TestNetworkAndEngineFlags(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--prefill-guard") + 1], "off")
 
 
+class TestSteerFlags(unittest.TestCase):
+    def test_a_models_edit_reaches_the_engine_command_on_the_native_route_only(self):
+        c = cfg()
+        m = {"name": "m", "path": "/tmp/m", "size": 1.0, "vision": False, "thinking": False, "route": "native"}
+        self.assertNotIn("--steer", llm.engine_cmd(c, m))
+        c["models"]["/tmp/m"] = {"steer": "/edits/dir.safetensors", "steer_alpha": 1.5}
+        cmd = llm.engine_cmd(c, m)
+        self.assertEqual(cmd[cmd.index("--steer") + 1], "/edits/dir.safetensors")
+        self.assertEqual(cmd[cmd.index("--steer-alpha") + 1], "1.5")
+        c["models"]["/tmp/m"] = {"steer": "/edits/dir.safetensors"}
+        self.assertNotIn("--steer-alpha", llm.engine_cmd(c, m))               # the edit's own recommendation applies
+        self.assertNotIn("--steer", llm.engine_cmd(c, dict(m, route="mlxlm")))
+
+
+class TestSteerCommand(unittest.TestCase):
+    """`./llm steer <repo>`: the edit, and the base model it was made for, are fetched and set up."""
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.mock = mock
+        self.tmp = tempfile.mkdtemp()
+        self.edit = os.path.join(self.tmp, "edit")
+        os.makedirs(os.path.join(self.edit, "runtime-adapter"))
+        with open(os.path.join(self.edit, "direction.json"), "w") as f:
+            json.dump({"model": "acme/base-27b", "hidden_size": 8}, f)
+        with open(os.path.join(self.edit, "runtime-adapter", "adapter.json"), "w") as f:
+            json.dump({"alpha": 1.5, "base_revision": "3f926b415992eaa2ae9dd7b573706494d6bbf787"}, f)
+        import numpy as np
+        import mlx.core as mx
+        mx.save_safetensors(os.path.join(self.edit, "refusal_dir.safetensors"),
+                            {"direction": mx.array(np.ones(8, np.float32))})
+        self.base_dir = os.path.join(self.tmp, "hub", "acme", "base-27b")
+        self.entry = {"name": "base-27b", "path": self.base_dir, "supported": True, "route": "native",
+                      "problems": [], "efforts": [], "size": 7.0, "vision": False, "thinking": False}
+        self.cfg = cfg()
+        self.cfg["models"] = {}
+        self.cfg["model"] = ""
+        self.pulls = []
+        self.installed = False
+
+        def pull(repo, progress=False, revision=None):
+            self.pulls.append((repo, revision))
+            self.installed = True
+            os.makedirs(self.base_dir, exist_ok=True)
+            return True
+        self.patches = [
+            mock.patch.object(llm, "hf_pull", pull),
+            mock.patch.object(llm, "install_state", lambda repo, siblings=None: "complete" if self.installed else "none"),
+            mock.patch.object(llm, "_pull_dest", lambda repo: self.base_dir),
+            mock.patch.object(llm, "scan_models", lambda c: [self.entry] if self.installed else []),
+            mock.patch.object(llm, "save_cfg", lambda c: None),
+            mock.patch.object(llm, "read_pid", lambda p: None),
+            mock.patch.object(llm, "sync_clients", lambda c: None),
+            mock.patch.object(llm, "current_model",
+                              lambda c: self.entry if c.get("model") == self.base_dir else None),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_the_missing_base_is_downloaded_at_its_pinned_revision_selected_and_given_the_edit(self):
+        self.assertTrue(llm.steer_cmd(self.cfg, [self.edit]))
+        self.assertEqual(self.pulls, [("acme/base-27b", "3f926b415992eaa2ae9dd7b573706494d6bbf787")])
+        self.assertEqual(self.cfg["model"], self.base_dir)                       # selected
+        mc = self.cfg["models"][self.base_dir]
+        self.assertEqual(mc["steer"], os.path.realpath(self.edit))
+        self.assertIsNone(mc["steer_alpha"])                                     # the edit's own recommendation applies
+
+    def test_a_base_downloaded_by_another_tool_in_the_hub_cache_layout_is_found(self):
+        layered = os.path.join(self.tmp, "hub", "models--acme--base-27b", "snapshots", "abc123")
+        os.makedirs(layered)
+        self.entry["path"] = layered
+        self.installed = True
+        self.assertTrue(llm.steer_cmd(self.cfg, [self.edit]))
+        self.assertEqual(self.pulls, [])                         # not fetched a second time into a flat folder
+        self.assertEqual(self.cfg["model"], layered)
+
+    def test_an_installed_base_is_not_downloaded_again_and_alpha_can_be_given(self):
+        self.installed = True
+        os.makedirs(self.base_dir, exist_ok=True)
+        self.assertTrue(llm.steer_cmd(self.cfg, [self.edit, "--alpha", "0.8"]))
+        self.assertEqual(self.pulls, [])
+        self.assertEqual(self.cfg["models"][self.base_dir]["steer_alpha"], 0.8)
+
+    def test_a_base_on_another_route_is_refused_and_nothing_is_set(self):
+        self.installed = True
+        self.entry["route"] = "mlxlm"
+        self.assertFalse(llm.steer_cmd(self.cfg, [self.edit]))
+        self.assertEqual(self.cfg["models"], {})
+
+    def test_off_clears_the_edit_of_the_selected_model(self):
+        self.installed = True
+        self.assertTrue(llm.steer_cmd(self.cfg, [self.edit]))
+        self.assertTrue(llm.steer_cmd(self.cfg, ["off"]))
+        self.assertEqual(self.cfg["models"][self.base_dir]["steer"], "")
+
+    def test_a_pinned_revision_must_look_like_a_commit_hash(self):
+        with open(os.path.join(self.edit, "runtime-adapter", "adapter.json"), "w") as f:
+            json.dump({"alpha": 1.0, "base_revision": "../../etc"}, f)
+        self.assertEqual(llm.steer_base(self.edit), ("acme/base-27b", None))
+        with open(os.path.join(self.edit, "direction.json"), "w") as f:
+            json.dump({"model": "../x"}, f)
+        self.assertEqual(llm.steer_base(self.edit)[0], None)
+
+
 class TestTranslations(unittest.TestCase):
     def test_every_ui_string_has_russian(self):
         with open(os.path.join(ROOT, "locales", "ru.json"), encoding="utf-8") as f:
@@ -296,6 +402,62 @@ class TestDownloadFile(unittest.TestCase):
             f.write(self.data)
         llm.download_file(self.url, self.path, len(self.data), self.sha)
         self.assertEqual(self.H.log, [])  # nothing fetched
+
+
+class TestTokenStaysWithTheHub(unittest.TestCase):
+    """The hub answers /resolve/ with a redirect to a CDN: the Authorization header must not follow it."""
+
+    def test_authorization_is_dropped_on_a_redirect_to_another_host_but_kept_on_the_same_one(self):
+        import http.server
+        import threading
+        seen = {}
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen["cdn"] = self.headers.get("Authorization")
+                body = b"payload"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        cdn = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Target)
+        cdn_url = f"http://127.0.0.1:{cdn.server_address[1]}/blob"
+
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen["hub"] = self.headers.get("Authorization")
+                if self.path.startswith("/same"):
+                    seen["same_hit"] = True
+                    body = b"local"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", cdn_url)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+        hub = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+        for srv in (cdn, hub):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(cdn.shutdown)
+        self.addCleanup(hub.shutdown)
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "f")
+        llm.download_file(f"http://127.0.0.1:{hub.server_address[1]}/resolve/f", out, 0, None,
+                          {"Authorization": "Bearer secret", "User-Agent": "t"})
+        self.assertEqual(seen["hub"], "Bearer secret")             # the hub itself gets it
+        self.assertIsNone(seen["cdn"])                             # the CDN does not
+        self.assertEqual(open(out, "rb").read(), b"payload")
 
 
 class TestModelRoutes(unittest.TestCase):
@@ -489,3 +651,15 @@ class TestEditorInTheBundle(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(res, "LLMEditor.app", "Contents", "Info.plist")))
         for rel in ("ui/server.py", "ui/codeinfo.py", "ui/agentloop.py", "ui/diagnostics.py", "harness/memory.py"):
             self.assertTrue(os.path.isfile(os.path.join(res, "llm", rel)), rel)
+
+
+class TestPullValidation(unittest.TestCase):
+    """A download target is a repository id — never a path that could climb out of the models folder."""
+
+    def test_bad_ids_never_reach_the_network(self):
+        from unittest import mock
+        for bad in ("../../x", "/etc/passwd", "org/../x", "a", "org/", "ms:../x/y", "org/name/extra", ".hidden/x"):
+            with self.subTest(bad), mock.patch.object(llm, "_hf") as hf, mock.patch.object(llm, "ms_files") as ms:
+                self.assertFalse(llm.hf_pull(bad))
+                hf.assert_not_called()
+                ms.assert_not_called()

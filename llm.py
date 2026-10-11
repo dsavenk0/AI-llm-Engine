@@ -62,6 +62,7 @@ DEFAULTS = {
     "lan": False,
     "api_key": "",
     "auto_free": True,           # on start, quit vMLX/oMLX GUIs and Ollama
+    "gguf_native": True,         # run GGUF files the engine's own MLX decoder can (llama.cpp only for the rest)
     "prefill_step": 1024,
     "speculative": True,         # prompt-lookup speculative decoding
     "idle_sleep": 15,            # minutes of inactivity before the model is unloaded (0 = never)
@@ -108,6 +109,8 @@ MODEL_DEFAULTS = {
     "effort": "medium",
     "vision": True,
     "max_pixels": 1024 * 1024,
+    "steer": "",                 # an activation edit for this model: a direction file or a folder (./llm steer)
+    "steer_alpha": None,         # its strength; None = what the edit's own adapter.json recommends, else 1.0
 }
 
 TTY = sys.stdout.isatty()
@@ -312,6 +315,27 @@ def inspect_gguf(path, name=None):
             "context_length": h.get("context_length")}
 
 
+_NATIVE_CACHE = {}
+
+
+def gguf_native(cfg, m):
+    """True when this GGUF runs on the engine's own MLX decoder: allowed by the setting, a single file without
+    an image projector, and an architecture / quantization / tokenizer that decoder implements."""
+    if m.get("route") != "gguf" or not cfg.get("gguf_native", True) or m.get("vision"):
+        return False
+    path = m["path"]
+    if _SPLIT_RE.search(path) or not os.path.isfile(path):
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    key = (path, st.st_mtime_ns, st.st_size)
+    if key not in _NATIVE_CACHE:
+        _NATIVE_CACHE[key] = gguf.native_support(path)[0]
+    return _NATIVE_CACHE[key]
+
+
 def scan_gguf(cfg):
     """GGUF files in the model folders, LM Studio's folder and Ollama's store (read in place, never copied)."""
     roots = [os.path.expanduser(d) for d in cfg["dirs"]] + [os.path.expanduser(d) for d in LMSTUDIO_DIRS]
@@ -480,6 +504,119 @@ def set_vision(cfg, arg="on"):
     if read_pid(ENGINE_PID):
         return restart(cfg, False)
     return True
+
+
+REPO_ID_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
+
+
+def steer_base(path):
+    """(base repo id, pinned revision) an edit folder names — direction.json's "model" and the adapter's
+    "base_revision"; (None, None) when it names none."""
+    d = _json(os.path.join(path, "direction.json"))
+    a = _json(os.path.join(path, "runtime-adapter", "adapter.json")) or _json(os.path.join(path, "adapter.json"))
+    repo = d.get("model") or a.get("base_model")
+    if not isinstance(repo, str) or not REPO_ID_RE.match(repo):
+        repo = None
+    rev = a.get("base_revision")
+    return repo, (rev if isinstance(rev, str) and re.match(r"^[0-9a-f]{7,40}$", rev) else None)
+
+
+def find_installed(cfg, repo):
+    """The scanned model that is hub repo `org/name`, wherever it was downloaded: our own flat folder
+    (…/hub/org/name) or the Hugging Face cache layout (…/hub/models--org--name/snapshots/<rev>). None if absent."""
+    org, name = repo.split("/", 1)
+    flat = os.sep + os.path.join(org, name)
+    layered = f"models--{org}--{name}"
+    for m in scan_models(cfg):
+        path = os.path.realpath(m["path"])
+        if path.endswith(flat) or (layered in path.split(os.sep)):
+            return m
+    return None
+
+
+def steer_cmd(cfg, args):
+    """`./llm steer`                       what is set for the selected model
+       `./llm steer <folder|file|org/name> [--alpha A]`   use an activation edit (a direction shipped next to a
+                                           base model, see engine/steering.py). A hub repo is downloaded first,
+                                           and so is the base model it names (the exact revision it was made
+                                           for) when that is not installed; that model is then selected.
+       `./llm steer off`                   back to the unmodified model
+    Per model, native route only; the engine restarts when it is running."""
+    from engine import steering
+    m = current_model(cfg)
+    rest = [a for a in args if not a.startswith("--alpha")]
+    alpha = None
+    for i, a in enumerate(args):
+        if a.startswith("--alpha"):
+            raw = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            try:
+                alpha = float(raw)
+            except ValueError:
+                print(R(T("--alpha needs a number"))); return False
+            rest = [x for x in rest if x != raw]
+    if not rest or rest[0].lower() in ("off", "none", "-"):
+        if not m:
+            print(R(T("Select a model first."))); return False
+        mc = mcfg(cfg, m["path"])
+        if not rest:
+            if mc.get("steer"):
+                print(T("Activation edit for {name}: {path}  (alpha {a})").format(
+                    name=m["name"], path=mc["steer"], a=mc.get("steer_alpha") if mc.get("steer_alpha") is not None else "auto"))
+            else:
+                print(DIM(T("No activation edit for {name}.").format(name=m["name"])))
+            return True
+        set_mcfg(cfg, "steer", ""); set_mcfg(cfg, "steer_alpha", None)
+        save_cfg(cfg)
+        print(G(T("Activation edit removed for {name}").format(name=m["name"])))
+        return restart(cfg, False) if read_pid(ENGINE_PID) else True
+
+    target = rest[0]
+    path = os.path.expanduser(target)
+    if not os.path.exists(path):
+        if not REPO_ID_RE.match(target):
+            print(R(T("{p}: no such file or folder").format(p=target))); return False
+        if not hf_pull(target):
+            return False
+        path = _pull_dest(target)
+    try:
+        file, rec = steering.resolve(path)
+    except steering.SteerError as e:
+        print(R(str(e))); return False
+
+    # the model the edit belongs to: its own base when it names one (fetched if missing), else the selected one
+    base, rev = steer_base(path)
+    chosen = m
+    if base:
+        chosen = find_installed(cfg, base)
+        if chosen is None:
+            print(T("This edit was made for {base}; it is not installed, downloading it first.").format(base=base))
+            if not hf_pull(base, revision=rev):
+                return False
+            chosen = find_installed(cfg, base)
+        if chosen is None:
+            print(R(T("{base} is downloaded but the engine does not list it as a model.").format(base=base)))
+            return False
+    elif not m:
+        print(R(T("Select a model first."))); return False
+    if not chosen.get("supported", True):
+        print(R(T("The engine does not support this model:") + " " + ", ".join(chosen.get("problems", [])))); return False
+    if chosen.get("route", "native") != "native" and not gguf_native(cfg, chosen):
+        print(R(T("Activation edits work on the native engine route only (this model runs on: {r}).")
+                .format(r=chosen.get("route")))); return False
+
+    cfg["models"].setdefault(chosen["path"], {})
+    cfg["models"][chosen["path"]]["steer"] = os.path.realpath(path)
+    cfg["models"][chosen["path"]]["steer_alpha"] = alpha
+    save_cfg(cfg)
+    used = alpha if alpha is not None else (rec if rec is not None else 1.0)
+    print(G(T("Activation edit set for {name}: {file}, alpha {a}").format(
+        name=chosen["name"], file=os.path.basename(file), a=used)))
+    print(DIM(T("It must match the base model it was made for; a wrong size is refused at start.")))
+    if not m or os.path.realpath(chosen["path"]) != os.path.realpath(m["path"]):
+        models = scan_models(cfg)
+        idx = next(i for i, x in enumerate(models, 1) if os.path.realpath(x["path"]) == os.path.realpath(chosen["path"]))
+        return choose_model(cfg, str(idx))          # selects it (and restarts a running engine on it)
+    return restart(cfg, False) if read_pid(ENGINE_PID) else True
 
 
 def delete_gguf(cfg, m, assume_yes=False):
@@ -766,7 +903,8 @@ def setup_gguf():
 
 
 def engine_cmd(cfg, m):
-    if m.get("route") == "gguf":
+    native_gguf = gguf_native(cfg, m)
+    if m.get("route") == "gguf" and not native_gguf:
         return gguf_cmd(cfg, m)
     mc = mcfg(cfg, m["path"])
     cmd = [VENV_PY, "-m", "engine.server", "--model", m["path"], "--name", served_name(m),
@@ -778,6 +916,8 @@ def engine_cmd(cfg, m):
            "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--disk-cache-gb", str(cfg.get("disk_cache_gb", 8))]
     if m.get("route") == "ptq1":  # picking an experimental-format model is the opt-in; no separate switch
         cmd += ["--ptq1", "on"]
+    if native_gguf:
+        cmd += ["--backend", "gguf"]
     if mc["thinking"] is not None:
         cmd += ["--thinking", "on" if mc["thinking"] else "off"]
     if cfg.get("disk_cache_dir"):
@@ -791,6 +931,10 @@ def engine_cmd(cfg, m):
         cmd += ["--effort", mc["effort"]]
     if not mc["vision"]:
         cmd.append("--no-vision")
+    if mc.get("steer") and (m.get("route", "native") == "native" or native_gguf):
+        cmd += ["--steer", mc["steer"]]
+        if mc.get("steer_alpha") is not None:
+            cmd += ["--steer-alpha", str(mc["steer_alpha"])]
     if cfg.get("log_level", "info") in LOG_LEVELS and cfg.get("log_level") != "info":
         cmd += ["--log-level", cfg["log_level"]]
     if not cfg.get("fallback_model", True):
@@ -806,7 +950,7 @@ def route_blocker(cfg, m, interactive):
     """None when the model's route is ready; else a message (after offering the fix, if interactive).
     Only the optional mlx-lm backend needs anything installed; PTQ1 is enabled by the model itself."""
     route = m.get("route", "native")
-    if route == "gguf" and not gguf.server_path(DATA):
+    if route == "gguf" and not gguf_native(cfg, m) and not gguf.server_path(DATA):
         # a GGUF model was chosen on purpose and llama.cpp is its only runtime: fetch it (printing what happens)
         if interactive and not ask_yn(Y(T("This model runs on llama.cpp, which is not installed. Download it now (~40 MB)?")), True):
             return T("GGUF models need llama.cpp. Install it with:  ./llm setup --gguf")
@@ -882,7 +1026,13 @@ def start(cfg, interactive=True):
     while time.time() - t0 < 600:
         if p.poll() is not None:
             print(R("\n" + T("✗ Engine exited (code {code}):").format(code=p.returncode)))
-            print(tail(ENGINE_LOG, 15)); return False
+            print(tail(ENGINE_LOG, 15))
+            if gguf_native(cfg, m):          # the built-in decoder could not take this file: llama.cpp can
+                print(Y(T("The built-in decoder could not load this file; trying llama.cpp.")))
+                try: os.remove(ENGINE_PID)
+                except OSError: pass
+                return start(dict(cfg, gguf_native=False), interactive)
+            return False
         if health(cfg, 1):
             break
         print(".", end="", flush=True); time.sleep(1)
@@ -1444,6 +1594,22 @@ def hf_search(query, limit=20, source="hf", fmt="mlx"):
              "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz, pr in zip(found, sizes, probes)]
 
 
+class _SameHostAuth(urllib.request.HTTPRedirectHandler):
+    """A redirect to another host (the CDN behind a hub's /resolve/ URL) must not carry the hub's token."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            for h in list(new.headers):
+                if h.lower() == "authorization":
+                    del new.headers[h]
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+_DOWNLOAD_OPENER = urllib.request.build_opener(_SameHostAuth)
+
+
 def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, retries=6):
     """Fetch `url` into `path`, resuming with Range, and never leave a short or corrupt file
     under the final name. `size` / `sha256` come from the hub listing (0 / None = unknown).
@@ -1475,7 +1641,7 @@ def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, ret
         if have:
             req.add_header("Range", f"bytes={have}-")
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with _DOWNLOAD_OPENER.open(req, timeout=60) as r:
                 if have and getattr(r, "status", 206) != 206:
                     have = 0
                 with open(part, "ab" if have else "wb") as out:
@@ -1509,16 +1675,21 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def hf_pull(repo, progress=False):
+def hf_pull(repo, progress=False, revision=None):
     """Download a repo into ~/.cache/huggingface/hub/<org>/<name> with resume (Range) and atomic renames.
     A GGUF repo holds many quantizations: "org/name:Q4_K_M" takes one (default: the best-balanced on offer)."""
     repo, quant = gguf.split_repo_quant(repo)
     source, rid = _split_source(repo)
+    if not REPO_ID_RE.match(rid):
+        print(R(T("Download failed: {name}: {err}").format(name=repo, err=T("not a repository id (org/name)"))))
+        return False
     if source == "modelscope":
         try:
             info = {"siblings": ms_files(rid), "sha": "master"}
         except (OSError, urllib.error.URLError, ValueError, KeyError) as e:
             print(R(T("Download failed: {name}: {err}").format(name=repo, err=e))); return False
+    elif revision and re.match(r"^[0-9a-f]{7,40}$", revision):       # the exact commit an edit was made for
+        info = _hf(f"/api/models/{repo}/revision/{revision}?blobs=true")
     else:
         info = _hf(f"/api/models/{repo}?blobs=true")
     files = [f for f in info.get("siblings", []) if not f["rfilename"].lower().endswith(PULL_SKIP)]
@@ -1795,6 +1966,7 @@ def main():
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,
         "rm": lambda: remove_cmd(cfg, sys.argv[2:]),
         "vision": lambda: set_vision(cfg, arg or "on"),
+        "steer": lambda: steer_cmd(cfg, sys.argv[2:]),
         "perf": lambda: run_perf(sys.argv[2:]),
         "eval": lambda: run_eval(sys.argv[2:]),
         "calibrate": lambda: run_calibrate(sys.argv[2:]),
