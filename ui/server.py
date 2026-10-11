@@ -7,10 +7,10 @@ requests must come from localhost (Host/Origin checked, so a web page cannot dri
 """
 import argparse
 import json
-import mimetypes
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -22,10 +22,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
-from ui import codeinfo  # noqa: E402
+from ui import agentloop, codeinfo  # noqa: E402
 
-STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".build", "DerivedData", ".idea", ".DS_Store"}
+SKIP_DIRS = {".git", ".llm", "node_modules", "__pycache__", ".venv", "venv", ".build", "DerivedData", ".idea",
+             ".DS_Store"}
 MAX_FILE = 2_000_000          # larger files are listed but not opened
 MAX_ATTACH_TOTAL = 200_000    # bytes of attachments inlined into one prompt
 MAX_BODY = 8_000_000
@@ -35,8 +35,38 @@ GIT_TIMEOUT = 60
 class Project:
     """The workspace root and every filesystem/git operation on it."""
 
+    skip = SKIP_DIRS
+    max_file = MAX_FILE
+
     def __init__(self, root):
         self.root = os.path.realpath(root)
+
+    def search(self, pattern, rel=".", glob=None, limit=200):
+        """path:line: text for lines matching a regex (a plain substring when it is not a valid regex)."""
+        import fnmatch
+        try:
+            rx = re.compile(pattern)
+        except re.error:
+            rx = re.compile(re.escape(pattern))
+        out = []
+        for d, dirs, files in os.walk(self.resolve(rel)):
+            dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
+            for f in sorted(files):
+                if glob and not fnmatch.fnmatch(f, glob):
+                    continue
+                full = os.path.join(d, f)
+                try:
+                    if os.path.getsize(full) > MAX_FILE:
+                        continue
+                    with open(full, encoding="utf-8") as fh:
+                        for n, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                out.append(f"{self.rel(full)}:{n}: {line.rstrip()[:200]}")
+                                if len(out) >= limit:
+                                    return out
+                except (UnicodeDecodeError, OSError):
+                    continue
+        return out
 
     # ---- paths
     def resolve(self, rel, must_exist=True):
@@ -85,7 +115,8 @@ class Project:
         text = raw.decode("utf-8", errors="replace")
         lang = codeinfo.detect_language(full, text)
         return {"path": self.rel(full), "text": text, "language": lang, "mtime": st.st_mtime_ns,
-                "size": st.st_size, "outline": codeinfo.outline(text, lang)}
+                "size": st.st_size, "outline": codeinfo.outline(text, lang),
+                "spans": codeinfo.highlight(text, lang) if len(text) < 400_000 else []}
 
     def write(self, rel, text, expected_mtime=None):
         full = self.resolve(rel, must_exist=False)
@@ -280,8 +311,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(403, "requests must come from localhost")
         u = urllib.parse.urlsplit(self.path)
         path, q = u.path, {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
-        if method == "GET" and (path == "/" or path.startswith("/static/")):
-            return self._static("index.html" if path == "/" else path[len("/static/"):])
+        if method == "GET" and path == "/":
+            body = b"AI-llm-Engine editor backend. Use the native editor app (./llm ui).\n"
+            self._headers(200, "text/plain; charset=utf-8", len(body))
+            return self.wfile.write(body)
         if not path.startswith("/api/"):
             return self._error(404, "not found")
         if not self._authed():
@@ -305,15 +338,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(504, "git timed out")
         except RuntimeError as e:
             return self._error(500, str(e))
-
-    def _static(self, name):
-        full = os.path.realpath(os.path.join(STATIC, name))
-        if not full.startswith(os.path.realpath(STATIC) + os.sep) or not os.path.isfile(full):
-            return self._error(404, "not found")
-        with open(full, "rb") as f:
-            data = f.read()
-        self._headers(200, (mimetypes.guess_type(full)[0] or "text/plain") + "; charset=utf-8", len(data))
-        self.wfile.write(data)
 
     # ---- API
     def api_info(self, P, q, body):
@@ -345,6 +369,67 @@ class Handler(BaseHTTPRequestHandler):
         lang = body.get("language") or codeinfo.detect_language(body.get("path", ""), text)
         return self._json(200, {"language": lang, "spans": codeinfo.highlight(text, lang),
                                 "outline": codeinfo.outline(text, lang)})
+
+    def api_search(self, P, q, body):
+        pattern = q.get("q", "")
+        if not pattern:
+            raise ValueError("empty query")
+        hits = P.search(pattern, q.get("path", "."), q.get("glob"), limit=200)
+        return self._json(200, {"hits": [dict(zip(("path", "line", "text"), h.split(":", 2))) for h in hits]})
+
+    def api_agent_answer(self, P, q, body):
+        run = agentloop.RUNS.get(body.get("run", ""))
+        if run is None:
+            return self._error(404, "no such run (it may have finished)")
+        key = ("approval:" if body.get("kind") == "approval" else "question:") + str(body.get("id", ""))
+        run.answer(key, {"approve": bool(body.get("approve")), "text": body.get("text", "")})
+        return self._json(200, {"ok": True})
+
+    def api_agent(self, P, q, body):
+        messages = body.get("messages") or []
+        if not messages or messages[-1].get("role") != "user":
+            raise ValueError("the last message must be from the user")
+        items = P.attachments(body.get("attachments"))
+        msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
+        if items:
+            msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{attachment_block(items)}"
+        def alive():
+            try:                                  # an orderly close shows up as an empty peek
+                return self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) != b""
+            except BlockingIOError:
+                return True
+            except OSError:
+                return False
+
+        run = agentloop.Run(alive)
+        agentloop.RUNS[run.id] = run
+        self._headers(200, "text/event-stream", extra={"Connection": "close"})
+        self.close_connection = True
+
+        def emit(ev):
+            try:
+                self.wfile.write(b"data: " + json.dumps(ev, ensure_ascii=False).encode() + b"\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                run.cancel()
+
+        try:
+            emit({"type": "run", "id": run.id})
+            extra = ""
+            try:
+                from harness import memory
+                extra = memory.system_block(P.root)
+            except Exception:
+                pass
+            finished = agentloop.run_agent(P, self.server.engine_port, msgs, emit, run, think=bool(body.get("think")),
+                                           auto_edit=bool(body.get("auto_edit")), system_extra=extra)
+            if finished:
+                emit({"type": "done"})
+        except RuntimeError as e:
+            emit({"type": "error", "message": str(e)})
+        finally:
+            run.cancel()
+            agentloop.RUNS.pop(run.id, None)
 
     def api_git_status(self, P, q, body):
         return self._json(200, P.git_status())

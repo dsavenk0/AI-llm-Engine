@@ -143,9 +143,9 @@ class TestSecurity(Base):
         names = [e["name"] for e in self.call("GET", "/api/tree")[1]["entries"]]
         self.assertNotIn(".git", names)
 
-    def test_static_files_cannot_escape_their_folder(self):
-        code, _ = self.call("GET", "/static/../server.py", token=None)
-        self.assertEqual(code, 404)
+    def test_there_is_no_web_client_and_no_static_file_serving(self):
+        self.assertEqual(self.call("GET", "/static/../server.py", token=None)[0], 404)
+        self.assertEqual(self.call("GET", "/static/app.js", token=None)[0], 404)
 
 
 class TestFiles(Base):
