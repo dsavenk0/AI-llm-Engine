@@ -152,5 +152,7 @@
   "No project memory yet — /remember <note>": "Памяти проекта пока нет — /remember <заметка>",
   "Remembered.": "Запомнил.",
   "Usage: /remember <note>": "Использование: /remember <заметка>",
-  "packed JANG storage": "упакованное хранение JANG (ядра пока нет)"
+  "packed JANG storage": "упакованное хранение JANG (ядра пока нет)",
+  "The agent wants to {what}. Allow web access for this session?": "Агент хочет: {what}. Разрешить доступ в интернет на эту сессию?",
+  "Web search and page reading: {v}": "Поиск в интернете и чтение страниц: {v}"
 }
