@@ -265,7 +265,20 @@ class TestMemoryWatchdog(unittest.TestCase):
     def _fake_engine(self, mem_limit=0.88):
         from types import SimpleNamespace
         return SimpleNamespace(prefill_step=1024, base_work=64 * 2**20, act_per_token=900 * 1024,
-                               kv_per_token=4096, mem_limit=mem_limit, snapshots=[], log=lambda *_: None)
+                               kv_per_token=4096, mem_limit=mem_limit, snapshots=[], log=lambda *_: None,
+                               prefill_guard=True)
+
+    def test_reserve_with_the_guard_off_never_refuses(self):
+        from engine import generate as gen_mod
+        eng = self._fake_engine()
+        eng.prefill_guard = False
+        orig = gen_mod.memory.headroom_bytes
+        gen_mod.memory.headroom_bytes = lambda limit: -10 * 2**30          # a hopeless deficit
+        try:
+            gen_mod.Engine._reserve(eng, 10_000)
+            self.assertEqual(eng.step_now, 1024)                            # and the chunk is not shrunk
+        finally:
+            gen_mod.memory.headroom_bytes = orig
 
     def test_reserve_allows_a_tiny_prompt_right_at_the_limit(self):
         from engine import generate as gen_mod
