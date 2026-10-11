@@ -44,5 +44,36 @@ class TestEditorApp(unittest.TestCase):
             self.assertIn("def added", f.read())                  # the save really reached the disk
 
 
+@unittest.skipUnless(shutil.which("swiftc") and shutil.which("osascript"), "needs swiftc and osascript")
+class TestNewWindowRequest(unittest.TestCase):
+    """LLMBar asks a running editor for another window with a distributed notification."""
+
+    def test_llmbar_and_the_editor_agree_on_the_notification(self):
+        name = "local.llm-engine.editor.new-window"
+        with open(os.path.join(ROOT, "app", "LLMBar.swift")) as f:
+            self.assertIn(name, f.read())
+        with open(os.path.join(ROOT, "app", "editor", "main.swift")) as f:
+            self.assertIn(name, f.read())
+
+    def test_a_running_editor_receives_the_request_with_the_project(self):
+        binary = TestEditorApp.binary if hasattr(TestEditorApp, "binary") else None
+        if not binary or not os.path.exists(binary):
+            self.skipTest("the editor binary is built by TestEditorApp")
+        proc = subprocess.Popen([binary, "--selftest-notify"], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), "READY")
+            js = ('ObjC.import("Foundation");'
+                  '$.NSDistributedNotificationCenter.defaultCenter.postNotificationNameObjectUserInfoDeliverImmediately('
+                  '"local.llm-engine.editor.new-window", $(), $({root: "/tmp/some-project"}), true);')
+            subprocess.run(["osascript", "-l", "JavaScript", "-e", js], check=True, timeout=30)
+            import select
+            ready, _, _ = select.select([proc.stdout], [], [], 15)
+            self.assertTrue(ready, "the editor never received the notification")
+            self.assertEqual(proc.stdout.readline().strip(), "NEW-WINDOW /tmp/some-project")
+        finally:
+            proc.kill()
+            proc.wait()
+
+
 if __name__ == "__main__":
     unittest.main()

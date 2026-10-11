@@ -365,3 +365,23 @@ class TestEditorLauncher(unittest.TestCase):
         with mock.patch.object(llm, "BASE", tempfile.mkdtemp()), mock.patch.object(llm, "find_editor", lambda: None):
             ok = llm.run_ui([])
         self.assertFalse(ok)
+
+
+class TestEditorInTheBundle(unittest.TestCase):
+    def test_layout_of_a_bundled_app_is_found_from_the_cli(self):
+        """LLMBar.app/Contents/Resources/{LLMEditor.app, llm/} — `llm` runs with BASE = .../Resources/llm."""
+        from unittest import mock
+        res = tempfile.mkdtemp()
+        base = os.path.join(res, "llm")
+        os.makedirs(base)
+        os.makedirs(os.path.join(res, "LLMEditor.app"))
+        with mock.patch.object(llm, "BASE", base):
+            self.assertEqual(llm.find_editor(), os.path.join(res, "LLMEditor.app"))
+
+    @unittest.skipUnless(os.path.isdir(os.path.join(ROOT, "LLMBar.app")), "LLMBar.app has not been built here")
+    def test_the_built_app_carries_the_editor_and_its_backend(self):
+        res = os.path.join(ROOT, "LLMBar.app", "Contents", "Resources")
+        self.assertTrue(os.path.isfile(os.path.join(res, "LLMEditor.app", "Contents", "MacOS", "LLMEditor")))
+        self.assertTrue(os.path.isfile(os.path.join(res, "LLMEditor.app", "Contents", "Info.plist")))
+        for rel in ("ui/server.py", "ui/codeinfo.py", "ui/agentloop.py", "ui/diagnostics.py", "harness/memory.py"):
+            self.assertTrue(os.path.isfile(os.path.join(res, "llm", rel)), rel)

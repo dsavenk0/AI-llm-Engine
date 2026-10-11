@@ -195,7 +195,8 @@ Optional extras, each off until you ask (nothing is contacted or added to the pr
 
 ### Code editor (optional, native)
 
-`./build-editor.sh` builds `LLMEditor.app` (LLMBar's `build-app.sh` bundles it too); `./llm ui [folder]` opens it. It is a
+`./build-editor.sh` builds `LLMEditor.app` (LLMBar's `build-app.sh` bundles it too). LLMBar's `</>` button (header) and
+the *Code editor* tool open it, each time in a new window; `./llm ui [folder]` does the same from the terminal. It is a
 separate Swift app that only runs while you use it, and its parts are independent modules you can switch off
 (Files, Outline, Changes/git, Assistant, Problems, Terminal):
 

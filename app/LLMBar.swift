@@ -200,6 +200,45 @@ struct Paths {
     var config: String { home + "/.llm/config.json" }
 }
 
+/// Opens LLMEditor.app (bundled next to this app's resources, or built in the checkout). The editor is a
+/// separate process, started only here on request; if it is already running it opens one more window.
+enum EditorLauncher {
+    static let bundleID = "local.llm-engine.editor"
+
+    static func appURL() -> URL? {
+        var candidates: [URL] = []
+        if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("LLMEditor.app")) }
+        candidates.append(URL(fileURLWithPath: Paths.shared.root + "/LLMEditor.app"))
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// `project` nil = the editor reopens its last project (or asks). Calls back with an error text, or nil.
+    static func open(enginePort: Int, project: String? = nil, done: @escaping (String?) -> Void) {
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            // already running: one more window in it (it asks which project, or opens `project`)
+            DistributedNotificationCenter.default().postNotificationName(
+                Notification.Name("local.llm-engine.editor.new-window"), object: nil,
+                userInfo: ["root": project ?? ""], deliverImmediately: true)
+            running.activate(options: [.activateIgnoringOtherApps])
+            done(nil)
+            return
+        }
+        guard let url = appURL() else {
+            done(L("The editor is not built yet — run ./build-editor.sh (or ./build-app.sh)",
+                   "Редактор ещё не собран — выполните ./build-editor.sh (или ./build-app.sh)"))
+            return
+        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.createsNewApplicationInstance = false
+        cfg.activates = true
+        cfg.arguments = ["--llm-root", Paths.shared.root, "--engine-port", String(enginePort)]
+            + (project.map { ["--root", $0] } ?? [])
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
+            DispatchQueue.main.async { done(error?.localizedDescription) }
+        }
+    }
+}
+
 enum CLI {
     static func run(_ args: [String], done: @escaping (Int32, String) -> Void) {
         DispatchQueue.global().async {
@@ -343,6 +382,10 @@ final class EngineState: ObservableObject {
                           route: $0["route"] as? String ?? "native", problems: $0["problems"] as? [String] ?? [])
             }
         }
+    }
+
+    func openEditor() {
+        EditorLauncher.open(enginePort: port) { err in if let err { self.message = err } }
     }
 
     func command(_ args: [String], label: String, then: (() -> Void)? = nil) {
@@ -1254,9 +1297,7 @@ struct ToolsTab: View {
                 tool("chevron.left.forwardslash.chevron.right", L("Code editor", "Редактор кода"),
                      L("Native editor with the assistant, git, terminal and problems — opens on demand",
                        "Нативный редактор с ассистентом, git, терминалом и проблемами — открывается по требованию")) {
-                    CLI.run(["ui", "--choose"]) { code, out in
-                        if code != 0 { e.message = out.split(separator: "\n").suffix(2).joined(separator: "\n") }
-                    }
+                    e.openEditor()
                 }
                 Menu {
                     Button("Continue") { e.command(["connect", "continue"], label: "connect continue") }
@@ -1513,6 +1554,11 @@ struct ContentView: View {
                     .font(HUD.mono(10)).tracking(0.6).foregroundColor(e.running ? HUD.cyan : HUD.dim)
             }
             Spacer()
+            Button(action: { e.openEditor() }) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 12, weight: .semibold))
+                    .frame(width: 24, height: 22).contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundColor(HUD.cyan)
+                .help(L("Open the code editor", "Открыть редактор кода"))
             Button(action: { e.onAbout?() }) {
                 Image(systemName: "info.circle").font(.system(size: 13, weight: .regular)).frame(width: 22, height: 22)
                     .contentShape(Rectangle())

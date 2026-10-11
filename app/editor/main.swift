@@ -1,55 +1,42 @@
 // LLM Editor — a native, on-demand code editor for the local engine. Started by `./llm ui` or LLMBar;
-// it owns a small Python backend (ui/server.py) for highlighting, structure, git and the agent loop.
+// every window owns one project, its chats and a small Python backend (ui/server.py).
 import AppKit
 import SwiftUI
 
+/// What LLMBar posts to a running editor to get one more window.
+let newWindowNotification = Notification.Name("local.llm-engine.editor.new-window")
+
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
-    var window: NSWindow!
+final class EditorWindowController: NSObject, NSWindowDelegate {
     let ws: Workspace
     let chat: ChatStore
-    private var startRoot: String?
+    private(set) var window: NSWindow!
+    weak var owner: AppDelegate?
 
-    override init() {
-        var root: String?
-        var llmRoot = Bundle.main.object(forInfoDictionaryKey: "LLMRoot") as? String ?? FileManager.default.currentDirectoryPath
-        var port = 8090
-        let a = CommandLine.arguments
-        var i = 1
-        while i < a.count {
-            switch a[i] {
-            case "--root": if i + 1 < a.count { root = a[i + 1]; i += 1 }
-            case "--llm-root": if i + 1 < a.count { llmRoot = a[i + 1]; i += 1 }
-            case "--engine-port": if i + 1 < a.count { port = Int(a[i + 1]) ?? 8090; i += 1 }
-            default: break
-            }
-            i += 1
-        }
-        let w = Workspace(llmRoot: llmRoot, enginePort: port)
+    init(llmRoot: String, enginePort: Int) {
+        let w = Workspace(llmRoot: llmRoot, enginePort: enginePort)
         ws = w
         chat = ChatStore(ws: w)
-        startRoot = root ?? UserDefaults.standard.string(forKey: "lastProject")
         super.init()
     }
 
-    func applicationDidFinishLaunching(_ n: Notification) {
-        if CommandLine.arguments.contains("--selftest") {
-            NSApp.setActivationPolicy(.prohibited)             // no window, no focus: a logic check
-            runSelfTest(ws, root: startRoot ?? FileManager.default.currentDirectoryPath)
-            return
-        }
-        buildMenus()
+    func show(near other: NSWindow?) {
         let host = NSHostingView(rootView: RootView(ws: ws, chat: chat, modules: ws.modules))
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 780),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "LLM Editor"
         window.contentView = host
-        window.center()
+        window.isReleasedWhenClosed = false
         window.delegate = self
-        window.setFrameAutosaveName("LLMEditorMain")
+        if let o = other {                                     // a new window cascades from the one before it
+            window.setFrame(o.frame, display: false)
+            let p = window.cascadeTopLeft(from: NSPoint(x: o.frame.minX, y: o.frame.maxY))
+            window.setFrameTopLeftPoint(p)
+        } else {
+            window.center()
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if let r = startRoot, FileManager.default.fileExists(atPath: r) { open(r) } else { chooseProject() }
     }
 
     func open(_ path: String) {
@@ -60,18 +47,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         chat.load(root: p)
     }
 
-    @objc func chooseProject() {
+    /// Ask for a folder; false when the user cancelled.
+    @discardableResult
+    func chooseProject() -> Bool {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.prompt = "Open"
         panel.message = "Choose the project folder"
-        if panel.runModal() == .OK, let url = panel.url { open(url.path) }
-        else if ws.root.isEmpty { NSApp.terminate(nil) }
+        if let last = UserDefaults.standard.string(forKey: "lastProject") {
+            panel.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent()
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        open(url.path)
+        return true
     }
-
-    func applicationWillTerminate(_ n: Notification) { ws.shutdown() }
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         let dirty = ws.open.filter(\.dirty)
@@ -79,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let alert = NSAlert()
         alert.messageText = "\(dirty.count) file(s) have unsaved changes"
         alert.informativeText = dirty.map { $0.path }.joined(separator: "\n")
-        alert.addButton(withTitle: "Save all and quit")
+        alert.addButton(withTitle: "Save all and close")
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
@@ -91,18 +81,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    // MARK: menus
+    func windowWillClose(_ n: Notification) {
+        ws.shutdown()                                      // this window's backend and shell go with it
+        owner?.remove(self)
+    }
+}
 
-    @objc func save() { ws.save() }
-    @objc func saveAll() { ws.saveAll() }
-    @objc func closeTab() { if let p = ws.activePath { ws.closeFile(p) } }
-    @objc func toggleLayout() { ws.mode = ws.mode == .chat ? .ide : .chat }
-    @objc func newChat() { chat.newChat(); ws.mode = .chat }
-    @objc func togglePanel() { ws.bottomVisible.toggle() }
-    @objc func showTerminal() { ws.showPanel("terminal") }
-    @objc func showProblems() { ws.showPanel("problems") }
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+    private var controllers: [EditorWindowController] = []
+    private var llmRoot = Bundle.main.object(forInfoDictionaryKey: "LLMRoot") as? String ?? FileManager.default.currentDirectoryPath
+    private var enginePort = 8090
+    private var startRoot: String?
+
+    override init() {
+        let a = CommandLine.arguments
+        var i = 1
+        super.init()
+        while i < a.count {
+            switch a[i] {
+            case "--root": if i + 1 < a.count { startRoot = a[i + 1]; i += 1 }
+            case "--llm-root": if i + 1 < a.count { llmRoot = a[i + 1]; i += 1 }
+            case "--engine-port": if i + 1 < a.count { enginePort = Int(a[i + 1]) ?? 8090; i += 1 }
+            default: break
+            }
+            i += 1
+        }
+        if startRoot == nil { startRoot = UserDefaults.standard.string(forKey: "lastProject") }
+    }
+
+    /// The window that has the focus (or the newest one).
+    var current: EditorWindowController? { controllers.first { $0.window?.isKeyWindow == true } ?? controllers.last }
+
+    func remove(_ c: EditorWindowController) { controllers.removeAll { $0 === c } }
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        if CommandLine.arguments.contains("--selftest") {
+            NSApp.setActivationPolicy(.prohibited)             // no window, no focus: a logic check
+            let ws = Workspace(llmRoot: llmRoot, enginePort: enginePort)
+            runSelfTest(ws, root: startRoot ?? FileManager.default.currentDirectoryPath)
+            return
+        }
+        if CommandLine.arguments.contains("--selftest-notify") {     // the LLMBar → editor "new window" contract
+            NSApp.setActivationPolicy(.prohibited)
+            DistributedNotificationCenter.default().addObserver(forName: newWindowNotification, object: nil, queue: .main) { n in
+                print("NEW-WINDOW \(n.userInfo?["root"] as? String ?? "")"); fflush(stdout); exit(0)
+            }
+            print("READY"); fflush(stdout)
+            return
+        }
+        buildMenus()
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(newWindowRequested(_:)), name: newWindowNotification, object: nil)
+        newWindow(project: startRoot.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil })
+    }
+
+    /// Another window, on `project` — or, without one, on a folder the user picks.
+    func newWindow(project: String?) {
+        let c = EditorWindowController(llmRoot: llmRoot, enginePort: enginePort)
+        c.owner = self
+        c.show(near: current?.window)
+        controllers.append(c)
+        if let p = project { c.open(p) }
+        else if !c.chooseProject() { c.window.close() }
+    }
+
+    @objc func newWindowRequested(_ n: Notification) {
+        let root = (n.userInfo?["root"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        newWindow(project: root)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ n: Notification) { controllers.forEach { $0.ws.shutdown() } }
+
+    // MARK: menus (act on the focused window)
+
+    @objc func newEditorWindow() { newWindow(project: nil) }
+    @objc func chooseProject() { current?.chooseProject() }
+    @objc func save() { current?.ws.save() }
+    @objc func saveAll() { current?.ws.saveAll() }
+    @objc func closeTab() { if let ws = current?.ws, let p = ws.activePath { ws.closeFile(p) } }
+    @objc func toggleLayout() { if let ws = current?.ws { ws.mode = ws.mode == .chat ? .ide : .chat } }
+    @objc func newChat() { current?.chat.newChat(); current?.ws.mode = .chat }
+    @objc func togglePanel() { current?.ws.bottomVisible.toggle() }
+    @objc func showTerminal() { current?.ws.showPanel("terminal") }
+    @objc func showProblems() { current?.ws.showPanel("problems") }
     @objc func toggleModule(_ sender: NSMenuItem) {
-        if let m = sender.representedObject as? ModuleID { ws.modules.toggle(m) }
+        if let m = sender.representedObject as? ModuleID { ModuleSettings.shared.toggle(m) }
     }
     @objc func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
@@ -111,8 +177,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if let m = item.representedObject as? ModuleID { item.state = ws.modules.isOn(m) ? .on : .off; return m != .files }
-        if item.action == #selector(save) || item.action == #selector(closeTab) { return ws.active != nil }
+        if let m = item.representedObject as? ModuleID {
+            item.state = ModuleSettings.shared.isOn(m) ? .on : .off
+            return m != .files
+        }
+        if item.action == #selector(save) || item.action == #selector(closeTab) { return current?.ws.active != nil }
+        if item.action == #selector(chooseProject) || item.action == #selector(newChat) { return current != nil }
         return true
     }
 
@@ -130,7 +200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let quit = NSMenuItem(title: "Quit LLM Editor", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         add("LLM Editor", [item("About LLM Editor", #selector(showAbout)), .separator(), quit])
-        add("File", [item("Open Project…", #selector(chooseProject), "o"), .separator(),
+        add("File", [item("New Window…", #selector(newEditorWindow), "n", [.command, .shift]),
+                     item("Open Project…", #selector(chooseProject), "o"), .separator(),
                      item("Save", #selector(save), "s"), item("Save All", #selector(saveAll), "s", [.command, .option]),
                      item("Close Tab", #selector(closeTab), "w"), .separator(), item("New Chat", #selector(newChat), "n")])
         let edit: [NSMenuItem] = [
@@ -152,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             view.append(i)
         }
         add("View", view)
+        add("Window", [NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")])
         NSApp.mainMenu = main
     }
 }

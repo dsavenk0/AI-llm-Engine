@@ -23,6 +23,8 @@ enum ModuleID: String, CaseIterable, Identifiable {
 }
 
 final class ModuleSettings: ObservableObject {
+    /// One set of switches for every window of the editor.
+    static let shared = ModuleSettings()
     @Published var enabled: Set<ModuleID>
     private let key = "enabledModules"
 
@@ -66,7 +68,7 @@ final class OpenFile: ObservableObject, Identifiable {
 @MainActor
 final class Workspace: ObservableObject {
     let backend = Backend()
-    let modules = ModuleSettings()
+    let modules = ModuleSettings.shared
     var llmRoot: String
     var enginePort: Int
 
