@@ -265,9 +265,11 @@ class TestDeleteModel(unittest.TestCase):
         self.home = os.path.realpath(tempfile.mkdtemp())
         self.cfg = cfg()
         self.cfg.update(dirs=[self.home], model="", models={})
-        p = mock.patch.object(llm, "save_cfg", lambda c: None)
-        p.start()
-        self.addCleanup(p.stop)
+        # no real engine may influence the outcome: delete_model refuses the model a running engine has loaded
+        for name, val in (("save_cfg", lambda c: None), ("read_pid", lambda p: None), ("health", lambda c, *a: None)):
+            p = mock.patch.object(llm, name, val)
+            p.start()
+            self.addCleanup(p.stop)
 
     def make(self, *parts, size=1000):
         d = os.path.join(self.home, *parts)

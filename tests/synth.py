@@ -31,14 +31,14 @@ CHATML_THINKING_OFF_BY_DEFAULT = (
 )
 
 
-def build_tokenizer(path):
+def build_tokenizer(path, extra_special=()):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tok.decoder = decoders.ByteLevel()
     trainer = trainers.BpeTrainer(
         vocab_size=320, show_progress=False, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-        special_tokens=["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<think>", "</think>"])
+        special_tokens=["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<think>", "</think>", *extra_special])
     tok.train_from_iterator(["the quick brown fox jumps over the lazy dog 0123456789 " * 4,
                              "user assistant system hello world what is two plus two"], trainer)
     tok.save(os.path.join(path, "tokenizer.json"))
@@ -50,7 +50,7 @@ def uniform(mode="affine", bits=BITS, group=GROUP):
 
 
 def make_bundle(path, template=CHATML, seed=0, generation_config=None, scheme=None, twin=False,
-                prefix="language_model."):
+                prefix="language_model.", extra_special=()):
     """Write a text-only bundle into `path` and return its config dict.
 
     scheme(name) -> None (store that module as float) or (mode, bits, group_size); `name` is the
@@ -61,7 +61,7 @@ def make_bundle(path, template=CHATML, seed=0, generation_config=None, scheme=No
     prefix: "language_model." (VLM conversions) or "" (text-only exports)."""
     scheme = scheme or uniform()
     os.makedirs(path, exist_ok=True)
-    vocab = build_tokenizer(path)
+    vocab = build_tokenizer(path, extra_special)
     with open(os.path.join(path, "chat_template.jinja"), "w") as f:
         f.write(template)
     cfg = {
@@ -237,3 +237,91 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML):
         json.dump(cfg, f)
     mx.save_safetensors(os.path.join(path, "model.safetensors"), t)
     return cfg
+
+
+# ───────────────────────── vision bundles ─────────────────────────
+VISION_TEMPLATE = (
+    "{%- for m in messages %}<|im_start|>{{ m.role }}\n"
+    "{%- if m.content is string %}{{ m.content }}"
+    "{%- else %}{%- for it in m.content %}"
+    "{%- if it.type == 'text' %}{{ it.text }}"
+    "{%- elif it.type == 'image' or it.type == 'image_url' or it.image_url is defined %}"
+    "<|vision_start|><|image_pad|><|vision_end|>{%- endif %}"
+    "{%- endfor %}{%- endif %}<|im_end|>\n{%- endfor %}"
+    "{%- if add_generation_prompt %}<|im_start|>assistant\n{%- endif %}"
+)
+VISION = {"depth": 2, "hidden_size": 64, "num_heads": 2, "intermediate_size": 128, "patch_size": 8,
+          "temporal_patch_size": 2, "in_channels": 3, "spatial_merge_size": 2, "num_position_embeddings": 16}
+
+
+def make_vision_bundle(path, seed=0, quantized_tower=False, template=VISION_TEMPLATE):
+    """A text bundle plus a tiny vision tower (random weights) laid out the way converted Qwen3.5
+    checkpoints are: vision_tower.* tensors in the same shard, an index, preprocessor_config.json."""
+    cfg = make_bundle(path, template, seed=seed, extra_special=["<|image_pad|>", "<|vision_start|>", "<|vision_end|>"])
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(os.path.join(path, "tokenizer.json"))
+    vc = dict(VISION, out_hidden_size=HIDDEN)
+    cfg["vision_config"] = vc
+    cfg["image_token_id"] = tok.token_to_id("<|image_pad|>")
+    cfg["vision_start_token_id"] = tok.token_to_id("<|vision_start|>")
+    cfg["vision_end_token_id"] = tok.token_to_id("<|vision_end|>")
+    with open(os.path.join(path, "config.json"), "w") as f:
+        json.dump(cfg, f)
+    with open(os.path.join(path, "preprocessor_config.json"), "w") as f:
+        json.dump({"patch_size": vc["patch_size"], "temporal_patch_size": vc["temporal_patch_size"],
+                   "merge_size": vc["spatial_merge_size"], "image_mean": [0.5] * 3, "image_std": [0.5] * 3,
+                   "size": {"shortest_edge": 16 * 16, "longest_edge": 128 * 128}}, f)
+
+    rng = np.random.default_rng(seed + 1000)
+    d, m, hid = vc["hidden_size"], vc["spatial_merge_size"], vc["intermediate_size"]
+    t = dict(mx.load(os.path.join(path, "model.safetensors")))
+
+    def w(shape, std=0.05):
+        return mx.array(rng.standard_normal(shape).astype(np.float32) * std).astype(mx.float16)
+
+    def linear(name, out, inp, std=0.05):
+        wt = w((out, inp), std)
+        if quantized_tower:
+            parts = mx.quantize(wt, group_size=GROUP, bits=BITS)
+            t[f"{name}.weight"], t[f"{name}.scales"], t[f"{name}.biases"] = parts
+        else:
+            t[f"{name}.weight"] = wt
+        t[f"{name}.bias"] = w((out,), 0.01)
+
+    def norm(name, n):
+        t[f"{name}.weight"] = mx.ones((n,), dtype=mx.float16)
+        t[f"{name}.bias"] = mx.zeros((n,), dtype=mx.float16)
+
+    pe = vc["patch_size"]
+    t["vision_tower.patch_embed.proj.weight"] = w((d, vc["in_channels"], vc["temporal_patch_size"], pe, pe), 0.1)
+    t["vision_tower.patch_embed.proj.bias"] = w((d,), 0.01)
+    t["vision_tower.pos_embed.weight"] = w((vc["num_position_embeddings"], d), 0.1)
+    for i in range(vc["depth"]):
+        b = f"vision_tower.blocks.{i}"
+        norm(f"{b}.norm1", d)
+        norm(f"{b}.norm2", d)
+        # strong q/k weights: attention must be peaked, or positions (rotary, interpolation) cannot matter
+        linear(f"{b}.attn.qkv", 3 * d, d, std=0.5)
+        linear(f"{b}.attn.proj", d, d)
+        linear(f"{b}.mlp.linear_fc1", hid, d)
+        linear(f"{b}.mlp.linear_fc2", d, hid)
+    norm("vision_tower.merger.norm", d)
+    linear("vision_tower.merger.linear_fc1", d * m * m, d * m * m)
+    linear("vision_tower.merger.linear_fc2", HIDDEN, d * m * m)
+    mx.save_safetensors(os.path.join(path, "model.safetensors"), t)
+    with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
+        json.dump({"metadata": {}, "weight_map": {k: "model.safetensors" for k in t}}, f)
+    return cfg
+
+
+def png_data_uri(width=48, height=40, seed=0):
+    """A small deterministic RGB test image as a data: URI."""
+    import base64
+    import io
+    from PIL import Image
+    rng = np.random.default_rng(seed)
+    arr = rng.integers(0, 255, (height, width, 3), dtype=np.uint8)
+    arr[:, : width // 2, 0] = 255          # a coarse structure, so different seeds give different pictures
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
