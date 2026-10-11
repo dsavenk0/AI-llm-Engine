@@ -23,6 +23,7 @@ import mlx.core as mx
 from . import memory
 from .generate import (ContextError, GiB, MemoryLimitError, Sampler, is_repeating, sampling_presets,
                        summarize)  # noqa: F401  (summarize is re-exported for the server)
+from . import family
 from .stopfilter import StopFilter
 from .tokenizer import StreamDecoder
 
@@ -41,18 +42,12 @@ def _json(path):
         return {}
 
 
-NATIVE_TYPES = ("qwen3_5", "qwen3_5_text", "ternel_hadamard_qwen35")
-
-
 def pick_backend(path, requested="auto"):
     """"native" for the Qwen3.5-hybrid dense family (incl. its PTQ1 repack); "mlxlm" for the rest."""
     if requested in ("native", "mlxlm"):
         return requested
     cfg = _json(os.path.join(path, "config.json"))
-    tc = cfg.get("text_config") or {}
-    types = {cfg.get("model_type"), tc.get("model_type")}
-    if (types & set(NATIVE_TYPES) or str(cfg.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1")) \
-            and not (tc.get("num_experts") or cfg.get("num_experts")):
+    if family.native_capable(cfg) or str(cfg.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1"):
         return "native"
     return "mlxlm"
 

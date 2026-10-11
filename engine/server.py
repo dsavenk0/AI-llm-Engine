@@ -335,6 +335,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ids, media = next(run_job(lambda: iter([ENGINE.encode(text, images)])))
         except (TemplateError, ValueError, OSError) as e:
             return self._error(400, f"prompt error: {e}")
+        except MemoryLimitError as e:   # e.g. no room to load the vision tower: a clean answer, not a dropped connection
+            log(f"memory: {e}")
+            return self._error(503, str(e), "server_error", "insufficient_memory")
+        except Exception as e:
+            log(f"prompt encoding error: {e!r}")
+            return self._error(500, f"prompt error: {e}", "server_error")
         if len(ids) >= ENGINE.max_context:
             return self._error(400, f"This model's maximum context length is {ENGINE.max_context} tokens, "
                                     f"but the prompt is {len(ids)} tokens.", err_code="context_length_exceeded")

@@ -220,6 +220,14 @@ class TestModelRoutes(unittest.TestCase):
         self.assertEqual(r({"model_type": "ternel_hadamard_qwen35", "text_config": {"model_type": "qwen3_5_text"}}), "ptq1")
         self.assertEqual(r({"model_type": "qwen3"}), "mlxlm")
         self.assertEqual(r({"model_type": "glm4_moe"}), "mlxlm")
+        # decided by the architecture's fields, not by the name: a type nobody listed still runs natively…
+        hybrid = {"hidden_size": 2048, "num_attention_heads": 16, "linear_num_value_heads": 16, "linear_num_key_heads": 8,
+                  "linear_key_head_dim": 128, "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4}
+        self.assertEqual(r({"model_type": "qwen3_9", "text_config": dict(hybrid, model_type="qwen3_9_text")}), "native")
+        self.assertEqual(r({"model_type": "some_new_name", "text_config": hybrid}), "native")
+        # …unless it is a mixture of experts, and a dense model without those fields is not the hybrid
+        self.assertEqual(r({"model_type": "some_new_name", "text_config": dict(hybrid, num_experts=8)}), "mlxlm")
+        self.assertEqual(r({"model_type": "llama", "text_config": {"hidden_size": 2048, "num_attention_heads": 16}}), "mlxlm")
         self.assertEqual(r({"model_type": "qwen3_5", "text_config": {"num_experts": 8}}), "mlxlm")  # MoE → not native
 
     def test_hub_tags(self):
@@ -227,6 +235,8 @@ class TestModelRoutes(unittest.TestCase):
         self.assertEqual(h(["mlx", "safetensors", "prism_hadamard_qwen35", "ternary"]), "native")
         self.assertEqual(h(["custom", "safetensors", "prism_hadamard_qwen35_ptq1", "mlx"]), "ptq1")
         self.assertEqual(h(["mlx", "safetensors", "ternel_hadamard_qwen35", "qwen3_5", "ternary", "vision"]), "ptq1")
+        self.assertEqual(h(["mlx", "safetensors", "qwen3_6"]), "native")      # a later family member, by name
+        self.assertEqual(h(["mlx", "safetensors", "qwen3_8b", "qwen3"]), "mlxlm")
         self.assertEqual(h(["mlx", "safetensors", "qwen3"]), "mlxlm")
         self.assertEqual(h(["mlx", "safetensors", "qwen3_5_moe"]), "mlxlm")
         self.assertEqual(h(["gguf", "qwen3_5"]), "none")

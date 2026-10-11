@@ -14,6 +14,7 @@ import time
 import mlx.core as mx
 import mlx.nn as nn
 
+from . import family
 from .model import Hadamard, Model
 
 SHIFTED_NORMS = (".input_layernorm.weight", ".post_attention_layernorm.weight",
@@ -105,8 +106,9 @@ def load(path, vision=True, log=print, ptq1=False):
     t0 = time.time()
     config = _json(os.path.join(path, "config.json"))
     jang = _json(os.path.join(path, "jang_config.json"))
-    if config.get("model_type") not in ("qwen3_5", TQ1_MODEL_TYPE) and config.get("text_config", {}).get("model_type") not in ("qwen3_5_text", "qwen3_5"):
-        raise ValueError(f"unsupported model_type {config.get('model_type')!r} (engine supports qwen3_5)")
+    if not family.native_capable(config) and config.get("model_type") != TQ1_MODEL_TYPE:
+        raise ValueError(f"unsupported model_type {config.get('model_type')!r}: the native engine runs the Qwen3.5 "
+                         f"hybrid architecture (GatedDeltaNet + attention, dense); other families need the mlx-lm backend")
     if "text_config" not in config:
         config = {"text_config": config, **{k: v for k, v in config.items() if k != "text_config"}}
     tc = config["text_config"]

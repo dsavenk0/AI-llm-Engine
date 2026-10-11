@@ -39,6 +39,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from engine import family  # noqa: E402  (stdlib only: no MLX needed to route a model)
+
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 HOME = os.path.expanduser("~")
@@ -162,7 +165,6 @@ def _json(path):
         return {}
 
 
-NATIVE_TYPES = ("qwen3_5", "qwen3_5_text", "prism_hadamard_qwen35")
 PTQ1_SCHEMA = "prism_hadamard_qwen35_ptq1"
 TQ1_TYPE = "ternel_hadamard_qwen35"   # inductiveML 1.75-bit repacks (TQ1_G128): same engine option
 
@@ -180,8 +182,7 @@ def engine_route(cfgj, tags=(), jang=None):
     packed = (jang or {}).get("runtime", {}).get("requires_jang_ternary_packed_expansion") or "packed-trits" in kinds
     if schema.startswith(PTQ1_SCHEMA) or PTQ1_SCHEMA in kinds or TQ1_TYPE in kinds or packed:
         return "ptq1"   # checked before "native": a TQ1 repo also carries the qwen3_5 tag
-    moe = text.get("num_experts") or cfgj.get("num_experts") or any("moe" in str(k) for k in kinds)
-    if kinds & set(NATIVE_TYPES) and not moe:
+    if family.native_capable(cfgj, tags):   # by the architecture's fields; names only for an undownloaded hub repo
         return "native"
     return "mlxlm"
 

@@ -243,6 +243,41 @@ class TestNativeServer(unittest.TestCase):
         self.assertGreater(row["prompt"], 0)
 
 
+class TestNativeServerNoRoomForVision(unittest.TestCase):
+    """Loading the vision tower is refused when RAM is over the limit: the client gets a JSON 503, not a
+    dropped connection (the error used to escape the handler)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.synth import make_vision_bundle
+        cls.dir = tempfile.mkdtemp()
+        make_vision_bundle(cls.dir, seed=12)
+        cls.srv = Server(cls.dir, "--mem-limit", "0.01")      # 1 % of RAM: always "over the limit"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+
+    def test_an_image_request_gets_a_clean_503(self):
+        import base64
+        import struct
+        import zlib
+        raw = b"".join(b"\x00" + b"\x80\x20\x20" * 16 for _ in range(16))
+
+        def chunk(t, d):
+            return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        url = "data:image/png;base64," + base64.b64encode(png).decode()
+        code, r = self.srv.json("POST", "/v1/chat/completions", {
+            "model": "synth", "max_tokens": 4, "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": "what is this?"}]}]})
+        self.assertEqual(code, 503)
+        self.assertEqual(r["error"]["code"], "insufficient_memory")
+        # and the server is still serving
+        self.assertEqual(self.srv.get("/health")["status"], "ok")
+
+
 class TestNativeServerSleep(unittest.TestCase):
     """An idle engine unloads its weights; /health must keep answering (the app polls it) and the
     next request must wake it. Regression: /health raised TypeError while the model was None."""
