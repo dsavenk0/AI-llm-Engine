@@ -394,6 +394,23 @@
   document.getElementById('lang-en')?.addEventListener('click', () => applyLanguage('en'));
   document.getElementById('lang-ru')?.addEventListener('click', () => applyLanguage('ru'));
 
+  // Mobile nav burger — the whole menu collapses behind it ≤1024px (see styles.css)
+  const navBurger = document.getElementById('nav-burger');
+  const navEl = document.querySelector('.apple-nav');
+  const setNavOpen = (open) => {
+    navEl?.classList.toggle('nav-open', open);
+    navBurger?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.body.classList.toggle('nav-scroll-lock', open);
+  };
+  navBurger?.addEventListener('click', () => setNavOpen(!navEl.classList.contains('nav-open')));
+  // tapping an actual link closes the drawer; theme/language toggles stay open
+  document.querySelectorAll('.nav-center a, .nav-right a').forEach(el => {
+    el.addEventListener('click', () => setNavOpen(false));
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 1024) setNavOpen(false);
+  });
+
   // ==========================================
   // 2. Tab Navigation (macOS Segmented Bar)
   // ==========================================

@@ -49,7 +49,11 @@
         </a>
       </div>
 
-      <div class="nav-center">
+      <button type="button" class="nav-burger" id="nav-burger" aria-label="Menu" aria-expanded="false" aria-controls="nav-center nav-right">
+        <span></span><span></span><span></span>
+      </button>
+
+      <div class="nav-center" id="nav-center">
         <a href="#overview" class="apple-nav-link" data-i18n="nav_overview">Overview</a>
         <a href="#demo" class="apple-nav-link" data-i18n="nav_llmbar">LLMBar HUD</a>
         <a href="#screenshots" class="apple-nav-link" data-i18n="nav_gallery">Screenshots</a>
@@ -59,7 +63,7 @@
         <a href="#install" class="apple-nav-link" data-i18n="nav_install">Install</a>
       </div>
 
-      <div class="nav-right">
+      <div class="nav-right" id="nav-right">
         <!-- Theme Switcher (Single Icon) -->
         <button type="button" class="theme-icon-btn" id="theme-toggle" aria-label="Toggle Theme" title="Toggle Theme (⚡ Dark HUD / ☼ Light Glass)">
           <span class="theme-icon" id="theme-icon">⚡</span>
