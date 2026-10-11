@@ -69,7 +69,9 @@ this 27B model.
 ./llm open         # new Terminal window: starts the model and opens a chat
 ```
 
-Double-clicking **`LLM.command`** in Finder does the same as `./llm open`.
+Double-clicking **`LLM.command`** in Finder does the same as `./llm open`. `./llm setup` is actually optional —
+`start`/`open`/LLMBar's Start button create the `.venv` and install `requirements.txt` on first use anyway; the only
+thing you need already on the Mac is Python 3.10+.
 
 ### Models: search, download, switch
 
@@ -115,6 +117,12 @@ closer to the clock; its position is remembered. The panel follows a dark or lig
   language and theme. An Advanced section holds sampling, draft length, n-gram, MLX cache, prefill chunk and image
   size. Every setting has a hint.
 - **Tools:** chat, coding agent, connecting an editor, logs, tests and benchmarks.
+
+<p align="center">
+  <img src="docs/assets/screenshot-engine.png" width="280" alt="Engine tab: status, token ledger, memory card">
+  <img src="docs/assets/screenshot-monitor.png" width="280" alt="Monitor tab: CPU, GPU and memory graphs">
+  <img src="docs/assets/screenshot-models.png" width="280" alt="Models tab: installed models, hub search and download">
+</p>
 
 It polls only while the panel is open and does all its work through `./llm`. Built from a checkout, it uses that checkout. Installed
 from the DMG on another Mac, it runs its bundled copy and keeps its config and `.venv` in
