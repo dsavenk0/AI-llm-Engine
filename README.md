@@ -158,7 +158,15 @@ OpenAI-compatible on `http://localhost:8090/v1`:
 - `POST /v1/chat/completions` supports streaming, `reasoning_content`, tool calls (the model's XML format is converted
   to OpenAI `tool_calls`) and images (`image_url` with a data URI, http URL or file path).
 - Thinking is controlled with `chat_template_kwargs.enable_thinking`, `reasoning_effort` (`low`, `medium`, `high`→`xhigh`)
-  or `thinking: {type: "disabled"}`.
+  or `thinking: {type: "disabled"}`. When a request doesn't say, the model gets **its own template's default**
+  (`--thinking auto`): on for Bonsai-27B, off for the small Qwen3.5 models, whose authors ship them with reasoning
+  disabled — forcing it on is what makes a 0.8B write hundreds of tokens of "Thinking Process" before answering
+  7 + 5. Models without a reasoning mode or a vision tower simply ignore those options (an image gets a clear 400).
+- Sampling comes from the bundle (`jang_config` modes, else `generation_config.json`), and for a bundle that ships
+  neither, from the Qwen3.5 family presets (temperature 1.0 / top-p 0.95 / top-k 20 when reasoning, 0.7 / 0.8 / 20
+  with presence penalty 1.5 otherwise) — never "temperature 1.0 over the whole vocabulary", which sends a small model
+  rambling. A runaway reasoning phase is cut off by a token budget (`--think-frac`) or by detecting a repeating loop,
+  and the answer is then produced from the closed reasoning; `think_forced` in a request's stats says if that happened.
 - `GET /v1/models`, `GET /health` (state, memory breakdown, cache, last request speed) and `GET /v1/stats` (token
   statistics for the session, all time and recent requests).
 - The memory breakdown is also printed by `./llm status`. The engine's own footprint is measured like Activity
@@ -191,7 +199,7 @@ A `.bak` copy is kept, and running it again only updates its own entry. Any othe
 
 ```sh
 .venv/bin/python -m engine.server --model <path> --port 8090 \
-    --context 32768 --max-tokens 8192 --thinking on --effort medium [--no-vision]
+    --context 32768 --max-tokens 8192 --thinking auto --effort medium [--no-vision]
 ```
 
 ## Tests
@@ -223,7 +231,7 @@ an answer instead of an endless `<think>`.
 code-edit speed, draft acceptance, peak memory and peak system RAM. `eval` complements it with a quality check — math
 word problems, function-completion problems graded by actually running the generated code, and trivial sanity
 questions that must finish cleanly rather than loop — so a change that quietly breaks answers gets caught, not just
-one that slows them down. Both accept a repeated `--model PATH` to compare several models in one run. Stop the
+one that slows them down. It runs each model in its own default reasoning mode with the model's sampling presets and a fixed seed (`--think on|off` and `--greedy` change that — reasoning models loop under greedy decoding, so a greedy benchmark mostly measures the loops) and reports how many replies had their reasoning force-closed or hit the token limit. Both accept a repeated `--model PATH` to compare several models in one run. Stop the
 server first. If memory runs short, a metric is skipped instead of freezing the Mac.
 
 `./llm calibrate [--apply]` checks the auto-context formula (RAM × limit − weights, divided by KV cost per token)

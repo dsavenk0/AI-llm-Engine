@@ -275,7 +275,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "disk_cache": {"entries": len(ENGINE.store.entries), "gb": round(ENGINE.store.total_bytes / 2**30, 2)}
                 if ENGINE.store else None,
                 "context": ENGINE.max_context, "max_tokens": ENGINE.max_tokens,
-                "thinking": ENGINE.thinking, "effort": ENGINE.effort,
+                "thinking": ENGINE.thinking, "thinking_default": ENGINE.thinking_default, "effort": ENGINE.effort,
                 "vision": ("loaded" if "vision_tower" in ENGINE.model else "on demand") if ENGINE.vision_allowed else False,
                 "busy": ENGINE.lock.locked(),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
@@ -500,7 +500,9 @@ def main():
     ap.add_argument("--context", type=int, default=0, help="max prompt+output tokens (0 = auto from RAM and model size)")
     ap.add_argument("--max-tokens", type=int, default=8192, help="max output tokens (requests above are clamped)")
     ap.add_argument("--prefill-step", type=int, default=1024)
-    ap.add_argument("--thinking", choices=("on", "off"), default="on")
+    ap.add_argument("--thinking", choices=("auto", "on", "off"), default="auto",
+                    help="reasoning mode when a request doesn't say: auto = whatever the model's own "
+                         "chat template does (on for Bonsai-27B, off for the small Qwen3.5 models)")
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--no-vision", action="store_true")
     ap.add_argument("--no-speculative", action="store_true", help="disable prompt-lookup speculative decoding")
@@ -530,7 +532,7 @@ def main():
     from engine.generate import Engine
     init = lambda: Engine(ARGS.model, vision=not ARGS.no_vision, max_context=ARGS.context,
                           max_tokens=ARGS.max_tokens, prefill_step=ARGS.prefill_step, max_pixels=ARGS.max_pixels,
-                          thinking=ARGS.thinking == "on", effort=ARGS.effort,
+                          thinking={"auto": None, "on": True, "off": False}[ARGS.thinking], effort=ARGS.effort,
                           speculative=not ARGS.no_speculative, mem_limit=ARGS.mem_limit,
                           sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
                                              "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty},

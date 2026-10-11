@@ -217,7 +217,7 @@ enum CLI {
 struct ModelInfo: Identifiable, Hashable {
     let path, name, format: String
     let size: Double
-    let vision, thinking, supported: Bool
+    let vision, thinking, thinkingDefault, supported: Bool
     let efforts: [String]
     var id: String { path }
 }
@@ -299,6 +299,7 @@ final class EngineState: ObservableObject {
                 ModelInfo(path: $0["path"] as? String ?? "", name: $0["name"] as? String ?? "?",
                           format: $0["format"] as? String ?? "", size: $0["size"] as? Double ?? 0,
                           vision: $0["vision"] as? Bool ?? false, thinking: $0["thinking"] as? Bool ?? false,
+                          thinkingDefault: $0["thinking_default"] as? Bool ?? true,
                           supported: $0["supported"] as? Bool ?? false, efforts: $0["efforts"] as? [String] ?? [])
             }
         }
@@ -723,8 +724,10 @@ struct SettingsTab: View {
                 field(L("Max output, tokens", "Макс. ответ, токенов"), int({ e.m("max_output", 8192) }, { e.setM("max_output", $0) }),
                       hint: L("Cap for one answer; larger requests are clamped", "Потолок одного ответа; большие запросы урезаются"))
                 if model?.thinking ?? true {
-                    toggle(L("Reasoning by default", "Рассуждения по умолчанию"), Binding(get: { e.m("thinking", true) }, set: { e.setM("thinking", $0) }),
-                           hint: L("Clients can switch it per request", "Клиенты могут переключать в каждом запросе"))
+                    toggle(L("Reasoning by default", "Рассуждения по умолчанию"),
+                           Binding(get: { e.m("thinking", model?.thinkingDefault ?? true) }, set: { e.setM("thinking", $0) }),
+                           hint: L("Starts as this model's own default (small Qwen3.5 models ship with it off); clients can switch it per request",
+                                   "Начальное значение — как задумано авторами модели (у малых Qwen3.5 выключено); клиенты могут переключать в каждом запросе"))
                     if let ef = model?.efforts, !ef.isEmpty {
                         Picker("", selection: Binding(get: { e.m("effort", "medium") }, set: { e.setM("effort", $0) })) {
                             ForEach(ef, id: \.self) { Text($0).tag($0) }

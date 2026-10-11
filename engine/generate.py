@@ -36,6 +36,43 @@ class MemoryLimitError(RuntimeError):
     """Not enough free RAM to serve the request without crossing the system limit."""
 
 
+# Qwen3.5 family sampling presets, used only when a bundle ships neither jang_config
+# sampling_modes nor a generation_config.json (some mlx-community conversions don't —
+# e.g. Qwen3.5-0.8B-4bit). Values are the ones the Bonsai authors wrote into their own
+# bundle's sampling_modes. Without them the Sampler's defaults apply: temperature 1.0
+# over the WHOLE vocabulary (no top-k/top-p), which sends a small model rambling.
+QWEN35_SAMPLING = {
+    True: {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0},
+    False: {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5},
+}
+
+
+def template_thinks_by_default(render):
+    """Whether the chat template opens a reasoning block when no `enable_thinking` is passed:
+    `render()` is the generation prompt of a one-message chat without that kwarg. Authors
+    differ — Bonsai-27B's template reasons unless told not to, while the small Qwen3.5
+    models (0.8B..) ship with reasoning OFF and only think on an explicit enable_thinking —
+    and forcing it on a model its authors turned off is how a 0.8B ends up writing
+    900 tokens of "Thinking Process:" before answering 7 + 5."""
+    try:
+        return render().rstrip().endswith("<think>")
+    except Exception:  # an exotic template: keep the old behaviour
+        return True
+
+
+def sampling_presets(jang, gen):
+    """{thinking: bool -> sampling kwargs}: the bundle's own presets, else its
+    generation_config, else the Qwen3.5 family defaults. Returns (presets, source)."""
+    modes = jang.get("chat", {}).get("sampling_modes") or {}
+    base = {k: gen[k] for k in ("temperature", "top_p", "top_k") if k in gen}
+    if modes.get("thinking") or modes.get("instruct_nothinking"):
+        return ({True: dict(modes.get("thinking") or base or QWEN35_SAMPLING[True]),
+                 False: dict(modes.get("instruct_nothinking") or base or QWEN35_SAMPLING[False])}, "jang_config")
+    if base:
+        return {True: dict(base), False: dict(base)}, "generation_config"
+    return {True: dict(QWEN35_SAMPLING[True]), False: dict(QWEN35_SAMPLING[False])}, "qwen3.5 defaults"
+
+
 class Sampler:
     def __init__(self, vocab, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, presence_penalty=0.0, seed=None):
         self.temp, self.top_p, self.top_k, self.min_p = temperature, top_p, top_k, min_p
@@ -188,7 +225,7 @@ def is_repeating(tail, min_n=20, max_n=300, long_n=80):
 
 class Engine:
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
-                 max_pixels=1024 * 1024, thinking=True, effort="medium", speculative=True,
+                 max_pixels=1024 * 1024, thinking=None, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
                  disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, log=print):
         self.path, self.log = path, log
@@ -210,9 +247,10 @@ class Engine:
         jang = _json(os.path.join(path, "jang_config.json"))
         gen = _json(os.path.join(path, "generation_config.json"))
         self.pp_cfg = _json(os.path.join(path, "preprocessor_config.json"))
-        modes = jang.get("chat", {}).get("sampling_modes", {})
-        base = {k: gen[k] for k in ("temperature", "top_p", "top_k") if k in gen}
-        self.sampling = {True: dict(modes.get("thinking") or base), False: dict(modes.get("instruct_nothinking") or base)}
+        self.sampling, source = sampling_presets(jang, gen)
+        if source == "qwen3.5 defaults":
+            log("sampling: the bundle ships no presets — using the Qwen3.5 family defaults "
+                "(temperature 1.0/0.7, top-p 0.95/0.8, top-k 20)")
         for mode in self.sampling.values():  # manual overrides win over the model's presets
             mode.update({k: v for k, v in (sampling_override or {}).items() if v is not None})
         eos = gen.get("eos_token_id", self.config.get("eos_token_id", []))
@@ -224,6 +262,10 @@ class Engine:
         self.image_token = self.config.get("image_token_id")
         self.efforts = jang.get("reasoning", {}).get("supported_reasoning_efforts") or []
         self.supports_thinking = "enable_thinking" in self.tok.template_source
+        # thinking=None means "what the model's own template does"; True/False is the user's choice
+        self.thinking_default = bool(self.supports_thinking and template_thinks_by_default(
+            lambda: self.tok.render([{"role": "user", "content": "hi"}])))
+        self.thinking = self.thinking_default if thinking is None else bool(thinking)
         self.vocab = self.config["text_config"]["vocab_size"]
         tc = self.config["text_config"]
         n_full = sum(1 for l in self.model.layers if not l.is_linear)
@@ -603,19 +645,24 @@ class Engine:
         # reasoning phase may use, and bail out of an exact repeating loop even sooner.
         THINK_END = "</think>"
         in_think = think_budget is not None
+        forced = None   # why the reasoning was force-closed: "budget" | "repetition" (None = never)
 
         def _think_check():
             """True once the reasoning phase has run long enough (budget) or is visibly
             stuck repeating itself, and should be force-closed."""
-            nonlocal in_think
+            nonlocal in_think, forced
             if not in_think:
                 return False
             if THINK_END in text:
                 in_think = False
                 return False
             if think_budget and len(out_tokens) >= think_budget:
+                forced = "budget"
                 return True
-            return is_repeating(text[-700:])
+            if is_repeating(text[-700:]):
+                forced = "repetition"
+                return True
+            return False
 
         def _force_close_think():
             """Teacher-force a `</think>` and hand back fresh logits to resume sampling from,
@@ -768,7 +815,7 @@ class Engine:
             "prefill_s": round(t_prefill, 3), "decode_s": round(t_dec, 3),
             "prefill_tps": round((len(ids) - reused) / t_prefill, 1) if t_prefill > 0 else 0,
             "decode_tps": round(n_out / t_dec, 2) if t_dec > 0 else 0,
-            "finish_reason": finish, "peak_gb": round(mx.get_peak_memory() / GiB, 2),
+            "finish_reason": finish, "think_forced": forced, "peak_gb": round(mx.get_peak_memory() / GiB, 2),
             "draft_accept": round(spec["accepted"] / spec["drafted"], 2) if spec["drafted"] else None,
             "verifies": spec["verifies"],
             "ram_used": round(memory.used_fraction(), 3),

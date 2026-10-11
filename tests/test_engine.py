@@ -467,3 +467,146 @@ class TestIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSamplingPresets(unittest.TestCase):
+    def test_jang_modes_win(self):
+        from engine.generate import sampling_presets
+        jang = {"chat": {"sampling_modes": {"thinking": {"temperature": 0.3, "top_k": 5},
+                                            "instruct_nothinking": {"temperature": 0.1}}}}
+        p, src = sampling_presets(jang, {"temperature": 9.0})
+        self.assertEqual((p[True]["temperature"], p[False]["temperature"], src), (0.3, 0.1, "jang_config"))
+
+    def test_generation_config_when_no_modes(self):
+        from engine.generate import sampling_presets
+        p, src = sampling_presets({}, {"temperature": 0.6, "top_p": 0.9, "top_k": 40, "eos_token_id": 1})
+        self.assertEqual(p[True], {"temperature": 0.6, "top_p": 0.9, "top_k": 40})
+        self.assertEqual((p[True], src), (p[False], "generation_config"))
+
+    def test_family_defaults_when_the_bundle_ships_nothing(self):
+        # a bundle with no presets used to fall through to the Sampler's own defaults:
+        # temperature 1.0 over the whole vocabulary, no top-k/top-p
+        from engine.generate import sampling_presets
+        p, src = sampling_presets({}, {})
+        self.assertEqual(src, "qwen3.5 defaults")
+        for thinking in (True, False):
+            self.assertGreater(p[thinking]["top_k"], 0)
+            self.assertLess(p[thinking]["top_p"], 1.0)
+        self.assertEqual(p[True]["temperature"], 1.0)
+        self.assertEqual(p[False]["presence_penalty"], 1.5)
+
+    def test_presets_are_independent_copies(self):
+        from engine.generate import sampling_presets
+        a, _ = sampling_presets({}, {})
+        a[True]["temperature"] = 99
+        b, _ = sampling_presets({}, {})
+        self.assertEqual(b[True]["temperature"], 1.0)
+
+
+class TestThinkingDefault(unittest.TestCase):
+    """The reasoning mode a model gets when nobody asks is its template's own default."""
+    # the two conventions found in the Qwen3.5 family's chat templates
+    ON_UNLESS_DISABLED = ("{{ '<|im_start|>assistant\\n' }}"
+                          "{%- if enable_thinking is defined and enable_thinking is false %}"
+                          "{{ '<think>\\n\\n</think>\\n\\n' }}{%- else %}{{ '<think>\\n' }}{%- endif %}")
+    OFF_UNLESS_ENABLED = ("{{ '<|im_start|>assistant\\n' }}"
+                          "{%- if enable_thinking is defined and enable_thinking is true %}"
+                          "{{ '<think>\\n' }}{%- else %}{{ '<think>\\n\\n</think>\\n\\n' }}{%- endif %}")
+
+    def decide(self, template, **kw):
+        import jinja2
+        from engine.generate import template_thinks_by_default
+        return template_thinks_by_default(lambda: jinja2.Template(template).render(**kw))
+
+    def test_template_that_reasons_unless_disabled(self):
+        self.assertTrue(self.decide(self.ON_UNLESS_DISABLED))
+
+    def test_template_that_only_reasons_when_enabled(self):
+        self.assertFalse(self.decide(self.OFF_UNLESS_ENABLED))
+
+    def test_explicit_kwarg_flips_both(self):
+        self.assertTrue(self.decide(self.OFF_UNLESS_ENABLED, enable_thinking=True))
+        self.assertFalse(self.decide(self.ON_UNLESS_DISABLED, enable_thinking=False))
+
+    def test_a_template_that_cannot_render_keeps_the_old_default(self):
+        from engine.generate import template_thinks_by_default
+        def boom():
+            raise ValueError("needs tools")
+        self.assertTrue(template_thinks_by_default(boom))
+
+
+class TestModelsWithoutReasoningOrVision(unittest.TestCase):
+    """Not every model reasons, and not every model sees: a synthetic bundle (random weights,
+    see tests/synth.py) stands in for the shapes of model nobody has lying around."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from engine.generate import Engine
+        from tests.synth import CHATML, CHATML_THINKING_OFF_BY_DEFAULT, make_bundle
+        cls.logs = []
+        cls.plain_dir, cls.small_dir, cls.cfg_dir = (tempfile.mkdtemp() for _ in range(3))
+        make_bundle(cls.plain_dir, CHATML, seed=1)  # no enable_thinking anywhere in the template
+        make_bundle(cls.small_dir, CHATML_THINKING_OFF_BY_DEFAULT, seed=2)
+        make_bundle(cls.cfg_dir, CHATML, seed=3, generation_config={"temperature": 0.5, "top_p": 0.7, "top_k": 7})
+        kw = dict(vision=True, max_context=1024, max_tokens=16, disk_cache_gb=0)
+        cls.plain = Engine(cls.plain_dir, log=cls.logs.append, **kw)
+        cls.small = Engine(cls.small_dir, log=lambda *_: None, **kw)
+        cls.cfg = Engine(cls.cfg_dir, log=lambda *_: None, **kw)
+
+    def run_gen(self, eng, text, **kw):
+        ids, _ = eng.encode(text, [])
+        out, st = "", None
+        for it in eng.generate(ids, sampling={"temperature": 0}, max_tokens=6, **kw):
+            if isinstance(it, dict):
+                st = it
+            else:
+                out += it[1]
+        return out, st
+
+    def test_capabilities_are_reported_honestly(self):
+        e = self.plain
+        self.assertFalse(e.supports_thinking)
+        self.assertFalse(e.thinking_default)
+        self.assertFalse(e.thinking)
+        self.assertFalse(e.vision_allowed)
+
+    def test_a_reasoning_request_is_ignored_not_an_error(self):
+        e = self.plain
+        text, _, opened = e.build_prompt([{"role": "user", "content": "hi"}], thinking=True, effort="high")
+        self.assertNotIn("<think>", text)
+        self.assertFalse(opened)
+        _, st = self.run_gen(e, text, thinking_open=opened)
+        self.assertIsNone(st["think_forced"])  # no reasoning phase -> nothing to budget or force-close
+
+    def test_an_image_gets_a_clear_error(self):
+        text, _, _ = self.plain.build_prompt([{"role": "user", "content": "hi"}])
+        with self.assertRaises(ValueError) as ctx:
+            self.plain.encode(text, ["data:image/png;base64,AAAA"])
+        self.assertIn("no vision support", str(ctx.exception))
+
+    def test_a_bundle_with_no_presets_gets_the_family_defaults(self):
+        self.assertTrue(any("Qwen3.5 family defaults" in m for m in self.logs))
+        self.assertEqual(self.plain.sampling[True]["top_k"], 20)
+        self.assertLess(self.plain.sampling[True]["top_p"], 1.0)
+
+    def test_generation_config_beats_the_family_defaults(self):
+        self.assertEqual(self.cfg.sampling[True], {"temperature": 0.5, "top_p": 0.7, "top_k": 7})
+
+    def test_small_model_convention_reasoning_is_opt_in(self):
+        e = self.small
+        self.assertTrue(e.supports_thinking)
+        self.assertFalse(e.thinking_default)
+        self.assertFalse(e.thinking)  # nobody asked -> the template's own default
+        _, _, opened = e.build_prompt([{"role": "user", "content": "hi"}])
+        self.assertFalse(opened)
+        text, _, opened = e.build_prompt([{"role": "user", "content": "hi"}], thinking=True)
+        self.assertTrue(opened)
+        self.assertTrue(text.rstrip().endswith("<think>"))
+
+    def test_an_explicit_choice_overrides_the_template_default(self):
+        from engine.generate import Engine
+        forced_on = Engine(self.small_dir, thinking=True, vision=False, max_context=1024, max_tokens=16,
+                           disk_cache_gb=0, log=lambda *_: None)
+        self.assertTrue(forced_on.thinking)
+        self.assertFalse(forced_on.thinking_default)  # the default itself is unchanged

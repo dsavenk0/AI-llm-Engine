@@ -67,7 +67,7 @@ DEFAULTS = {
 MODEL_DEFAULTS = {
     "context": 0,                # prompt + output; 0 = auto (from RAM, model size and KV cost)
     "max_output": 8192,          # output cap (larger requests are clamped by the server)
-    "thinking": True,
+    "thinking": None,            # None = whatever the model's chat template does; True/False = your choice
     "effort": "medium",
     "vision": True,
     "max_pixels": 1024 * 1024,
@@ -189,6 +189,7 @@ def inspect_model(path):
     fmt = f"JANG {jang.get('profile', '')}".strip() if jang else (f"MLX {q['bits']}-bit" if q.get("bits") else "fp")
     return {"path": path, "name": name, "size": size, "format": fmt, "type": mtype,
             "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl,
+            "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
             "efforts": efforts, "hadamard": bool(cfgj.get("hadamard") or jang.get("hadamard")),
             "supported": not problems, "problems": problems}
 
@@ -216,6 +217,21 @@ def scan_models(cfg):
 def current_model(cfg):
     p = cfg["model"]
     return inspect_model(p) if p and os.path.isdir(p) else None
+
+
+def template_thinks_by_default(tpl):
+    """Does this chat template reason when nobody passes enable_thinking? Bonsai-27B's says
+    `enable_thinking is undefined or enable_thinking is true`; the small Qwen3.5 models
+    only open a <think> block under `is defined and enable_thinking is true`. (The engine
+    renders the template to decide; llm.py is stdlib-only, so this reads the source.)"""
+    return not re.search(r"enable_thinking\s+is\s+defined\s+and\s+enable_thinking\s+is\s+true", tpl)
+
+
+def think_enabled(mc, m):
+    """The reasoning mode actually in effect for a model: the user's choice, else its default."""
+    if not m["thinking"]:
+        return False
+    return m["thinking_default"] if mc["thinking"] is None else bool(mc["thinking"])
 
 
 def served_name(m):
@@ -365,10 +381,11 @@ def engine_cmd(cfg, m):
            "--host", "0.0.0.0" if cfg["lan"] else "127.0.0.1", "--port", str(cfg["port"]),
            "--context", str(mc["context"]), "--max-tokens", str(mc["max_output"]),
            "--prefill-step", str(cfg["prefill_step"]), "--max-pixels", str(mc["max_pixels"]),
-           "--thinking", "on" if mc["thinking"] else "off",
            "--mem-limit", str(cfg["mem_limit"] / 100),
            "--stats-file", os.path.join(STATE, "stats.jsonl"),
            "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--disk-cache-gb", str(cfg.get("disk_cache_gb", 8))]
+    if mc["thinking"] is not None:
+        cmd += ["--thinking", "on" if mc["thinking"] else "off"]
     if cfg.get("disk_cache_dir"):
         cmd += ["--disk-cache-dir", cfg["disk_cache_dir"]]
     if not cfg.get("speculative", True):
@@ -493,7 +510,7 @@ def chat(cfg):
         print(R(T("The model is not running."))); return
     mc = mcfg(cfg)
     url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
-    think, effort, show = mc["thinking"] and m["thinking"], mc["effort"], True
+    think, effort, show = think_enabled(mc, m), mc["effort"], True
     msgs, system = [], ""
     print(B(T("Chat with {name}.").format(name=m["name"])) +
           DIM(" /think on|off  /effort <lvl>  /show  /system <text>  /image <path> <question>"))
@@ -951,7 +968,9 @@ def settings(cfg):
             items += [("m:context", f"{T('Context'):26s}: {mc['context'] or 'auto'}", DIM(T("0 = auto, ~64 KB KV per token"))),
                       ("m:max_output", f"{T('Max output tokens'):26s}: {mc['max_output']}", "")]
             if m["thinking"]:
-                items.append(("m:thinking", f"{T('Reasoning by default'):26s}: {on if mc['thinking'] else off}", ""))
+                eff = think_enabled(mc, m)
+                note = DIM(" (" + T("model default") + ")") if mc["thinking"] is None else ""
+                items.append(("m:thinking", f"{T('Reasoning by default'):26s}: {on if eff else off}", note))
             if m["efforts"]:
                 items.append(("m:effort", f"{T('Reasoning effort'):26s}: {mc['effort'] or '—'}", DIM(" / ".join(m["efforts"]))))
             if m["vision"]:
@@ -973,7 +992,8 @@ def settings(cfg):
         except (ValueError, IndexError): continue
         if key.startswith("m:"):
             k = key[2:]
-            if k in ("thinking", "vision"): set_mcfg(cfg, k, not mc[k])
+            if k == "thinking": set_mcfg(cfg, k, not think_enabled(mc, m))
+            elif k == "vision": set_mcfg(cfg, k, not mc[k])
             elif k == "effort":
                 o = m["efforts"]; set_mcfg(cfg, k, o[(o.index(mc[k]) + 1) % len(o)] if mc[k] in o else o[0])
             else:
