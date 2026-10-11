@@ -15,6 +15,7 @@ swiftc -O -o "$APP/Contents/MacOS/LLMBar" "$ROOT/app/LLMBar.swift"
 
 echo "▸ Editor (on demand, separate app)…"
 VERSION="$VERSION" "$ROOT/build-editor.sh" "$APP/Contents/Resources" | sed 's/^/  /'
+VERSION="$VERSION" "$ROOT/build-voice.sh" "$APP/Contents/Resources" | sed 's/^/  /'
 
 echo "▸ Bundling engine + CLI…"
 for f in llm llm.py agent.py requirements.txt LICENSE NOTICE; do cp "$ROOT/$f" "$APP/Contents/Resources/llm/"; done

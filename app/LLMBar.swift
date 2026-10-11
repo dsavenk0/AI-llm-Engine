@@ -200,6 +200,38 @@ struct Paths {
     var config: String { home + "/.llm/config.json" }
 }
 
+/// Opens LLMVoice.app (the voice assistant: speak, hear the model answer), like the editor a separate process
+/// that exists only while it is used.
+enum VoiceLauncher {
+    static let bundleID = "local.llm-engine.voice"
+
+    static func appURL() -> URL? {
+        var candidates: [URL] = []
+        if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("LLMVoice.app")) }
+        candidates.append(URL(fileURLWithPath: Paths.shared.root + "/LLMVoice.app"))
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    static func open(enginePort: Int, done: @escaping (String?) -> Void) {
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            running.activate(options: [.activateIgnoringOtherApps])
+            done(nil)
+            return
+        }
+        guard let url = appURL() else {
+            done(L("The voice assistant is not built yet — run ./build-voice.sh (or ./build-app.sh)",
+                   "Голосовой помощник ещё не собран — выполните ./build-voice.sh (или ./build-app.sh)"))
+            return
+        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        cfg.arguments = ["--llm-root", Paths.shared.root, "--engine-port", String(enginePort)]
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
+            DispatchQueue.main.async { done(error?.localizedDescription) }
+        }
+    }
+}
+
 /// Opens LLMEditor.app (bundled next to this app's resources, or built in the checkout). The editor is a
 /// separate process, started only here on request; if it is already running it opens one more window.
 enum EditorLauncher {
@@ -394,6 +426,10 @@ final class EngineState: ObservableObject {
 
     func openEditor() {
         EditorLauncher.open(enginePort: port) { err in if let err { self.message = err } }
+    }
+
+    func openVoice() {
+        VoiceLauncher.open(enginePort: port) { err in if let err { self.message = err } }
     }
 
     func command(_ args: [String], label: String, then: (() -> Void)? = nil) {
@@ -1421,6 +1457,11 @@ struct ToolsTab: View {
                      L("Native editor with the assistant, git, terminal and problems — opens on demand",
                        "Нативный редактор с ассистентом, git, терминалом и проблемами — открывается по требованию")) {
                     e.openEditor()
+                }
+                tool("waveform", L("Voice assistant", "Голосовой помощник"),
+                     L("Speak to the model and hear the answer — a small separate window, opens on demand",
+                       "Говорите с моделью и слушайте ответ — небольшое отдельное окно, открывается по требованию")) {
+                    e.openVoice()
                 }
                 Menu {
                     Button("Continue") { e.command(["connect", "continue"], label: "connect continue") }
