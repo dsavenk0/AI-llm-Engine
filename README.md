@@ -143,6 +143,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm free                 quit vMLX / oMLX / Ollama to free memory
 ./llm test                 unit + integration tests
 ./llm perf [--save]        performance suite vs the saved baseline
+./llm eval [--save]        accuracy suite (math / code / sanity) vs the saved baseline
 ```
 
 Language is English by default and Russian when the system locale is Russian. You can force it with `LLM_LANG=ru` or
@@ -198,23 +199,30 @@ A `.bak` copy is kept, and running it again only updates its own entry. Any othe
 # or: ENGINE_TEST_MODEL=<model path> .venv/bin/python -m unittest discover -s tests -v
 ```
 
-There are 35 unit tests (engine and CLI): Hadamard against an explicit matrix, fused vs separate projections, caches, M-RoPE, the
-sampler, the drafter, speculative acceptance (it keeps the sampling distribution), SSM rollback (equal to sequential),
-the reasoning/tool-call stream parser and message normalization. There are also 8 integration tests on the real
-model: a correct answer, UTF-8 streaming detokenization, bit-exact prefix-cache reuse, speculative greedy identical to
-plain greedy, the RAM guard refusing instead of swapping, the SSD prefix cache surviving a restart with identical
-output, sleep and wake, and `max_tokens` clamping.
+There are 43 unit tests (engine, CLI and the coding agent): Hadamard against an explicit matrix, fused vs separate
+projections, caches, M-RoPE, the sampler, the drafter, speculative acceptance (it keeps the sampling distribution),
+SSM rollback (equal to sequential), the reasoning/tool-call stream parser, message normalization, the repetition
+detector, the RAM-guard grace band, and which shell commands the coding agent always confirms. There are also 9
+integration tests on the real model: a correct answer, UTF-8 streaming detokenization, bit-exact prefix-cache reuse,
+speculative greedy identical to plain greedy, the RAM guard refusing instead of swapping, the SSD prefix cache
+surviving a restart with identical output, sleep and wake, `max_tokens` clamping, and the think-budget guard forcing
+an answer instead of an endless `<think>`.
 
-### Performance suite
+### Performance and accuracy suites
 
 ```sh
-./llm perf            # compare with tests/perf_baseline.json; exits 1 on >15 % regressions
+./llm perf            # speed: compare with tests/perf_baseline.json; exits 1 on >15 % regressions
 ./llm perf --save     # record a new baseline after an intentional change
+./llm eval            # quality: compare with tests/eval_baseline.json
+./llm eval --save
 ```
 
-It measures load time, decode step, the cost of a 16-token verify pass, prefill, prose and code-edit speed, draft
-acceptance, peak memory and peak system RAM. Stop the server first. If memory runs short, a metric is skipped
-instead of freezing the Mac.
+`perf` measures load time, decode step, the cost of a 16-token verify pass, prefill at three prompt sizes, prose and
+code-edit speed, draft acceptance, peak memory and peak system RAM. `eval` complements it with a quality check — math
+word problems, function-completion problems graded by actually running the generated code, and trivial sanity
+questions that must finish cleanly rather than loop — so a change that quietly breaks answers gets caught, not just
+one that slows them down. Both accept a repeated `--model PATH` to compare several models in one run. Stop the
+server first. If memory runs short, a metric is skipped instead of freezing the Mac.
 
 ## Supported models
 
@@ -232,7 +240,7 @@ agent.py  terminal coding agent (stdlib only)
 app/      LLMBar.swift (menu-bar app)
 tools/    icon / DMG background / banner generators (Swift)
 build-app.sh, build-dmg.sh
-tests/    unittest suite · perf.py + perf_baseline.json
+tests/    unittest suite · perf.py + perf_baseline.json · eval.py + eval_baseline.json
 ```
 
 ## License
