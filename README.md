@@ -130,7 +130,7 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 
 ```sh
 ./build-app.sh && open LLMBar.app      # app with icon (~2.5 MB, engine + CLI bundled)
-./build-dmg.sh                         # dist/LLMBar-1.0.dmg — drag-to-Applications installer
+./build-dmg.sh                         # docs/LLMBar-1.0.dmg — drag-to-Applications installer
 ```
 
 LLMBar is the lightweight UI of the engine. It lives in the menu bar as a small `Ai_` icon. Click the icon to open a

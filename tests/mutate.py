@@ -93,12 +93,12 @@ def apply(node):
 def make_copy():
     tmp = tempfile.mkdtemp(prefix="mutate-")
     for name in os.listdir(ROOT):
-        if name in SKIP_DIRS or name.endswith(".app"):
+        if name in SKIP_DIRS or name.endswith(".app") or name.endswith(".dmg"):
             continue
         src = os.path.join(ROOT, name)
         dst = os.path.join(tmp, name)
         if os.path.isdir(src):
-            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv*"))
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv*", "*.dmg"))
         else:
             shutil.copy2(src, dst)
     return tmp

@@ -133,7 +133,7 @@ GGUF — это то, что раздают Hugging Face, LM Studio и Ollama, �
 
 ```sh
 ./build-app.sh && open LLMBar.app      # приложение с иконкой (~2,5 МБ, движок и CLI внутри)
-./build-dmg.sh                         # dist/LLMBar-1.0.dmg — установщик «перетащи в Applications»
+./build-dmg.sh                         # docs/LLMBar-1.0.dmg — установщик «перетащи в Applications»
 ```
 
 LLMBar — лёгкий интерфейс движка. Он живёт в строке меню маленьким значком `Ai_`. Клик по значку открывает под ним

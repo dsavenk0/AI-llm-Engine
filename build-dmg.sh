@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/LLMBar.app"
-OUT_DIR="$ROOT/dist"
+OUT_DIR="$ROOT/docs"            # the site serves this file (vercel.json: outputDirectory docs)
 VOL_NAME="LLMBar"
 DMG_WIDTH=680
 DMG_HEIGHT=440
