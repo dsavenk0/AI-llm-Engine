@@ -74,8 +74,32 @@ DEFAULTS = {
     "theme": "system",           # LLMBar: system | dark | light
     "glass": False,              # LLMBar: optional liquid-glass panel background
     "glass_transparency": 0.55,  # LLMBar: 0.15 (denser) … 0.85 (more see-through)
+    "log_level": "info",         # engine log: error | warning | info | debug | trace
+    "fallback_model": True,      # a request naming another model is answered by the loaded one (off: 404)
+    "prefill_guard": True,       # refuse a prompt that would not fit in free memory before prefilling it
+    "proxy_http": "",            # outgoing HTTP(S) (downloads, hub search, web tools); empty = none
+    "proxy_https": "",
+    "no_proxy": "",              # comma-separated hosts/CIDRs that bypass the proxy
+    "ca_bundle": "",             # PEM file with extra root certificates (TLS-inspecting proxies)
     "models": {},
 }
+LOG_LEVELS = ("error", "warning", "info", "debug", "trace")
+
+
+def network_env(cfg, env=None):
+    """`env` (a copy of os.environ by default) with the proxy and CA settings applied. urllib and ssl
+    read exactly these variables, so every download and web request in this project follows them."""
+    env = dict(os.environ if env is None else env)
+    for key, names in (("proxy_http", ("HTTP_PROXY", "http_proxy")), ("proxy_https", ("HTTPS_PROXY", "https_proxy")),
+                       ("no_proxy", ("NO_PROXY", "no_proxy")), ("ca_bundle", ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"))):
+        v = str(cfg.get(key) or "").strip()
+        if v:
+            for n in names:
+                env[n] = v
+    if cfg.get("proxy_http") or cfg.get("proxy_https"):          # the engine itself is always reached directly
+        hosts = {h for h in (env.get("NO_PROXY", "") + ",localhost,127.0.0.1,::1").split(",") if h}
+        env["NO_PROXY"] = env["no_proxy"] = ",".join(sorted(hosts))
+    return env
 MODEL_DEFAULTS = {
     "context": 0,                # prompt + output; 0 = auto (from RAM, model size and KV cost)
     "max_output": 8192,          # output cap (larger requests are clamped by the server)
@@ -319,6 +343,10 @@ def choose_model(cfg, arg=None):
         cfg["models"][pick["path"]] = dict(MODEL_DEFAULTS, effort="medium" if "medium" in pick["efforts"] else "")
     save_cfg(cfg)
     print(G(T("Selected:") + f" {pick['name']}"))
+    try:
+        sync_clients(cfg)
+    except Exception:
+        pass
     if was_running:
         restart(cfg, sys.stdin.isatty())
     return True
@@ -526,6 +554,12 @@ def engine_cmd(cfg, m):
         cmd += ["--effort", mc["effort"]]
     if not mc["vision"]:
         cmd.append("--no-vision")
+    if cfg.get("log_level", "info") in LOG_LEVELS and cfg.get("log_level") != "info":
+        cmd += ["--log-level", cfg["log_level"]]
+    if not cfg.get("fallback_model", True):
+        cmd += ["--fallback-model", "off"]
+    if not cfg.get("prefill_guard", True):
+        cmd += ["--prefill-guard", "off"]
     return cmd
 
 
@@ -589,7 +623,7 @@ def start(cfg, interactive=True):
     cmd = engine_cmd(cfg, m)
     with open(ENGINE_LOG, "a") as log:
         log.write(f"\n===== {time.ctime()} =====\n{' '.join(cmd)}\n")
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = dict(network_env(cfg), PYTHONUNBUFFERED="1")
     if cfg["api_key"]:
         env["ENGINE_API_KEY"] = cfg["api_key"]
     with open(ENGINE_LOG, "a") as logf:
@@ -614,6 +648,10 @@ def start(cfg, interactive=True):
         except OSError: pass
         print(R("\n" + T("✗ Load timed out, process stopped."))); return False
     print(G(" " + T("ready in {s:.0f} s").format(s=time.time() - t0)))
+    try:
+        sync_clients(cfg)      # a connected Kilo/opencode learns about the installed models
+    except Exception:
+        pass
     show_endpoints(cfg, m)
     return True
 
@@ -860,10 +898,11 @@ CLIENTS = {
 }
 
 
-def client_limits(cfg, m):
-    """Context / output limits for client configs: the running engine's values, else an estimate."""
-    mc = dict(mcfg(cfg))
-    h = health(cfg)
+def client_limits(cfg, m, running=True):
+    """Context / output limits for client configs: the running engine's values (when `m` is the loaded
+    model), else an estimate."""
+    mc = dict(mcfg(cfg, m["path"]))
+    h = health(cfg) if running else None
     if h:
         return h.get("context") or 32768, h.get("max_tokens") or mc["max_output"]
     ctx = mc["context"]
@@ -877,9 +916,19 @@ def client_limits(cfg, m):
     return ctx, min(mc["max_output"], ctx // 2)
 
 
-def _write_opencode_style(path, cfg, m, ctx, out, alias=()):
-    """Kilo Code and opencode share the opencode provider schema."""
-    vision = mcfg(cfg)["vision"] and m["vision"]
+def _legacy_model_id(m):
+    """The id earlier versions registered for a hub download: "<org>/<name>" from the folder layout
+    (~/.cache/huggingface/hub/<org>/<name>). Editor sessions that still name it must resolve."""
+    root = os.path.normpath(os.path.join(HOME, ".cache", "huggingface", "hub"))
+    rel = os.path.relpath(os.path.normpath(m["path"]), root)
+    bits = rel.split(os.sep)
+    return "/".join(bits) if len(bits) == 2 and not rel.startswith("..") else None
+
+
+def _write_opencode_style(path, cfg, m, ctx, out, alias=(), others=()):
+    """Kilo Code and opencode share the opencode provider schema. `m` is the selected model; `others`
+    are (model, context, output) for the rest of the installed ones, so the client can offer them all
+    (the engine serves one at a time and ignores the name, so picking another one only labels it)."""
     data = {}
     if os.path.exists(path):
         shutil.copy2(path, path + ".bak")
@@ -888,14 +937,20 @@ def _write_opencode_style(path, cfg, m, ctx, out, alias=()):
     opts = {"baseURL": f"http://localhost:{cfg['port']}/v1"}
     if cfg["api_key"]:
         opts["apiKey"] = cfg["api_key"]
+    models = {}
+    for mm, c, o in [(m, ctx, out), *others]:
+        vision = mcfg(cfg, mm["path"])["vision"] and mm["vision"]
+        entry = {"name": f"{mm['name']} (local)", "tool_call": True, "reasoning": mm["thinking"],
+                 "attachment": vision,
+                 "modalities": {"input": ["text", "image"] if vision else ["text"], "output": ["text"]},
+                 "limit": {"context": c, "output": o}}
+        models[served_name(mm)] = entry
+        legacy = _legacy_model_id(mm)
+        if legacy:
+            models.setdefault(legacy, entry)
     name = served_name(m)
-    prov["local_mlx"] = {
-        "name": "AI-llm-Engine (local)", "npm": "@ai-sdk/openai-compatible", "options": opts,
-        "models": {name: {
-            "name": f"{m['name']} (local)", "tool_call": True, "reasoning": m["thinking"], "attachment": vision,
-            "modalities": {"input": ["text", "image"] if vision else ["text"], "output": ["text"]},
-            "limit": {"context": ctx, "output": out}}},
-    }
+    prov["local_mlx"] = {"name": "AI-llm-Engine (local)", "npm": "@ai-sdk/openai-compatible", "options": opts,
+                         "models": models}
     for a in alias:  # old provider ids kept as mirrors so already-open editor sessions keep resolving
         prov[a] = prov["local_mlx"]
     data["model"] = f"local_mlx/{name}"
@@ -969,11 +1024,39 @@ def connect_client(cfg, which=None):
     if which == "continue":
         _write_continue(path, cfg, m, ctx, out)
     else:
-        _write_opencode_style(path, cfg, m, ctx, out, alias=("local_qwen",) if which == "kilo" else ())
+        _write_opencode_style(path, cfg, m, ctx, out, alias=("local_qwen",) if which == "kilo" else (),
+                              others=_other_models(cfg, m))
     print(G(T("{client} configured: {name}, context {ctx}, output {out}").format(
         client=title, name=served_name(m), ctx=ctx, out=out)))
     print(DIM(T("File: {path} (backup: .bak) · reload the editor window to apply.").format(path=path)))
     return True
+
+
+def _other_models(cfg, current):
+    """(model, context, output) of every other supported, installed model."""
+    return [(x, *client_limits(cfg, x, running=False)) for x in scan_models(cfg)
+            if x["supported"] and x["path"] != current["path"]]
+
+
+def sync_clients(cfg):
+    """Refresh Kilo Code / opencode when they were connected before: the installed models changed or a
+    different one was selected. Never creates a client config that is not there already."""
+    m = current_model(cfg)
+    if not m:
+        return []
+    done = []
+    for which in ("kilo", "opencode"):
+        title, path = CLIENTS[which]
+        try:
+            if not os.path.exists(path) or "local_mlx" not in open(path, errors="replace").read():
+                continue
+            ctx, out = client_limits(cfg, m)
+            _write_opencode_style(path, cfg, m, ctx, out, alias=("local_qwen",) if which == "kilo" else (),
+                                  others=_other_models(cfg, m))
+            done.append(title)
+        except (OSError, ValueError):
+            pass
+    return done
 
 
 # ─────────────────────────── model hub ───────────────────────────
@@ -1257,6 +1340,15 @@ def settings(cfg):
                   ("lan", f"{T('LAN access'):26s}: {on if cfg['lan'] else off}", ""),
                   ("api_key", f"{T('API key'):26s}: {T('set') if cfg['api_key'] else T('none')}", ""),
                   ("auto_free", f"{T('Quit vMLX/oMLX/Ollama'):26s}: {on if cfg['auto_free'] else off}", ""),
+                  ("fallback_model", f"{T('Model fallback'):26s}: {on if cfg['fallback_model'] else off}",
+                   DIM(T("another model name is answered by the loaded one instead of 404"))),
+                  ("prefill_guard", f"{T('Prefill memory guard'):26s}: {on if cfg['prefill_guard'] else off}",
+                   DIM(T("refuse prompts that would not fit in free memory"))),
+                  ("log_level", f"{T('Log level'):26s}: {cfg['log_level']}", DIM(" / ".join(LOG_LEVELS))),
+                  ("proxy_http", f"{T('HTTP proxy'):26s}: {cfg['proxy_http'] or '—'}", ""),
+                  ("proxy_https", f"{T('HTTPS proxy'):26s}: {cfg['proxy_https'] or '—'}", ""),
+                  ("no_proxy", f"{T('No proxy for'):26s}: {cfg['no_proxy'] or '—'}", DIM(T("hosts / CIDRs, comma-separated"))),
+                  ("ca_bundle", f"{T('CA bundle (PEM)'):26s}: {cfg['ca_bundle'] or '—'}", ""),
                   ("prefill_step", f"{T('Prefill step'):26s}: {cfg['prefill_step']}", DIM(T("lower = lower peak memory"))),
                   ("mem_limit", f"{T('System RAM limit, %'):26s}: {cfg['mem_limit']}", DIM(T("above it requests are trimmed or stopped"))),
                   ("lang", f"{T('Language'):26s}: {cfg['lang']}", DIM("auto / en / ru")),
@@ -1277,8 +1369,12 @@ def settings(cfg):
             else:
                 v = input(T("New value") + f" [{mc[k]}]: ").strip()
                 if v.isdigit(): set_mcfg(cfg, k, int(v))
-        elif key in ("lan", "auto_free"):
+        elif key in ("lan", "auto_free", "fallback_model", "prefill_guard"):
             cfg[key] = not cfg[key]
+        elif key == "log_level":
+            cfg[key] = LOG_LEVELS[(LOG_LEVELS.index(cfg[key]) + 1) % len(LOG_LEVELS)] if cfg[key] in LOG_LEVELS else "info"
+        elif key in ("proxy_http", "proxy_https", "no_proxy", "ca_bundle"):
+            cfg[key] = input(T("New value") + f" [{cfg[key]}] (" + T("empty to clear") + "): ").strip()
         elif key == "lang":
             cfg["lang"] = {"auto": "en", "en": "ru", "ru": "auto"}[cfg["lang"]]
             set_lang(cfg["lang"])
@@ -1361,6 +1457,7 @@ def main():
     cmd, arg = (sys.argv[1:] + ["", ""])[:2]
     cfg, tty = load_cfg(), sys.stdin.isatty()
     set_lang(cfg["lang"])
+    os.environ.update(network_env(cfg))      # hub search, downloads and the agent's web tools follow the proxy
     actions = {
         "setup": lambda: setup(compat="--compat" in sys.argv), "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),

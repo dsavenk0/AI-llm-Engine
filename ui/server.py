@@ -480,7 +480,7 @@ class Handler(BaseHTTPRequestHandler):
 
         run = agentloop.Run(alive)
         agentloop.RUNS[run.id] = run
-        self._headers(200, "text/event-stream", extra={"Connection": "close"})
+        self._headers(200, "text/event-stream; charset=utf-8", extra={"Connection": "close"})
         self.close_connection = True
 
         def emit(ev):
@@ -543,7 +543,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(e.code, e.read(300).decode("utf-8", "replace"))
         except (urllib.error.URLError, OSError):
             return self._error(502, "the model is not running — start it first (./llm start)")
-        self._headers(200, "text/event-stream", extra={"Connection": "close"})
+        self._headers(200, "text/event-stream; charset=utf-8", extra={"Connection": "close"})
         self.close_connection = True
         try:
             for line in r:

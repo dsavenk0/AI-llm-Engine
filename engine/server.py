@@ -73,8 +73,27 @@ def run_job(fn):
 READY = threading.Event()
 
 
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+_log = None
+
+
+def log(msg, level=None, group=None):
+    """Written through engine.logs: a level (--log-level) and a group tag per line."""
+    global _log
+    if _log is None:
+        from engine import logs
+        _log = logs.make(getattr(ARGS, "log_level", "info") if ARGS is not None else "info")
+    _log(msg, level, group)
+
+
+def model_matches(requested):
+    """Does a request's `model` name the model this server has loaded? Names are compared the way clients
+    spell them: case-insensitively, with or without the "org/" prefix of a hub id."""
+    if not requested:
+        return True
+    norm = lambda s: re.sub(r"[^a-z0-9._-]+", "-", str(s).lower()).strip("-")
+    want = {norm(ARGS.name), norm(os.path.basename(ARGS.model.rstrip("/")))}
+    got = norm(requested)
+    return got in want or norm(str(requested).split("/")[-1]) in want
 
 
 # ───────────────────────────── output parsing ─────────────────────────────
@@ -245,7 +264,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _json(self, code, obj):
         data = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
@@ -285,6 +304,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "vision": ("loaded" if ENGINE.model is not None and "vision_tower" in ENGINE.model else "on demand")
                 if ENGINE.vision_allowed else False,
                 "busy": ENGINE.lock.locked(),
+                "progress": getattr(ENGINE, "progress", None),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
                               "peak": round(mx.get_peak_memory() / 2**30, 2),
                               "cache": round(mx.get_cache_memory() / 2**30, 2),
@@ -328,8 +348,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         messages = body.get("messages") or []
         if not messages:
             return self._error(400, "messages is required")
+        if ARGS.fallback_model == "off" and not model_matches(body.get("model")):
+            return self._error(404, f"model {body.get('model')!r} is not loaded; the loaded model is "
+                                    f"{ARGS.name!r} (fallback is off)", "invalid_request_error", "model_not_found")
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
         thinking, effort, extra = resolve_options(body)
+        log(f"trace: request model={body.get('model')!r} messages={len(messages)} tools={len(tools or [])} "
+            f"stream={bool(body.get('stream'))} max_tokens={body.get('max_tokens') or body.get('max_completion_tokens')}")
         try:
             text, images, thinking_open = ENGINE.build_prompt(normalize_messages(messages), tools, thinking, effort, extra)
             ids, media = next(run_job(lambda: iter([ENGINE.encode(text, images)])))
@@ -371,7 +396,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cancelled = threading.Event()
         if stream:
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -526,6 +551,13 @@ def main():
     ap.add_argument("--ptq1", choices=("on", "off"), default="off",
                     help="experimental: run PTQ1_0 / TQ1_G128 (1.75-bit ternary) bundles on the Metal lookup-table kernel")
     ap.add_argument("--no-vision", action="store_true")
+    ap.add_argument("--log-level", choices=("error", "warning", "info", "debug", "trace"), default="info",
+                    help="what the engine writes to its log (each line is tagged with a group)")
+    ap.add_argument("--fallback-model", choices=("on", "off"), default="on",
+                    help="a request that names a model other than the loaded one is answered by the loaded "
+                         "model (on) or refused with 404 (off)")
+    ap.add_argument("--prefill-guard", choices=("on", "off"), default="on",
+                    help="check free memory before a long prompt is prefilled and refuse what would not fit")
     ap.add_argument("--no-speculative", action="store_true", help="disable prompt-lookup speculative decoding")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
@@ -559,6 +591,7 @@ def main():
                            max_tokens=ARGS.max_tokens, prefill_step=ARGS.prefill_step, max_pixels=ARGS.max_pixels,
                            thinking={"auto": None, "on": True, "off": False}[ARGS.thinking], effort=ARGS.effort,
                            speculative=not ARGS.no_speculative, mem_limit=ARGS.mem_limit,
+                           prefill_guard=ARGS.prefill_guard == "on",
                            sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
                                               "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty,
                                               "repetition_penalty": ARGS.repetition_penalty},

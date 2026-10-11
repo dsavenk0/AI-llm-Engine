@@ -81,6 +81,96 @@ class TestOpencodeStyleConfig(unittest.TestCase):
         self.assertEqual(data["model"], "local_mlx/demo-model")
 
 
+class TestClientsKnowEveryInstalledModel(unittest.TestCase):
+    """Kilo said "Model not found: local_qwen/dealignai/Bonsai-…": its config listed only the model that
+    was selected when it was connected."""
+
+    def setUp(self):
+        from unittest import mock
+        self.home = tempfile.mkdtemp()
+        hub = os.path.join(self.home, ".cache", "huggingface", "hub")
+        self.models = []
+        for org, name in (("dealignai", "Bonsai-2-27B"), ("mlx-community", "Qwen3-0.6B-4bit")):
+            d = os.path.join(hub, org, name)
+            os.makedirs(d)
+            self.models.append({"name": name, "path": d, "size": 1.0, "vision": False, "thinking": True,
+                                "supported": True})
+        self.cfg = cfg()
+        self.cfg["dirs"] = [hub]
+        self.cfg["model"] = self.models[1]["path"]
+        for patch in (mock.patch.object(llm, "HOME", self.home),
+                      mock.patch.object(llm, "scan_models", lambda c: list(self.models)),
+                      mock.patch.object(llm, "current_model", lambda c: self.models[1]),
+                      mock.patch.object(llm, "health", lambda c, t=3: None)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def write(self, which="kilo"):
+        p = os.path.join(self.home, "kilo.jsonc")
+        cur = self.models[1]
+        ctx, out = llm.client_limits(self.cfg, cur)
+        llm._write_opencode_style(p, self.cfg, cur, ctx, out, alias=("local_qwen",),
+                                  others=llm._other_models(self.cfg, cur))
+        with open(p) as f:
+            return json.load(f), p
+
+    def test_every_installed_model_is_offered_under_both_ids(self):
+        data, _ = self.write()
+        models = data["provider"]["local_mlx"]["models"]
+        self.assertIn("qwen3-0.6b-4bit", models)
+        self.assertIn("bonsai-2-27b", models)                                  # the other installed model
+        self.assertIn("dealignai/Bonsai-2-27B", models)                        # …and the id older versions used
+        self.assertEqual(data["provider"]["local_qwen"], data["provider"]["local_mlx"])
+        self.assertEqual(data["model"], "local_mlx/qwen3-0.6b-4bit")           # the selected one stays the default
+
+    def test_sync_refreshes_a_connected_client_and_never_creates_one(self):
+        from unittest import mock
+        p = os.path.join(self.home, "kilo.jsonc")
+        with mock.patch.dict(llm.CLIENTS, {"kilo": ("Kilo Code", p), "opencode": ("opencode", os.path.join(self.home, "oc.json"))}):
+            self.assertEqual(llm.sync_clients(self.cfg), [])
+            self.assertFalse(os.path.exists(p))
+            with open(p, "w") as f:
+                json.dump({"provider": {"local_mlx": {"models": {"old": {}}}}, "theme": "dark"}, f)
+            self.assertEqual(llm.sync_clients(self.cfg), ["Kilo Code"])
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+        self.assertIn("bonsai-2-27b", data["provider"]["local_mlx"]["models"])
+        self.assertNotIn("old", data["provider"]["local_mlx"]["models"])
+        self.assertEqual(data["theme"], "dark")
+
+
+class TestNetworkAndEngineFlags(unittest.TestCase):
+    def test_proxy_and_ca_settings_become_the_variables_urllib_and_ssl_read(self):
+        c = cfg()
+        c.update(proxy_http="http://proxy.local:8080", proxy_https="http://proxy.local:8443",
+                 no_proxy="*.internal", ca_bundle="/etc/ssl/corp.pem")
+        env = llm.network_env(c, {"PATH": "/usr/bin"})
+        self.assertEqual((env["HTTP_PROXY"], env["http_proxy"]), ("http://proxy.local:8080",) * 2)
+        self.assertEqual(env["HTTPS_PROXY"], "http://proxy.local:8443")
+        self.assertEqual(env["SSL_CERT_FILE"], "/etc/ssl/corp.pem")
+        self.assertIn("*.internal", env["NO_PROXY"])
+        for host in ("localhost", "127.0.0.1"):      # the engine on this Mac is never sent through the proxy
+            self.assertIn(host, env["NO_PROXY"].split(","))
+
+    def test_nothing_set_changes_nothing(self):
+        c = cfg()
+        c.update(proxy_http="", proxy_https="", no_proxy="", ca_bundle="")
+        self.assertEqual(llm.network_env(c, {"PATH": "/x", "HTTP_PROXY": "keep"}), {"PATH": "/x", "HTTP_PROXY": "keep"})
+
+    def test_engine_flags_follow_the_settings_and_stay_out_of_the_command_by_default(self):
+        c = cfg()
+        c.update(log_level="info", fallback_model=True, prefill_guard=True)
+        m = {"name": "m", "path": "/tmp/m", "size": 1.0, "vision": False, "thinking": False, "route": "native"}
+        base = llm.engine_cmd(c, m)
+        for flag in ("--log-level", "--fallback-model", "--prefill-guard"):
+            self.assertNotIn(flag, base)
+        c.update(log_level="debug", fallback_model=False, prefill_guard=False)
+        cmd = llm.engine_cmd(c, m)
+        self.assertEqual(cmd[cmd.index("--log-level") + 1], "debug")
+        self.assertEqual(cmd[cmd.index("--fallback-model") + 1], "off")
+        self.assertEqual(cmd[cmd.index("--prefill-guard") + 1], "off")
+
+
 class TestTranslations(unittest.TestCase):
     def test_every_ui_string_has_russian(self):
         with open(os.path.join(ROOT, "locales", "ru.json"), encoding="utf-8") as f:

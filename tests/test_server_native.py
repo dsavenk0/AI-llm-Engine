@@ -120,6 +120,32 @@ class TestNativeServer(unittest.TestCase):
         for k in ("memory_gb", "memory_breakdown", "system_ram_used", "mem_limit", "requests", "busy"):
             self.assertIn(k, h)
 
+    def test_health_reports_prefill_progress_while_a_long_prompt_is_processed(self):
+        import threading
+        seen = []
+        stop = threading.Event()
+
+        def poll():
+            while not stop.is_set():
+                try:
+                    p = self.srv.get("/health").get("progress")
+                    if p:
+                        seen.append(p)
+                except OSError:
+                    pass
+                time.sleep(0.01)
+        t = threading.Thread(target=poll)
+        t.start()
+        try:
+            self.srv.chat("the quick brown fox jumps over the lazy dog " * 90, max_tokens=2)
+        finally:
+            stop.set()
+            t.join()
+        self.assertIsNone(self.srv.get("/health")["progress"])           # and it is gone afterwards
+        for p in seen:                                                      # whatever was caught is well formed
+            self.assertEqual(p["phase"], "prefill")
+            self.assertTrue(0 <= p["done"] <= p["total"])
+
     def test_models_endpoint(self):
         code, r = self.srv.json("GET", "/v1/models")
         self.assertEqual((code, r["object"], r["data"][0]["id"]), (200, "list", "synth"))
@@ -241,6 +267,52 @@ class TestNativeServer(unittest.TestCase):
             row = json.loads(f.readlines()[-1])
         self.assertEqual(row["model"], "synth")
         self.assertGreater(row["prompt"], 0)
+
+
+class TestNativeServerOptions(unittest.TestCase):
+    """--fallback-model, --log-level (with group tags), --prefill-guard."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        make_bundle(cls.dir, CHATML, seed=13)
+
+    def with_server(self, *extra):
+        srv = Server(self.dir, *extra)
+        self.addCleanup(srv.stop)
+        return srv
+
+    def test_fallback_on_answers_any_name(self):
+        srv = self.with_server()
+        code, r = srv.chat(model="gpt-4o")
+        self.assertEqual(code, 200, r)
+
+    def test_fallback_off_refuses_another_model_but_accepts_the_loaded_one_in_any_spelling(self):
+        srv = self.with_server("--fallback-model", "off")
+        code, r = srv.chat(model="some-other-model")
+        self.assertEqual(code, 404)
+        self.assertEqual(r["error"]["code"], "model_not_found")
+        self.assertIn("synth", r["error"]["message"])
+        for ok in ("synth", "SYNTH", "org/synth"):
+            self.assertEqual(srv.chat(model=ok)[0], 200, ok)
+
+    def test_log_lines_carry_a_group_and_the_level_filters(self):
+        quiet = self.with_server("--log-level", "warning")
+        quiet.chat()
+        loud = self.with_server("--log-level", "trace")
+        loud.chat()
+        for s in (quiet, loud):
+            s.log.flush()
+        q, l = open(quiet.log.name).read(), open(loud.log.name).read()
+        self.assertNotIn("[request]", q)                     # info lines are below "warning"
+        self.assertNotIn("[model]", q)
+        self.assertIn("[request]", l)
+        self.assertIn("[model]", l)
+        self.assertIn("trace: request", l)                    # only at trace level
+
+    def test_the_prefill_guard_can_be_switched_off(self):
+        srv = self.with_server("--prefill-guard", "off")
+        self.assertEqual(srv.chat()[0], 200)
 
 
 class TestNativeServerNoRoomForVision(unittest.TestCase):

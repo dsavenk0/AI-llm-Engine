@@ -90,12 +90,13 @@ class CompatEngine:
 
     def __init__(self, path, vision=False, max_context=0, max_tokens=8192, prefill_step=512,
                  thinking=None, effort="medium", mem_limit=0.88, sampling_override=None,
-                 cache_limit_mb=128, think_frac=0.6, log=print, **_ignored):
+                 cache_limit_mb=128, think_frac=0.6, prefill_guard=True, log=print, **_ignored):
         if not mlx_lm_available():
             raise RuntimeError(INSTALL_HINT)
         self.path, self.log = path, log
         self.max_tokens, self.prefill_step = max_tokens, prefill_step
         self.effort, self.mem_limit, self.think_frac = effort, mem_limit, think_frac
+        self.prefill_guard, self.progress = prefill_guard, None
         self.config = _json(os.path.join(path, "config.json"))
         self.gen_cfg = _json(os.path.join(path, "generation_config.json"))
         self.vision_allowed = False      # text only; mlx-vlm would be a separate optional backend
@@ -331,6 +332,8 @@ class CompatEngine:
         return False
 
     def _reserve(self, new_tokens):
+        if not self.prefill_guard:
+            return
         need = new_tokens * self.kv_per_token + 64 * 2**20 + min(new_tokens, self.prefill_step) * 512 * 1024
         mx.clear_cache()
         if memory.headroom_bytes(min(1.0, self.mem_limit + 0.02)) < need:
@@ -374,13 +377,17 @@ class CompatEngine:
         self.cache, self.cache_tokens = cache, list(ids[:reused])
         model, step = self.model, max(64, self.prefill_step)
         pos = reused
-        while len(ids) - pos > 1:   # all but the last token: build the cache
-            chunk = ids[pos:min(len(ids) - 1, pos + step)]
-            model(mx.array([chunk]), cache=cache)
-            mx.eval([c.state for c in cache])
-            pos += len(chunk)
-            self.cache_tokens = list(ids[:pos])
-            self._check_memory("prefill")
+        try:
+            while len(ids) - pos > 1:   # all but the last token: build the cache
+                self.progress = {"phase": "prefill", "done": pos, "total": len(ids)}
+                chunk = ids[pos:min(len(ids) - 1, pos + step)]
+                model(mx.array([chunk]), cache=cache)
+                mx.eval([c.state for c in cache])
+                pos += len(chunk)
+                self.cache_tokens = list(ids[:pos])
+                self._check_memory("prefill")
+        finally:
+            self.progress = None
         logits = model(mx.array([ids[pos:]]), cache=cache)
         self.cache_tokens = list(ids)
         t_prefill = time.time() - t0

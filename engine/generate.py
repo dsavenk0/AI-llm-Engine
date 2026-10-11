@@ -259,8 +259,9 @@ class Engine:
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
                  max_pixels=1024 * 1024, thinking=None, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
-                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, ptq1=False, log=print):
+                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, ptq1=False, prefill_guard=True, log=print):
         self.path, self.log = path, log
+        self.prefill_guard = prefill_guard   # refuse a prompt that would not fit in free memory
         self.max_context, self.max_tokens, self.prefill_step = max_context, max_tokens, prefill_step  # 0 = auto
         self.max_pixels = max_pixels
         self.thinking, self.effort = thinking, effort
@@ -269,6 +270,7 @@ class Engine:
         self.ptq1_enabled = ptq1      # experimental: PTQ1_0 (1.75-bit) bundles
         self.mem_limit = mem_limit  # max fraction of system RAM in use (whole machine)
 
+        self.progress = None           # {"phase", "done", "total"} while a long prompt is being prefilled
         self.sleeping, self.last_used = False, time.time()
         self._load_weights()
         nbytes = self.model_bytes
@@ -463,28 +465,37 @@ class Engine:
         """
         logits, n, s, step = None, len(ids), start, self.step_now
         attn = self.model.layers[self._attention_layer()].self_attn
-        while s < n:
-            e = min(n, s + step)
-            if pos3 is not None:
-                cos, sin = attn.mrope.cos_sin(mx.array(pos3[:, s:e]))
-                pos = Positions(cos.astype(mx.float16), sin.astype(mx.float16))
-            else:
-                pos = Positions(delta=delta)
-            if embeds is not None:
-                logits = self.model(cache=cache, pos=pos, embeds=embeds[:, s:e])
-            else:
-                logits = self.model(mx.array([ids[s:e]]), cache, pos)
-            mx.eval(logits, [a for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)])
-            s = e
-            if s < n:
-                mx.clear_cache()
-                used = memory.used_fraction()
-                if used > self.mem_limit and step > 128:
-                    step = max(128, step // 4)
-                    self.log(f"memory: {used:.0%} RAM in use, prefill chunk reduced to {step}")
-                elif used > self.mem_limit:
-                    self._check_memory("prefill")
+        try:
+            while s < n:
+                self.progress = {"phase": "prefill", "done": s, "total": n}   # /health: a long prompt is not "hung"
+                s, logits, step = self._prefill_chunk(cache, ids, embeds, pos3, delta, s, n, step, attn, logits)
+        finally:
+            self.progress = None
         return logits
+
+    def _prefill_chunk(self, cache, ids, embeds, pos3, delta, s, n, step, attn, logits):
+        """One chunk of the prefill; returns (next start, logits, chunk size for the next one)."""
+        e = min(n, s + step)
+        if pos3 is not None:
+            cos, sin = attn.mrope.cos_sin(mx.array(pos3[:, s:e]))
+            pos = Positions(cos.astype(mx.float16), sin.astype(mx.float16))
+        else:
+            pos = Positions(delta=delta)
+        if embeds is not None:
+            logits = self.model(cache=cache, pos=pos, embeds=embeds[:, s:e])
+        else:
+            logits = self.model(mx.array([ids[s:e]]), cache, pos)
+        mx.eval(logits, [a for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)])
+        s = e
+        if s < n:
+            mx.clear_cache()
+            used = memory.used_fraction()
+            if used > self.mem_limit and step > 128:
+                step = max(128, step // 4)
+                self.log(f"memory: {used:.0%} RAM in use, prefill chunk reduced to {step}")
+            elif used > self.mem_limit:
+                self._check_memory("prefill")
+        return s, logits, step
 
     def _attention_layer(self):
         return next(i for i, l in enumerate(self.model.layers) if not l.is_linear)
@@ -561,6 +572,10 @@ class Engine:
         Picks the largest prefill chunk (1024 → 512 → 256 → 128) whose peak fits
         the current headroom, so tight memory means smaller chunks, not a refusal.
         """
+        if not self.prefill_guard:      # --prefill-guard off: never refuse, never shrink the chunk
+            self.step_now = self.prefill_step
+            return
+
         def need(step):
             return new_tokens * self.kv_per_token + self.base_work + min(new_tokens, step) * self.act_per_token
 
