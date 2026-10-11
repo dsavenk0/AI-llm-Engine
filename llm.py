@@ -380,13 +380,28 @@ def remove_cmd(cfg, args):
 
 # ─────────────────────────── processes ───────────────────────────
 def read_pid(path):
+    """The PID in `path` when that process is alive AND is ours: a pid file outlives a crash or a reboot,
+    and its number may since belong to any other program — which `./llm stop` must never signal.
+    The file holds the pid and, on a second line, what was started (a fragment of its command line)."""
     try:
         with open(path) as f:
-            pid = int(f.read().strip())
+            parts = f.read().split()
+        pid = int(parts[0])
+        expect = parts[1] if len(parts) > 1 else "engine.server"
         os.kill(pid, 0)
-        return pid
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         return None
+    if expect:
+        try:
+            cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True,
+                                 timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return pid                     # cannot tell: keep the old behaviour
+        if expect not in cmd:
+            try: os.remove(path)           # stale: somebody else's process now
+            except OSError: pass
+            return None
+    return pid
 
 
 def kill_pid(pid, wait=15):
@@ -405,6 +420,19 @@ def kill_pid(pid, wait=15):
 def pgrep(pattern):
     out = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout
     return [int(p) for p in out.split() if int(p) != os.getpid()]
+
+
+def port_holder(port):
+    """(pid, command name) of the process listening on the port, or None when it cannot be told."""
+    try:
+        out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True,
+                             text=True, timeout=5).stdout.split()
+        pid = int(out[0])
+        name = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True,
+                              timeout=5).stdout.strip()
+        return pid, os.path.basename(name) or "?"
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        return None
 
 
 def port_busy(port):
@@ -543,7 +571,17 @@ def start(cfg, interactive=True):
             except OSError: pass
             time.sleep(0.5)
         if port_busy(cfg["port"]):
-            print(R(T("Port {port} is busy. Change it in settings.").format(port=cfg["port"]))); return False
+            # somebody else's process: never cleared on its own. Say who it is; ask only when a person is here
+            who = port_holder(cfg["port"])
+            if who and interactive and sys.stdin.isatty() and ask_yn(
+                    Y(T("Port {port} is held by {name} (PID {pid}), not by this engine. Stop it?")
+                      .format(port=cfg["port"], name=who[1], pid=who[0])), False):
+                kill_pid(who[0])
+                time.sleep(0.5)
+            if port_busy(cfg["port"]):
+                held = T(" (held by {name}, PID {pid})").format(name=who[1], pid=who[0]) if who else ""
+                print(R(T("Port {port} is busy{held}. Free it yourself or change the port in settings.")
+                        .format(port=cfg["port"], held=held))); return False
     avail, _ = mem_info()
     if m["size"] + 1.5 > avail:
         print(Y(T("⚠ The model needs ~{need:.1f} GB, {avail:.1f} GB available — expect swapping.")
@@ -557,8 +595,10 @@ def start(cfg, interactive=True):
     with open(ENGINE_LOG, "a") as logf:
         p = subprocess.Popen(cmd, cwd=BASE, stdout=logf, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+    # the pid file also names what was started (module or script): see read_pid
+    what = next((a for a in cmd[1:] if not a.startswith("-")), "engine.server")
     with open(ENGINE_PID, "w") as f:
-        f.write(str(p.pid))
+        f.write(f"{p.pid}\n{what}")
     print(T("Loading {name} ({size:.1f} GB)").format(name=B(m["name"]), size=m["size"]), end="", flush=True)
     t0 = time.time()
     while time.time() - t0 < 600:
@@ -1113,7 +1153,10 @@ def hf_pull(repo, progress=False):
 
     for f in files:
         name, size = f["rfilename"], f.get("size") or 0
-        path = os.path.join(dest, name)
+        path = os.path.realpath(os.path.join(dest, name))
+        if not path.startswith(os.path.realpath(dest) + os.sep):   # "../x" or an absolute name from the listing
+            print("\n" + R(T("Download failed: {name}: {err}").format(name=name, err=T("unsafe file name"))))
+            return False
         os.makedirs(os.path.dirname(path), exist_ok=True)
         for q in (path, path + ".part"):  # what's already on disk counts as progress
             if os.path.exists(q):

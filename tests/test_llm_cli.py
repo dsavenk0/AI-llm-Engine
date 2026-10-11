@@ -207,6 +207,22 @@ class TestStartStop(State):
     def engine(self, delay=0.0):
         return lambda cfg, m: [sys.executable, "-B", self.script, str(cfg["port"]), str(delay)]
 
+    def test_a_stale_pid_file_never_makes_us_signal_someone_else(self):
+        """After a crash or a reboot the pid in the file can belong to any program. stop() and a start that
+        finds the port busy must leave it alone and drop the stale file."""
+        victim = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(victim.kill)
+        os.makedirs(os.path.dirname(llm.ENGINE_PID), exist_ok=True)
+        with open(llm.ENGINE_PID, "w") as f:
+            f.write(f"{victim.pid}\nengine.server")
+        self.assertIsNone(llm.read_pid(llm.ENGINE_PID))
+        self.assertFalse(os.path.exists(llm.ENGINE_PID))
+        with open(llm.ENGINE_PID, "w") as f:
+            f.write(str(victim.pid))                       # an old file without the second line
+        quiet(llm.stop, self.cfg)
+        time.sleep(0.2)
+        self.assertIsNone(victim.poll(), "an unrelated process was signalled")
+
     def test_start_waits_for_health_then_stop_clears_the_pid(self):
         with mock.patch.object(llm, "engine_cmd", self.engine(0.3)), mock.patch.object(llm, "show_endpoints", lambda *a: None):
             ok, out = quiet(llm.start, self.cfg, False)
@@ -236,7 +252,7 @@ class TestStartStop(State):
         while not llm.port_busy(self.cfg["port"]) and time.time() < deadline:
             time.sleep(0.05)
         with open(llm.ENGINE_PID, "w") as f:
-            f.write(str(stuck.pid))
+            f.write(f"{stuck.pid}\nsocket.socket()")      # what start() records: a fragment of the command line
         with mock.patch.object(llm, "engine_cmd", self.engine()), mock.patch.object(llm, "show_endpoints", lambda *a: None):
             ok, out = quiet(llm.start, self.cfg, False)
         self.assertTrue(ok, out)
@@ -252,6 +268,50 @@ class TestStartStop(State):
         ok, out = quiet(llm.start, self.cfg, False)
         self.assertFalse(ok)
         self.assertIn("busy", out)
+
+    def listener(self):
+        """Somebody else's process (not started by llm.py) holding the engine port."""
+        p = subprocess.Popen([sys.executable, "-c",
+                              "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+                              f"s.bind(('127.0.0.1',{self.cfg['port']}));s.listen();time.sleep(60)"],
+                             start_new_session=True)
+        self.addCleanup(p.kill)
+        deadline = time.time() + 5
+        while not llm.port_busy(self.cfg["port"]) and time.time() < deadline:
+            time.sleep(0.05)
+        return p
+
+    def test_the_message_names_who_holds_the_port_and_nothing_is_stopped_unattended(self):
+        p = self.listener()
+        ok, out = quiet(llm.start, self.cfg, False)          # non-interactive: LLMBar, scripts
+        self.assertFalse(ok)
+        self.assertIn(f"PID {p.pid}", out)
+        time.sleep(0.2)
+        self.assertIsNone(p.poll(), "a process that is not ours was stopped without asking")
+
+    def test_a_person_is_asked_and_the_default_is_no(self):
+        p = self.listener()
+        asked = []
+
+        def answer(q, default=True):
+            asked.append((q, default))
+            return False
+        with mock.patch.object(llm, "ask_yn", answer), mock.patch.object(llm.sys.stdin, "isatty", lambda: True):
+            ok, out = quiet(llm.start, self.cfg, True)
+        self.assertFalse(ok)
+        self.assertEqual([d for _, d in asked if str(p.pid) in _], [False])
+        time.sleep(0.2)
+        self.assertIsNone(p.poll())
+
+    def test_agreeing_stops_the_foreign_process_and_starts(self):
+        p = self.listener()
+        with mock.patch.object(llm, "ask_yn", lambda q, default=True: str(p.pid) in q), \
+                mock.patch.object(llm.sys.stdin, "isatty", lambda: True), \
+                mock.patch.object(llm, "engine_cmd", self.engine()), mock.patch.object(llm, "show_endpoints", lambda *a: None):
+            ok, out = quiet(llm.start, self.cfg, True)
+        self.assertTrue(ok, out)
+        p.wait(5)
+        self.assertIsNotNone(p.returncode)
 
     def test_a_crashing_engine_reports_its_log_and_does_not_hang(self):
         crash = lambda cfg, m: [sys.executable, "-c", "import sys; print('boom: no such weights'); sys.exit(3)"]

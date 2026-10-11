@@ -9,7 +9,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 
 MAX_EXCERPT = 6000
@@ -60,14 +59,11 @@ def _mentions(root, name, text):
 
 def run(command, root, timeout=TIMEOUT):
     """(exit_code, combined output). A timeout is a failure with an explanatory tail."""
-    try:
-        p = subprocess.run(command, shell=True, cwd=root, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, (p.stdout + p.stderr)
-    except subprocess.TimeoutExpired as e:
-        out = ((e.stdout or b"") if isinstance(e.stdout, bytes) else (e.stdout or "")) if e else ""
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
-        return 124, out + f"\n[timed out after {timeout} s]"
+    from harness import shell
+    p = shell.run(command, cwd=root, timeout=timeout)
+    if p.timed_out:
+        return 124, p.stdout + p.stderr + f"\n[timed out after {timeout} s]"
+    return p.returncode, p.stdout + p.stderr
 
 
 def failures(output, limit=MAX_EXCERPT):

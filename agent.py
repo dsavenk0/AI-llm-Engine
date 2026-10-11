@@ -282,13 +282,13 @@ class Agent:
             ok = self.confirm(T("Run this command?"))
         if not ok:
             return "user declined to run the command"
-        try:
-            p = subprocess.run(command, shell=True, cwd=self.root, capture_output=True, text=True, timeout=120)
-            out = (p.stdout + p.stderr).strip()
-            print(DIM(out[-2000:]))
-            return f"exit code {p.returncode}\n{out}"
-        except subprocess.TimeoutExpired:
-            return "error: timed out after 120 s"
+        from harness import shell
+        p = shell.run(command, cwd=self.root, timeout=120)
+        out = (p.stdout + p.stderr).strip()
+        print(DIM(out[-2000:]))
+        if p.timed_out:
+            return f"error: timed out after 120 s (the command was stopped)\n{out}"
+        return f"exit code {p.returncode}\n{out}"
 
     def call_tool(self, name, args):
         fn = getattr(self, "t_" + name, None) or (self.extra.get(name) or (None, None))[1]

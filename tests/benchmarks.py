@@ -180,10 +180,10 @@ def run_python(script, timeout=10):
         cmd = [sys.executable, "-I", "-B", "-c", script + "\nprint('OK')\n"]
         if os.path.exists(SANDBOX):
             cmd = [SANDBOX, "-p", _sandbox_profile(d)] + cmd
-        try:
-            p = subprocess.run(cmd, cwd=d, capture_output=True, text=True, timeout=timeout,
-                               stdin=subprocess.DEVNULL, env={"PATH": "/usr/bin:/bin", "HOME": d, "TMPDIR": d})
-        except subprocess.TimeoutExpired:
+        from harness import shell
+        p = shell.run(cmd, cwd=d, timeout=timeout, shell=False,
+                      env={"PATH": "/usr/bin:/bin", "HOME": d, "TMPDIR": d})
+        if p.timed_out:
             return False
     return p.returncode == 0 and p.stdout.rstrip().endswith("OK")
 

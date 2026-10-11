@@ -175,11 +175,12 @@ class Tools:
             pass
         if not self._approve(_call_id, "run", command=command, dangerous=danger):
             return "the user declined to run the command"
-        try:
-            p = subprocess.run(command, shell=True, cwd=self.P.root, capture_output=True, text=True, timeout=120)
-            return f"exit code {p.returncode}\n{(p.stdout + p.stderr).strip()}"
-        except subprocess.TimeoutExpired:
-            return "error: timed out after 120 s"
+        from harness import shell
+        p = shell.run(command, cwd=self.P.root, timeout=120)
+        out = (p.stdout + p.stderr).strip()
+        if p.timed_out:
+            return f"error: timed out after 120 s (the command was stopped)\n{out}"
+        return f"exit code {p.returncode}\n{out}"
 
     def ask_user(self, question, options=None, _call_id="", **_):
         opts = [str(o) for o in (options or [])][:4]

@@ -153,12 +153,10 @@ def extract_code(text):
 
 
 def run_code_problem(problem, completion):
-    script = extract_code(completion) + "\n\n" + problem["tests"] + "\nprint('OK')\n"
-    try:
-        p = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=10)
-        return p.returncode == 0 and "OK" in p.stdout
-    except subprocess.TimeoutExpired:
-        return False
+    # the model's code runs in the same sandbox as the standard benchmarks (no network, writes only
+    # inside a throw-away folder, killed with all its children on timeout)
+    from tests.benchmarks import run_python
+    return run_python(extract_code(completion) + "\n\n" + problem["tests"])
 
 
 GREEDY = False  # --greedy: temperature 0 instead of the model's own sampling presets

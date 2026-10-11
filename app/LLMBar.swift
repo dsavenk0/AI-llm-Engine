@@ -1806,8 +1806,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+/// A menu-bar app has no menu bar of its own, and key equivalents (⌘V, ⌘C, ⌘X, ⌘A, ⌘Z) are looked up in the
+/// main menu: without an Edit menu a text field cannot paste. The menu is never shown, it only routes keys.
+func installEditMenu() {
+    let main = NSMenu()
+    let appItem = NSMenuItem()
+    main.addItem(appItem)
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: L("Quit", "Выйти"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appItem.submenu = appMenu
+
+    let editItem = NSMenuItem()
+    main.addItem(editItem)
+    let edit = NSMenu(title: L("Edit", "Правка"))
+    edit.addItem(withTitle: L("Undo", "Отменить"), action: Selector(("undo:")), keyEquivalent: "z")
+    let redo = edit.addItem(withTitle: L("Redo", "Повторить"), action: Selector(("redo:")), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    edit.addItem(.separator())
+    edit.addItem(withTitle: L("Cut", "Вырезать"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: L("Copy", "Копировать"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: L("Paste", "Вставить"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: L("Select All", "Выбрать всё"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editItem.submenu = edit
+    NSApp.mainMenu = main
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
+installEditMenu()
 app.run()

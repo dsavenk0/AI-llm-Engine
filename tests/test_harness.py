@@ -188,5 +188,34 @@ class TestAgentCompaction(unittest.TestCase):
         self.assertIn("answer in haiku", a.system_prompt())
 
 
+class TestShellRun(unittest.TestCase):
+    """harness.shell.run: a deadline that also ends the command's children."""
+
+    def test_output_and_exit_code(self):
+        from harness import shell
+        r = shell.run("echo out; echo err 1>&2; exit 3", timeout=10)
+        self.assertEqual((r.returncode, r.stdout.strip(), r.stderr.strip(), r.timed_out), (3, "out", "err", False))
+
+    def test_timeout_returns_the_output_so_far_and_kills_the_whole_group(self):
+        import subprocess
+        import time
+        from harness import shell
+        marker = f"sleep {7000 + os.getpid() % 900}"      # unique, so pgrep sees only this test's child
+        t0 = time.time()
+        r = shell.run(f"echo started; ({marker} &) ; {marker}", timeout=1.5)
+        self.assertTrue(r.timed_out)
+        self.assertEqual(r.returncode, 124)
+        self.assertIn("started", r.stdout)
+        self.assertLess(time.time() - t0, 8)
+        time.sleep(0.3)
+        left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout.split()
+        self.assertEqual(left, [], "the shell's children survived the timeout")
+
+    def test_an_argument_list_runs_without_a_shell(self):
+        from harness import shell
+        r = shell.run(["/bin/echo", "a b"], shell=False, timeout=10)
+        self.assertEqual(r.stdout.strip(), "a b")
+
+
 if __name__ == "__main__":
     unittest.main()
