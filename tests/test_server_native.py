@@ -243,6 +243,51 @@ class TestNativeServer(unittest.TestCase):
         self.assertGreater(row["prompt"], 0)
 
 
+class TestNativeServerSleep(unittest.TestCase):
+    """An idle engine unloads its weights; /health must keep answering (the app polls it) and the
+    next request must wake it. Regression: /health raised TypeError while the model was None."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        make_bundle(cls.dir, CHATML, seed=13)
+        # advertise a vision tower (loaded lazily, so no weights are needed): this is what makes the
+        # engine report vision as "on demand" — the branch of /health that used to dereference the model
+        with open(os.path.join(cls.dir, "config.json")) as f:
+            cfg = json.load(f)
+        cfg["vision_config"] = {"depth": 1}
+        with open(os.path.join(cls.dir, "config.json"), "w") as f:
+            json.dump(cfg, f)
+        with open(os.path.join(cls.dir, "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": {"vision_tower.blocks.0.attn.qkv.weight": "model.safetensors"}}, f)
+        cls.srv = Server(cls.dir, "--idle-sleep", "0.03")          # ~1.8 s of idleness
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+
+    def wait_for(self, state, timeout=20):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            code, h = self.srv.json("GET", "/health")
+            if code == 200 and h.get("state") == state:
+                return h
+            time.sleep(0.2)
+        self.fail(f"engine never reported state {state!r}; last: {code} {h}")
+
+    def test_health_answers_while_sleeping_and_a_request_wakes_the_model(self):
+        h = self.wait_for("sleeping")
+        self.assertEqual(h["status"], "ok")
+        self.assertEqual(h["memory_breakdown"]["weights"], 0)      # the weights really are gone
+        self.assertEqual(h["vision"], "on demand")                 # the field that used to crash
+        code, r = self.srv.chat("wake up")
+        self.assertEqual(code, 200)
+        self.assertIn("choices", r)
+        self.assertEqual(self.srv.get("/health")["state"], "awake")
+        self.assertGreater(self.srv.get("/health")["memory_breakdown"]["weights"], 0)
+        self.wait_for("sleeping")                                   # and it can go back to sleep again
+
+
 class TestNativeServerAuth(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

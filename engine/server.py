@@ -37,9 +37,11 @@ def worker(init):
     global ENGINE
     ENGINE = init()
     READY.set()
+    # how often an idle engine looks at the clock: 20 s, or a quarter of a very short idle-sleep
+    poll = 20.0 if ARGS.idle_sleep <= 0 else max(0.2, min(20.0, ARGS.idle_sleep * 60 / 4))
     while True:
         try:
-            fn, out = JOBS.get(timeout=20)
+            fn, out = JOBS.get(timeout=poll)
         except queue.Empty:
             idle = time.time() - ENGINE.last_used
             if ARGS.idle_sleep > 0 and not ENGINE.sleeping and idle > ARGS.idle_sleep * 60:
@@ -279,7 +281,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if ENGINE.store else None,
                 "context": ENGINE.max_context, "max_tokens": ENGINE.max_tokens,
                 "thinking": ENGINE.thinking, "thinking_default": ENGINE.thinking_default, "effort": ENGINE.effort,
-                "vision": ("loaded" if "vision_tower" in ENGINE.model else "on demand") if ENGINE.vision_allowed else False,
+                # the model is None while the engine sleeps — /health must still answer (the app polls it)
+                "vision": ("loaded" if ENGINE.model is not None and "vision_tower" in ENGINE.model else "on demand")
+                if ENGINE.vision_allowed else False,
                 "busy": ENGINE.lock.locked(),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
                               "peak": round(mx.get_peak_memory() / 2**30, 2),
