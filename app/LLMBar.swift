@@ -52,7 +52,10 @@ enum HUD {
     static var dim: Color { lightTheme ? Color(red: 0.36, green: 0.43, blue: 0.48) : Color(red: 0.45, green: 0.58, blue: 0.64) }
     static var glow: Double { lightTheme ? 0.25 : 1.0 }   // neon glow is for dark glass only
     static var panel: Color {
-        if glassActive { return lightTheme ? Color.white.opacity(glassCardShade * 0.9) : Color.black.opacity(glassCardShade) }
+        if glassActive {   // one flat tint; dark theme gets a graphite-blue rather than pure black
+            return lightTheme ? Color.white.opacity(glassCardShade * 0.9)
+                              : Color(red: 0.04, green: 0.07, blue: 0.11).opacity(glassCardShade)
+        }
         return lightTheme ? Color.white.opacity(0.42) : Color.black.opacity(0.20)
     }
     static var track: Color { lightTheme ? Color.black.opacity(0.07) : Color.white.opacity(0.06) }
@@ -62,41 +65,24 @@ enum HUD {
     }
 }
 
-/// Hairline-framed glass card. In Liquid Glass mode it is "dark glass": a graded dark fill whose density
-/// follows the transparency slider, a specular sheen along the top and a light rim.
+/// Hairline-framed glass card. In Liquid Glass mode the backing is a flat tint whose density follows
+/// the transparency slider (a graded fill with a sheen looked worse than a plain tone).
 struct Card<Content: View>: View {
     var glow: Color = HUD.cyan
     @ViewBuilder let content: Content
-
-    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
-
-    @ViewBuilder private var backing: some View {
-        if glassActive {
-            let d = glassCardShade
-            ZStack {
-                shape.fill(LinearGradient(
-                    colors: lightTheme
-                        ? [Color.white.opacity(min(1, d * 0.80)), Color(red: 0.86, green: 0.91, blue: 0.95).opacity(min(1, d * 0.95))]
-                        : [Color(red: 0.16, green: 0.22, blue: 0.30).opacity(min(1, d * 0.80)), Color(red: 0.03, green: 0.06, blue: 0.10).opacity(min(1, d * 0.95))],
-                    startPoint: .top, endPoint: .bottom))
-                // specular sheen: light catching the upper edge of the glass
-                shape.fill(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.45 : 0.18), .clear],
-                                          startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.5)))
-                shape.strokeBorder(LinearGradient(colors: [Color.white.opacity(lightTheme ? 0.9 : 0.38), glow.opacity(0.30), glow.opacity(0.12)],
-                                                  startPoint: .top, endPoint: .bottom), lineWidth: 1)
-            }
-        } else {
-            shape.fill(HUD.panel)
-                .overlay(shape.strokeBorder(LinearGradient(colors: [glow.opacity(0.45), glow.opacity(0.08)],
-                                                           startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
-        }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) { content }
             .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(backing)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(HUD.panel)
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [glow.opacity(glassActive ? 0.6 : 0.45), glow.opacity(glassActive ? 0.2 : 0.08)],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing),
+                                      lineWidth: glassActive ? 1.0 : 0.8))
+            )
     }
 }
 
@@ -275,6 +261,7 @@ final class EngineState: ObservableObject {
     @Published var models: [ModelInfo] = []
     @Published var config: [String: Any] = [:]
     var onTheme: (() -> Void)? = nil
+    var onAbout: (() -> Void)? = nil
 
     var running: Bool { health != nil }
     var sleeping: Bool { (health?["state"] as? String) == "sleeping" }
@@ -1288,10 +1275,9 @@ struct NeonButton: ButtonStyle {
     }
 }
 
-/// "About" card shown over the panel: what this is, version, who/license, links, and where it runs.
+/// Content of the "About" window: what this is, version, who/license, links, and where it runs.
 struct AboutView: View {
     @ObservedObject var e: EngineState
-    var close: () -> Void
 
     private var version: String {
         let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -1301,50 +1287,43 @@ struct AboutView: View {
 
     private func row(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top) {
-            Text(k).font(HUD.mono(10)).foregroundColor(HUD.dim).frame(width: 78, alignment: .leading)
-            Text(v).font(HUD.mono(10)).foregroundColor(HUD.text).fixedSize(horizontal: false, vertical: true)
+            Text(k).font(HUD.mono(11)).foregroundColor(HUD.dim).frame(width: 92, alignment: .leading)
+            Text(v).font(HUD.mono(11)).foregroundColor(HUD.text).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
     }
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.45).ignoresSafeArea().onTapGesture(perform: close)
-            VStack(spacing: 12) {
-                if let icon = NSApp.applicationIconImage {
-                    Image(nsImage: icon).resizable().frame(width: 64, height: 64)
-                }
-                VStack(spacing: 3) {
-                    Text("AI-llm-Engine · LLMBar").font(.system(size: 15, weight: .semibold)).foregroundColor(HUD.text)
-                    Text(L("Version", "Версия") + " \(version)").font(HUD.mono(10)).foregroundColor(HUD.dim)
-                }
-                Text(L("A lightweight local inference engine for MLX models on Apple silicon, with an OpenAI-compatible API, and this menu-bar app to run it.",
-                       "Лёгкий локальный движок инференса MLX-моделей для Apple silicon с OpenAI-совместимым API и это приложение в строке меню для управления им."))
-                    .font(.system(size: 11)).foregroundColor(HUD.text).multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                Divider().opacity(0.3)
-                VStack(alignment: .leading, spacing: 5) {
-                    row(L("API", "API"), e.apiURL)
-                    row(L("Runs on", "Работает на"), "macOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion) · \(ramGB) GB")
-                    row(L("Author", "Автор"), "Denis Savenko")
-                    row(L("License", "Лицензия"), "Apache-2.0")
-                }
-                HStack(spacing: 14) {
-                    Link("GitHub", destination: URL(string: "https://github.com/dsavenk0/AI-llm-Engine")!)
-                    Link(L("Releases", "Релизы"), destination: URL(string: "https://github.com/dsavenk0/AI-llm-Engine/releases")!)
-                }.font(HUD.mono(11, .semibold)).foregroundColor(HUD.cyan)
-                Text("© 2026 AI-llm-Engine").font(HUD.mono(9)).foregroundColor(HUD.dim)
-                Button(action: close) {
-                    Text(L("Close", "Закрыть")).font(.system(size: 12, weight: .semibold)).foregroundColor(HUD.text)
-                        .padding(.horizontal, 18).padding(.vertical, 6)
-                }.buttonStyle(StrongButton(color: HUD.cyan))
+        VStack(spacing: 14) {
+            if let icon = NSApp.applicationIconImage {
+                Image(nsImage: icon).resizable().frame(width: 72, height: 72)
             }
-            .padding(18)
-            .frame(width: 320)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(lightTheme ? Color.white.opacity(0.92) : Color(red: 0.07, green: 0.09, blue: 0.12).opacity(0.96)))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(HUD.cyan.opacity(0.5), lineWidth: 0.8))
-            .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
+            VStack(spacing: 3) {
+                Text("AI-llm-Engine · LLMBar").font(.system(size: 17, weight: .semibold)).foregroundColor(HUD.text)
+                Text(L("Version", "Версия") + " \(version)").font(HUD.mono(11)).foregroundColor(HUD.dim)
+            }
+            Text(L("A lightweight local inference engine for MLX models on Apple silicon, with an OpenAI-compatible API, and this menu-bar app to run it.",
+                   "Лёгкий локальный движок инференса MLX-моделей для Apple silicon с OpenAI-совместимым API и это приложение в строке меню для управления им."))
+                .font(.system(size: 12)).foregroundColor(HUD.text).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().opacity(0.3)
+            VStack(alignment: .leading, spacing: 6) {
+                row("API", e.apiURL)
+                row(L("Runs on", "Работает на"), "macOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion) · \(ramGB) GB")
+                row(L("Author", "Автор"), "Denis Savenko")
+                row(L("License", "Лицензия"), "Apache-2.0")
+            }
+            HStack(spacing: 18) {
+                Link("GitHub", destination: URL(string: "https://github.com/dsavenk0/AI-llm-Engine")!)
+                Link(L("Releases", "Релизы"), destination: URL(string: "https://github.com/dsavenk0/AI-llm-Engine/releases")!)
+            }.font(HUD.mono(12, .semibold)).foregroundColor(HUD.cyan)
+            Text("© 2026 AI-llm-Engine").font(HUD.mono(10)).foregroundColor(HUD.dim)
         }
+        .padding(24)
+        .frame(width: 380)
+        .background(lightTheme ? Color(red: 0.96, green: 0.97, blue: 0.98) : Color(red: 0.07, green: 0.09, blue: 0.12))
+        .environment(\.colorScheme, lightTheme ? .light : .dark)
+        .tint(HUD.cyan)
     }
 }
 
@@ -1352,7 +1331,6 @@ struct ContentView: View {
     @ObservedObject var e: EngineState
     @ObservedObject var mon: SystemMonitor
     @State private var tab = 0
-    @State private var showAbout = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1400,8 +1378,6 @@ struct ContentView: View {
         .padding(16)
         .frame(width: 392)
         .background(background)
-        .overlay { if showAbout { AboutView(e: e) { showAbout = false }.transition(.opacity) } }
-        .animation(.easeOut(duration: 0.15), value: showAbout)
         .environment(\.colorScheme, lightTheme ? .light : .dark)
         .tint(HUD.cyan)
         .onAppear { e.loadModels() }
@@ -1489,7 +1465,7 @@ struct ContentView: View {
                     .font(HUD.mono(10)).tracking(0.6).foregroundColor(e.running ? HUD.cyan : HUD.dim)
             }
             Spacer()
-            Button(action: { showAbout = true }) {
+            Button(action: { e.onAbout?() }) {
                 Image(systemName: "info.circle").font(.system(size: 13, weight: .regular)).frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }.buttonStyle(.plain).foregroundColor(HUD.dim).help(L("About", "О приложении"))
@@ -1567,12 +1543,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let monitor = SystemMonitor()
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var window: NSWindow?
+    var aboutWindow: NSWindow?
     var hosting: NSHostingView<AnyView>?
     var fastTimer: Timer?
     var hiddenAt = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
         engine.onTheme = { [weak self] in self?.applyTheme() }
+        engine.onAbout = { [weak self] in self?.showAbout() }
         applyTheme()
         item.autosaveName = "AI-llm-Engine"  // keeps a ⌘-dragged position across launches
         if let b = item.button {
@@ -1595,6 +1573,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applyTheme() {
         let a = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
         window?.appearance = a
+        aboutWindow?.appearance = a
+    }
+
+    /// "About" is its own window (not a card inside the panel): standard close button, own place on
+    /// screen, reused when already open.
+    func showAbout() {
+        if aboutWindow == nil {
+            let host = NSHostingView(rootView: AboutView(e: engine))
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                             styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+            w.title = L("About AI-llm-Engine", "О приложении AI-llm-Engine")
+            w.titlebarAppearsTransparent = true
+            w.isMovableByWindowBackground = true
+            w.isReleasedWhenClosed = false
+            w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
+            w.contentView = host
+            w.setContentSize(host.fittingSize)
+            w.center()
+            aboutWindow = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        aboutWindow?.makeKeyAndOrderFront(nil)
     }
 
     /// The panel's content view, built once: the SwiftUI view directly, or — with "Liquid glass" on at
