@@ -205,7 +205,9 @@ With `--suite` it runs standard benchmarks zero-shot through the model's chat te
 ./llm eval --suite mmlu --limit 0                  # 0 = the full dataset
 ```
 
-GSM8K, MMLU, MMLU-Pro, ARC-Challenge, HellaSwag, TruthfulQA (MC1), WinoGrande, HumanEval and MBPP are supported;
+GSM8K, MathQA, MMLU, MMLU-Pro, ARC-Challenge, HellaSwag, TruthfulQA (MC1), WinoGrande, KMMLU (Korean), C-Eval (Chinese),
+BBQ, SafetyBench (dev, 35 questions: the test answers are withheld), HumanEval and MBPP are supported (HumanEval/MBPP
+code runs in a macOS sandbox without network and without writes outside a throw-away folder);
 datasets come from the Hugging Face datasets server and are cached. The score is generative zero-shot accuracy with a
 95 % interval, so it is comparable between models and between runs of this tool, not with published
 log-likelihood or few-shot numbers. Stop the engine first.

@@ -208,7 +208,9 @@ shell-команды — всё в пределах папки. Перед за�
 ./llm eval --suite mmlu --limit 0                  # 0 = весь датасет
 ```
 
-Поддерживаются GSM8K, MMLU, MMLU-Pro, ARC-Challenge, HellaSwag, TruthfulQA (MC1), WinoGrande, HumanEval и MBPP;
+Поддерживаются GSM8K, MathQA, MMLU, MMLU-Pro, ARC-Challenge, HellaSwag, TruthfulQA (MC1), WinoGrande, KMMLU (корейский),
+C-Eval (китайский), BBQ, SafetyBench (dev, 35 вопросов: ответы теста закрыты), HumanEval и MBPP (код HumanEval/MBPP
+выполняется в песочнице macOS без сети и без записи вне временной папки);
 датасеты берутся с сервера датасетов Hugging Face и кэшируются. Метрика — доля верных ответов zero-shot с 95 %
 интервалом: сравнимо между моделями и между запусками этого инструмента, но не с опубликованными цифрами
 (по логарифмам вероятностей или few-shot). Движок перед запуском нужно остановить.
