@@ -168,16 +168,29 @@ def mrope_positions(ids, grids, image_token, merge):
     return pos, cur - n
 
 
+def is_repeating(tail, min_n=20, max_n=200, reps=3):
+    """True if the tail of `tail` is `reps` consecutive copies of some chunk — the
+    verbatim loops ("Okay, now let's process the user's message again" x N) a
+    reasoning model can get stuck in."""
+    L = len(tail)
+    for n in range(min(max_n, L // reps), min_n - 1, -1):
+        chunks = [tail[L - (k + 1) * n: L - k * n] for k in range(reps)]
+        if chunks[0].strip() and all(c == chunks[0] for c in chunks[1:]):
+            return True
+    return False
+
+
 class Engine:
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
                  max_pixels=1024 * 1024, thinking=True, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
-                 disk_cache_gb=8.0, log=print):
+                 disk_cache_gb=8.0, think_frac=0.6, log=print):
         self.path, self.log = path, log
         self.max_context, self.max_tokens, self.prefill_step = max_context, max_tokens, prefill_step  # 0 = auto
         self.max_pixels = max_pixels
         self.thinking, self.effort = thinking, effort
         self.speculative = speculative
+        self.think_frac = think_frac  # share of a reply's token budget reasoning may use before forced to close
         self.mem_limit = mem_limit  # max fraction of system RAM in use (whole machine)
 
         self.sleeping, self.last_used = False, time.time()
@@ -456,12 +469,17 @@ class Engine:
             mx.clear_cache()
             if attempt == 1 and self.snapshots:
                 self.snapshots = []  # snapshot states are the cheapest thing to give up
-        need = need(steps[-1])
-        if head < need:
-            raise MemoryLimitError(
-                f"not enough free RAM: {memory.used_fraction():.0%} of system memory in use, limit "
-                f"{self.mem_limit:.0%}; the prompt needs ~{need / GiB:.1f} GB more. Close other apps or "
-                f"shorten the conversation.")
+        need_last = need(steps[-1])
+        # sitting right at the limit (idle usage == mem_limit with a big model resident) must not
+        # refuse a trivially small request — give the same 2% grace band _check_memory already uses.
+        if memory.headroom_bytes(min(1.0, self.mem_limit + 0.02)) >= need_last:
+            self.step_now = steps[-1]
+            self.log(f"memory: {memory.used_fraction():.0%} RAM in use, prefill chunk {steps[-1]}")
+            return
+        raise MemoryLimitError(
+            f"not enough free RAM: {memory.used_fraction():.0%} of system memory in use, limit "
+            f"{self.mem_limit:.0%}; the prompt needs ~{need_last / GiB:.1f} GB more. Close other apps or "
+            f"shorten the conversation.")
 
     def _fit_output(self, max_tokens):
         """Clamp the output length to what still fits under the RAM limit."""
@@ -484,7 +502,8 @@ class Engine:
         return False
 
     # ───────────────────────── generate ─────────────────────────
-    def generate(self, ids, media=None, max_tokens=None, sampling=None, stop=None, should_stop=None, seed=None):
+    def generate(self, ids, media=None, max_tokens=None, sampling=None, stop=None, should_stop=None, seed=None,
+                 thinking_open=False):
         """Yield (token_id, text) pairs; final item is a dict with stats."""
         self.ensure_awake()
         if len(ids) >= self.max_context:
@@ -526,6 +545,7 @@ class Engine:
         self.cache_tokens = list(ids)
         t_prefill = time.time() - t0
         max_tokens = self._fit_output(max_tokens)
+        think_budget = int(max_tokens * self.think_frac) if thinking_open and self.think_frac else None
 
         dec = StreamDecoder(self.tok)
         out_tokens, text, finish = [], "", "length"
@@ -553,6 +573,38 @@ class Engine:
                 return True, piece
             return len(out_tokens) >= max_tokens, piece
 
+        # Reasoning models can fail to ever emit </think> — budget how many tokens the
+        # reasoning phase may use, and bail out of an exact repeating loop even sooner.
+        THINK_END = "</think>"
+        in_think = think_budget is not None
+
+        def _think_check():
+            """True once the reasoning phase has run long enough (budget) or is visibly
+            stuck repeating itself, and should be force-closed."""
+            nonlocal in_think
+            if not in_think:
+                return False
+            if THINK_END in text:
+                in_think = False
+                return False
+            if think_budget and len(out_tokens) >= think_budget:
+                return True
+            return is_repeating(text[-700:])
+
+        def _force_close_think():
+            """Teacher-force a `</think>` and hand back fresh logits to resume sampling from,
+            so the model actually sees that reasoning ended instead of being cut off cold."""
+            logits_ = None
+            for cid in self.tok.encode(f"\n{THINK_END}\n\n"):
+                logits_ = self.model(mx.array([[cid]]), cache, Positions(delta=delta))
+                fed.append(cid)
+                done_, piece_ = emit(cid)
+                if piece_:
+                    yield cid, piece_
+                if done_:
+                    return None
+            return logits_
+
         if not (self.speculative and media is None):
             # plain pipelined decode: graph for token t+1 is built while t runs
             y = sampler(logits)
@@ -568,7 +620,15 @@ class Engine:
                     yield tok, piece
                 if done:
                     break
-                y = nxt
+                if _think_check():
+                    in_think = False
+                    logits = yield from _force_close_think()
+                    if logits is None:
+                        break
+                    y = sampler(logits)
+                    mx.async_eval(y)
+                else:
+                    y = nxt
         else:
             # Prompt-lookup speculative decode with exact acceptance. Plain steps
             # stay pipelined; verification kicks in only while the output copies
@@ -588,7 +648,16 @@ class Engine:
                     done, piece = emit(tok)
                     if piece:
                         yield tok, piece
-                    y = nxt
+                    if not done and _think_check():
+                        in_think = False
+                        logits = yield from _force_close_think()
+                        if logits is None:
+                            done = True
+                        else:
+                            y = sampler(logits)
+                            mx.async_eval(y)
+                    else:
+                        y = nxt
                     spec_mode = bool(drafter.propose(1))  # current suffix seen before → likely copying
                     continue
 
@@ -607,6 +676,14 @@ class Engine:
                     done, piece = emit(tok)
                     if piece:
                         yield tok, piece
+                    if not done and _think_check():
+                        in_think = False
+                        logits = yield from _force_close_think()
+                        if logits is None:
+                            done = True
+                        else:
+                            y = sampler(logits)
+                            mx.async_eval(y)
                     spec_mode = False
                     continue
                 logits = self.model(mx.array([[tok] + draft]), cache, Positions(delta=delta),
@@ -641,7 +718,16 @@ class Engine:
                         yield t_, piece
                     if done:
                         break
-                y = nxt
+                if not done and _think_check():
+                    in_think = False
+                    logits = yield from _force_close_think()
+                    if logits is None:
+                        done = True
+                    else:
+                        y = sampler(logits)
+                        mx.async_eval(y)
+                else:
+                    y = nxt
         tail = dec.flush()
         if tail and finish == "length":
             yield None, tail

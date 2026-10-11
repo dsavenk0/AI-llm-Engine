@@ -64,15 +64,16 @@ class TestContinueConfig(unittest.TestCase):
 
 
 class TestOpencodeStyleConfig(unittest.TestCase):
-    def test_kilo_replaces_legacy_provider_and_keeps_others(self):
+    def test_kilo_aliases_legacy_provider_and_keeps_others(self):
         d = tempfile.mkdtemp()
         p = os.path.join(d, "kilo.jsonc")
         with open(p, "w") as f:
             f.write('{\n  // comment\n  "provider": {"local_qwen": {}, "other": {"x": 1},},\n  "theme": "dark"\n}\n')
-        llm._write_opencode_style(p, cfg(), MODEL, 40960, 8192, drop=("local_qwen",))
+        llm._write_opencode_style(p, cfg(), MODEL, 40960, 8192, alias=("local_qwen",))
         with open(p) as f:
             data = json.load(f)
-        self.assertNotIn("local_qwen", data["provider"])
+        # local_qwen mirrors local_mlx (old Kilo sessions still resolve it), not removed
+        self.assertEqual(data["provider"]["local_qwen"], data["provider"]["local_mlx"])
         self.assertEqual(data["provider"]["other"], {"x": 1})
         self.assertEqual(data["theme"], "dark")
         m = data["provider"]["local_mlx"]["models"]["demo-model"]

@@ -19,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine.generate import Drafter, Sampler, mrope_positions  # noqa: E402
+from engine.generate import Drafter, Sampler, is_repeating, mrope_positions  # noqa: E402
 from engine.model import F16, Hadamard, KVCache, MRoPE, QLinear, SSMCache  # noqa: E402
 from engine.server import OutputParser, normalize_messages, parse_tool_calls, resolve_options  # noqa: E402
 
@@ -230,6 +230,47 @@ class TestMemoryWatchdog(unittest.TestCase):
         self.assertIn(memory.pressure_level(), (1, 2, 4))
         self.assertGreater(memory.headroom_bytes(0.99), memory.headroom_bytes(0.5))
 
+    def _fake_engine(self, mem_limit=0.88):
+        from types import SimpleNamespace
+        return SimpleNamespace(prefill_step=1024, base_work=64 * 2**20, act_per_token=900 * 1024,
+                               kv_per_token=4096, mem_limit=mem_limit, snapshots=[], log=lambda *_: None)
+
+    def test_reserve_allows_a_tiny_prompt_right_at_the_limit(self):
+        from engine import generate as gen_mod
+        eng = self._fake_engine()
+        orig = gen_mod.memory.headroom_bytes
+        # idle usage already sits exactly at mem_limit (common with a big model resident) —
+        # a few-token prompt must still fit inside the 2% grace band, not be refused.
+        gen_mod.memory.headroom_bytes = lambda limit: int((limit - 0.88) * gen_mod.memory.TOTAL - 50 * 2**20)
+        try:
+            gen_mod.Engine._reserve(eng, 4)
+        finally:
+            gen_mod.memory.headroom_bytes = orig
+        self.assertEqual(eng.step_now, 128)
+
+    def test_reserve_still_refuses_a_real_deficit(self):
+        from engine import generate as gen_mod
+        eng = self._fake_engine()
+        orig = gen_mod.memory.headroom_bytes
+        gen_mod.memory.headroom_bytes = lambda limit: int((limit - 0.88) * gen_mod.memory.TOTAL - 2 * 2**30)
+        try:
+            with self.assertRaises(gen_mod.MemoryLimitError):
+                gen_mod.Engine._reserve(eng, 4)
+        finally:
+            gen_mod.memory.headroom_bytes = orig
+
+
+class TestRepetitionDetector(unittest.TestCase):
+    def test_detects_a_verbatim_loop(self):
+        chunk = "Okay, now let's process the user's message again. "
+        self.assertTrue(is_repeating(chunk * 3))
+
+    def test_ignores_normal_prose(self):
+        self.assertFalse(is_repeating("The quick brown fox jumps over the lazy dog. " * 3 + "but not quite the same."))
+
+    def test_short_tail_is_not_a_false_positive(self):
+        self.assertFalse(is_repeating("hi"))
+
 
 class TestOutputParser(unittest.TestCase):
     def run_parser(self, chunks, thinking=True, tools=False):
@@ -346,6 +387,28 @@ class TestIntegration(unittest.TestCase):
         self.assertEqual(plain, spec)
         self.assertGreater(st["verifies"], 0)
         self.assertGreater(st["draft_accept"], 0.5)
+
+    def test_think_budget_forces_an_answer(self):
+        if not self.eng.supports_thinking:
+            self.skipTest("model has no thinking mode")
+        old_frac = self.eng.think_frac
+        self.eng.think_frac = 0.2  # tiny budget: the model can't possibly finish reasoning in time
+        try:
+            self.eng.cache = None
+            text, _, thinking_open = self.eng.build_prompt([{"role": "user", "content": "What is 2+2?"}],
+                                                            thinking=True)
+            ids, _ = self.eng.encode(text, [])
+            out, st = "", None
+            for item in self.eng.generate(ids, sampling={"temperature": 0}, max_tokens=64,
+                                          thinking_open=thinking_open):
+                if isinstance(item, dict):
+                    st = item
+                else:
+                    out += item[1]
+            self.assertIn("</think>", out)  # forced closed, not just cut off mid-thought
+            self.assertEqual(st["finish_reason"], "stop")
+        finally:
+            self.eng.think_frac = old_frac
 
     def test_memory_limit_refuses_instead_of_swapping(self):
         from engine.generate import MemoryLimitError

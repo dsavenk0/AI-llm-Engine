@@ -31,6 +31,8 @@ import time
 import urllib.parse
 import urllib.request
 
+# launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
+os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 HOME = os.path.expanduser("~")
 BASE = os.path.dirname(os.path.abspath(__file__))          # code (repo or LLMBar.app/Contents/Resources/llm)
 DATA = os.environ.get("LLM_HOME") or BASE                   # state + .venv (LLMBar.app: ~/Library/Application Support/LLMBar)
@@ -381,7 +383,16 @@ def start(cfg, interactive=True):
     if cfg["auto_free"]:
         free_memory(interactive=False, quiet=True)
     if port_busy(cfg["port"]):
-        print(R(T("Port {port} is busy. Change it in settings.").format(port=cfg["port"]))); return False
+        stale = read_pid(ENGINE_PID)  # our own process, just stuck/crashed/still loading — clear it, don't just refuse
+        if stale:
+            print(Y(T("Port {port} was held by a stuck engine (PID {pid}); stopping it.")
+                    .format(port=cfg["port"], pid=stale)))
+            kill_pid(stale)
+            try: os.remove(ENGINE_PID)
+            except OSError: pass
+            time.sleep(0.5)
+        if port_busy(cfg["port"]):
+            print(R(T("Port {port} is busy. Change it in settings.").format(port=cfg["port"]))); return False
     avail, _ = mem_info()
     if m["size"] + 1.5 > avail:
         print(Y(T("⚠ The model needs ~{need:.1f} GB, {avail:.1f} GB available — expect swapping.")
@@ -405,7 +416,10 @@ def start(cfg, interactive=True):
             break
         print(".", end="", flush=True); time.sleep(1)
     else:
-        print(R("\n" + T("✗ Load timed out."))); return False
+        kill_pid(p.pid)
+        try: os.remove(ENGINE_PID)
+        except OSError: pass
+        print(R("\n" + T("✗ Load timed out, process stopped."))); return False
     print(G(" " + T("ready in {s:.0f} s").format(s=time.time() - t0)))
     show_endpoints(cfg, m)
     return True
@@ -630,7 +644,7 @@ def client_limits(cfg, m):
     return ctx, min(mc["max_output"], ctx // 2)
 
 
-def _write_opencode_style(path, cfg, m, ctx, out, drop=()):
+def _write_opencode_style(path, cfg, m, ctx, out, alias=()):
     """Kilo Code and opencode share the opencode provider schema."""
     vision = mcfg(cfg)["vision"] and m["vision"]
     data = {}
@@ -638,8 +652,6 @@ def _write_opencode_style(path, cfg, m, ctx, out, drop=()):
         shutil.copy2(path, path + ".bak")
         data = _read_jsonc(path)
     prov = data.setdefault("provider", {})
-    for k in drop:
-        prov.pop(k, None)
     opts = {"baseURL": f"http://localhost:{cfg['port']}/v1"}
     if cfg["api_key"]:
         opts["apiKey"] = cfg["api_key"]
@@ -651,6 +663,8 @@ def _write_opencode_style(path, cfg, m, ctx, out, drop=()):
             "modalities": {"input": ["text", "image"] if vision else ["text"], "output": ["text"]},
             "limit": {"context": ctx, "output": out}}},
     }
+    for a in alias:  # old provider ids kept as mirrors so already-open editor sessions keep resolving
+        prov[a] = prov["local_mlx"]
     data["model"] = f"local_mlx/{name}"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -722,7 +736,7 @@ def connect_client(cfg, which=None):
     if which == "continue":
         _write_continue(path, cfg, m, ctx, out)
     else:
-        _write_opencode_style(path, cfg, m, ctx, out, drop=("local_qwen",) if which == "kilo" else ())
+        _write_opencode_style(path, cfg, m, ctx, out, alias=("local_qwen",) if which == "kilo" else ())
     print(G(T("{client} configured: {name}, context {ctx}, output {out}").format(
         client=title, name=served_name(m), ctx=ctx, out=out)))
     print(DIM(T("File: {path} (backup: .bak) · reload the editor window to apply.").format(path=path)))
@@ -756,18 +770,29 @@ def hf_search(query, limit=20):
     from concurrent.futures import ThreadPoolExecutor
     found = _hf(f"/api/models?search={urllib.parse.quote(query)}&filter=mlx&sort=downloads&direction=-1&limit={limit}")
 
-    def size(repo):
+    def probe(repo):
+        """(size in GB, storage format the engine can't read yet?) for one repo."""
         try:
             info = _hf(f"/api/models/{repo}?blobs=true", timeout=15)
-            return sum(f.get("size") or 0 for f in info.get("siblings", [])
-                       if not f["rfilename"].lower().endswith(PULL_SKIP)) / 2**30
         except Exception:
-            return None
+            return None, False
+        names = {f["rfilename"] for f in info.get("siblings", [])}
+        size = sum(f.get("size") or 0 for f in info.get("siblings", [])
+                   if not f["rfilename"].lower().endswith(PULL_SKIP)) / 2**30
+        unsupported = False
+        if "jang_config.json" in names:  # JANG bundles may use packed storage that needs expansion
+            try:
+                rt = _hf(f"/{repo}/resolve/main/jang_config.json", timeout=15).get("runtime", {})
+                unsupported = bool(rt.get("requires_jang_ternary_packed_expansion") or rt.get("requires_jang_affine1_expansion"))
+            except Exception:
+                pass
+        return size, unsupported
     with ThreadPoolExecutor(8) as ex:
-        sizes = list(ex.map(size, [m["id"] for m in found]))
+        probes = list(ex.map(probe, [m["id"] for m in found]))
+    sizes = [p_[0] for p_ in probes]
     return [{"id": m["id"], "downloads": m.get("downloads", 0), "likes": m.get("likes", 0), "size": sz,
-             "compatible": _engine_compatible(m.get("tags")), "local": os.path.isdir(_pull_dest(m["id"])),
-             "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz in zip(found, sizes)]
+             "compatible": _engine_compatible(m.get("tags")) and not pr[1], "local": os.path.isdir(_pull_dest(m["id"])),
+             "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz, pr in zip(found, sizes, probes)]
 
 
 def hf_pull(repo, progress=False):

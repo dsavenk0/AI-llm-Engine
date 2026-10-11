@@ -860,7 +860,7 @@ final class Downloader: ObservableObject {
         p.currentDirectoryURL = URL(fileURLWithPath: Paths.shared.root)
         var env = ProcessInfo.processInfo.environment
         env["LLM_HOME"] = Paths.shared.home
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         p.environment = env
         let pipe = Pipe()
         p.standardOutput = pipe

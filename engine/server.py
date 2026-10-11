@@ -367,7 +367,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 send(chunk({"role": "assistant", "content": ""}))
             try:
                 gen = lambda: ENGINE.generate(ids, media, max_tokens, sampling, stop, cancelled.is_set,
-                                              seed=body.get("seed"))
+                                              seed=body.get("seed"), thinking_open=bool(thinking_open))
                 for item in run_job(gen):
                     if isinstance(item, dict):
                         stats = item
@@ -499,6 +499,9 @@ def main():
     tune.add_argument("--draft-max", type=int, default=15, help="longest speculative draft (1..15)")
     tune.add_argument("--ngram-min", type=int, default=2, help="shortest n-gram match that starts a draft (1..4)")
     tune.add_argument("--cache-limit-mb", type=int, default=128, help="MLX allocator cache kept between requests")
+    tune.add_argument("--think-frac", type=float, default=0.6,
+                      help="share of a reply's token budget reasoning may use before it's forced to close "
+                           "(0 disables the budget/repetition cutoff)")
     ap.add_argument("--mem-limit", type=float, default=0.88,
                     help="max fraction of system RAM in use; requests are trimmed/stopped above it (default 0.88)")
     ap.add_argument("--max-pixels", type=int, default=1024 * 1024)
@@ -515,7 +518,7 @@ def main():
                           sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
                                              "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty},
                           draft_max=ARGS.draft_max, ngram_min=ARGS.ngram_min, cache_limit_mb=ARGS.cache_limit_mb,
-                          disk_cache_gb=ARGS.disk_cache_gb,
+                          disk_cache_gb=ARGS.disk_cache_gb, think_frac=ARGS.think_frac,
                           log=log)
     threading.Thread(target=worker, args=(init,), daemon=True).start()
     READY.wait()
