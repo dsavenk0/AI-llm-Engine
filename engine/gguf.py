@@ -95,6 +95,119 @@ def read_header(path):
     return out
 
 
+def read_header_full(path):
+    """Every scalar/string metadata value (arrays skipped), plus where the tensor directory starts."""
+    with open(path, "rb") as f:
+        if f.read(4) != MAGIC:
+            raise GGUFError("not a GGUF file")
+        version = _read(f, "<I")
+        count = _read(f, "<Q")
+        kv = _read(f, "<Q")
+        out = {"_version": version, "_tensor_count": count}
+        for _ in range(kv):
+            key = _string(f)
+            t = _read(f, "<I")
+            v = _value(f, t, True)
+            if v is not None:
+                out[key] = v
+            elif t == 9:                      # arrays: keep the small ones (rope scaling lists etc. are numeric)
+                pass
+        out["_tensor_info_offset"] = f.tell()
+    return out
+
+
+def read_array(path, key, limit=1 << 24):
+    """One metadata array (e.g. tokenizer.ggml.tokens) as a Python list; None when absent."""
+    with open(path, "rb") as f:
+        if f.read(4) != MAGIC:
+            raise GGUFError("not a GGUF file")
+        _read(f, "<I")
+        _read(f, "<Q")
+        kv = _read(f, "<Q")
+        for _ in range(kv):
+            k = _string(f)
+            t = _read(f, "<I")
+            if k == key and t == 9:
+                et, n = _read(f, "<I"), _read(f, "<Q")
+                if n > limit:
+                    raise GGUFError("array too large")
+                if et == 8:
+                    return [_string(f, True, 1 << 20) or "" for _ in range(n)]
+                fmt = _FIXED[et]
+                size = struct.calcsize(fmt)
+                data = f.read(n * size)
+                return list(struct.unpack(f"<{n}{fmt[1]}", data))
+            _value(f, t, False)
+    return None
+
+
+# ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K BF16
+NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 12, 13, 14, 30}
+NATIVE_ARCHS = ("llama", "qwen2", "qwen3")
+# pre-tokenizer rules verified against llama.cpp (engine/gguf_tokenizer.py keeps the expressions)
+NATIVE_PRE = ("default", "gpt2", "llama-bpe", "llama3", "smaug-bpe", "qwen2", "qwen35", "deepseek-r1-qwen",
+              "smollm", "refact")
+
+
+def tensor_types(path):
+    """The set of ggml type ids of every tensor in the file (stdlib; reads only the tensor directory)."""
+    meta = read_header_full(path)
+    types = set()
+    with open(path, "rb") as f:
+        f.seek(meta["_tensor_info_offset"])
+        for _ in range(meta["_tensor_count"]):
+            n = _read(f, "<Q")
+            f.seek(n, 1)
+            nd = _read(f, "<I")
+            f.seek(8 * nd, 1)
+            types.add(_read(f, "<I"))
+            f.seek(8, 1)
+    return types
+
+
+def tensor_names(path):
+    """The names of every tensor in the file (stdlib)."""
+    meta = read_header_full(path)
+    names = set()
+    with open(path, "rb") as f:
+        f.seek(meta["_tensor_info_offset"])
+        for _ in range(meta["_tensor_count"]):
+            n = _read(f, "<Q")
+            names.add(f.read(n).decode("utf-8", "replace"))
+            nd = _read(f, "<I")
+            f.seek(8 * nd + 4 + 8, 1)
+    return names
+
+
+def native_support(path):
+    """(True, "") when the engine's own MLX decoder can run this GGUF, else (False, why). Cheap and
+    stdlib-only: the answer decides whether llama.cpp has to be installed at all."""
+    try:
+        meta = read_header_full(path)
+        arch = meta.get("general.architecture")
+        if arch not in NATIVE_ARCHS:
+            return False, f"architecture {arch!r}"
+        if meta.get(f"{arch}.expert_count"):
+            return False, "mixture of experts"
+        if meta.get("tokenizer.ggml.model") != "gpt2":
+            return False, f"tokenizer {meta.get('tokenizer.ggml.model')!r}"
+        if meta.get("tokenizer.ggml.pre", "default") not in NATIVE_PRE:
+            return False, f"pre-tokenizer {meta.get('tokenizer.ggml.pre')!r}"
+        scaling = meta.get(f"{arch}.rope.scaling.type")
+        if scaling not in (None, "none", "llama3"):
+            return False, f"rope scaling {scaling!r}"
+        if meta.get(f"{arch}.attention.sliding_window"):
+            return False, "sliding-window attention"
+        if scaling == "llama3" and "rope_freqs.weight" not in tensor_names(path):
+            return False, "llama3 rope scaling without its frequency table"
+        bad = tensor_types(path) - NATIVE_TYPES
+        if bad:
+            return False, f"quantization type(s) {sorted(bad)}"
+    except (OSError, GGUFError, struct.error, KeyError) as e:
+        return False, str(e)
+    return True, ""
+
+
 def guess_quant(filename):
     m = re.search(r"(IQ\d_[A-Z]+|Q\d_K(?:_[SML])?|Q\d_\d|BF16|F16|F32|Q8_0)", filename, re.I)
     return m.group(1).upper() if m else "?"

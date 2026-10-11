@@ -514,6 +514,55 @@ class TestIntegration(unittest.TestCase):
         self.assertLessEqual(st["completion_tokens"], self.eng.max_tokens)
 
 
+class TestPrefixStore(unittest.TestCase):
+    """engine.prefix_store: the SSD cache must never be able to break serving."""
+
+    def make(self, n=300):
+        import tempfile
+        import mlx.core as mx
+        from engine.model import KVCache
+        from engine.prefix_store import PrefixStore
+        store = PrefixStore(tempfile.mkdtemp(), 1 << 30, min_tokens=256, log=lambda *a: None)
+        c = KVCache()
+        c.keys = mx.ones((1, 2, n, 8), mx.float16)
+        c.values = mx.ones((1, 2, n, 8), mx.float16)
+        c.offset = n
+        tokens = list(range(n))
+        store.save(tokens, [c], [None])
+        return store, tokens
+
+    def test_save_lookup_load_round_trip_and_discard(self):
+        import mlx.core as mx
+        from engine.model import KVCache
+        store, tokens = self.make()
+        self.assertTrue(store.has(tokens))
+        hit = store.lookup(tokens + [999, 1000])
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[1], 300)
+        self.assertIsNone(store.lookup(tokens))                       # a stored prompt is not "shorter than" itself
+        self.assertIsNone(store.lookup([5] + tokens[1:] + [1]))      # a different first token: no hit
+        model = type("M", (), {"make_cache": lambda self: [KVCache()]})()
+        cache, snaps, toks = store.load(hit, model)
+        self.assertEqual((cache[0].offset, snaps, len(toks)), (300, [None], 300))
+        self.assertEqual(mx.array(cache[0].keys).shape, (1, 2, 300, 8))
+        store.discard(hit[0])
+        self.assertFalse(store.has(tokens))
+        self.assertEqual(os.listdir(store.root), ["index.json"])
+        store.discard("no-such-key")                                  # harmless
+
+    def test_a_damaged_entry_raises_on_load_and_can_be_dropped(self):
+        from engine.model import KVCache
+        store, tokens = self.make()
+        hit = store.lookup(tokens + [1])
+        with open(store._file(hit[0]), "wb") as f:
+            f.write(b"not a safetensors file")                        # what a crash or a full disk leaves behind
+        model = type("M", (), {"make_cache": lambda self: [KVCache()]})()
+        with self.assertRaises(Exception):
+            store.load(hit, model)
+        store.discard(hit[0])
+        self.assertIsNone(store.lookup(tokens + [1]))
+
+
 if __name__ == "__main__":
     unittest.main()
 

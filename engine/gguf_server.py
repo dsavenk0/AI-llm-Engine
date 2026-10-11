@@ -127,6 +127,9 @@ class Inner:
             self.stop_locked()
 
 
+MAX_BODY = 64 * 2**20          # bytes of one request body
+
+
 def model_matches(requested):
     if not requested:
         return True
@@ -158,7 +161,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, {"error": {"message": message, "type": kind, "code": err_code}})
 
     def _auth(self):
-        if not ARGS.api_key or self.headers.get("Authorization", "") == f"Bearer {ARGS.api_key}":
+        import hmac
+        if not ARGS.api_key or hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                                   f"Bearer {ARGS.api_key}".encode()):
             return True
         self._error(401, "invalid api key", "authentication_error")
         return False
@@ -198,8 +203,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         try:
             n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:
+                return self._error(413, f"request body is larger than {MAX_BODY // 2**20} MB", "invalid_request_error")
             raw = self.rfile.read(n) if n > 0 else b""
             body = json.loads(raw or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("the body must be a JSON object")
         except ValueError:
             return self._error(400, "invalid JSON body", "invalid_request_error")
         if path not in ("/v1/chat/completions", "/chat/completions", "/v1/completions", "/v1/embeddings"):
@@ -208,9 +217,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, f"model {body.get('model')!r} is not loaded; the loaded model is "
                                     f"{ARGS.name!r} (fallback is off)", "invalid_request_error", "model_not_found")
         mt = body.get("max_completion_tokens") or body.get("max_tokens")
-        body["max_tokens"] = min(int(mt), ARGS.max_tokens) if mt else ARGS.max_tokens
+        try:
+            body["max_tokens"] = max(1, min(int(mt), ARGS.max_tokens)) if mt else ARGS.max_tokens
+        except (TypeError, ValueError):
+            return self._error(400, "max_tokens must be an integer", "invalid_request_error")
         body.pop("max_completion_tokens", None)
         body["model"] = ARGS.name
+        if isinstance(body.get("messages"), list) and not INNER.mmproj:      # no projector: answer without pictures
+            from engine.media import strip_images
+            body["messages"], n_dropped = strip_images(body["messages"])
+            if n_dropped:
+                LOG(f"trace: {n_dropped} image(s) dropped, this model does not read images")
         self.proxy("/v1/chat/completions" if path == "/chat/completions" else path, body)
 
     def proxy(self, path, body):

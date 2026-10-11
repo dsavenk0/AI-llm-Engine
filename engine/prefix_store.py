@@ -89,6 +89,16 @@ class PrefixStore:
             del self.entries[key]
         self._save_index()
 
+    def discard(self, key):
+        """Forget one entry and its files (an unreadable one must not be offered again)."""
+        for ext in ("safetensors", "tokens.npy"):
+            try:
+                os.remove(self._file(key, ext))
+            except OSError:
+                pass
+        if self.entries.pop(key, None) is not None:
+            self._save_index()
+
     def overlap(self, ids):
         """(length, key) of the stored prompt that shares the longest prefix with `ids` — whether or not that
         entry is itself a prefix of `ids`. Tells where a new conversation parts from a known one."""

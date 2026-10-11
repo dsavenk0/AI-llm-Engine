@@ -337,6 +337,21 @@ class TestGateway(unittest.TestCase):
         self.assertEqual(g.last_request()["max_tokens"], 256)
         self.assertEqual(g.last_request()["model"], "tiny-q4_k_m")
 
+    def test_bad_bodies_are_refused_cleanly(self):
+        import http.client
+        g = self.gw()
+        conn = http.client.HTTPConnection("127.0.0.1", g.port, timeout=10)
+        conn.putrequest("POST", "/v1/chat/completions")
+        conn.putheader("Content-Length", str(10 ** 11))           # announced, never sent
+        conn.endheaders()
+        self.assertEqual(conn.getresponse().status, 413)
+        conn.close()
+        self.assertEqual(g.req("POST", "/v1/chat/completions", [1, 2, 3])[0], 400)           # not an object
+        self.assertEqual(g.req("POST", "/v1/chat/completions",
+                               {"messages": [{"role": "user", "content": "x"}], "max_tokens": "lots"})[0], 400)
+        code, raw = g.chat(max_tokens=0)                                                      # 0 = "no preference"
+        self.assertEqual(code, 200)
+
     def test_streaming_is_passed_through_event_by_event(self):
         g = self.gw()
         r = urllib.request.Request(g.base + "/v1/chat/completions", method="POST",

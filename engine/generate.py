@@ -259,7 +259,8 @@ class Engine:
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
                  max_pixels=1024 * 1024, thinking=None, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
-                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, ptq1=False, prefill_guard=True, log=print):
+                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, ptq1=False, prefill_guard=True, log=print,
+                 steer=None):
         self.path, self.log = path, log
         self.prefill_guard = prefill_guard   # refuse a prompt that would not fit in free memory
         self.max_context, self.max_tokens, self.prefill_step = max_context, max_tokens, prefill_step  # 0 = auto
@@ -268,6 +269,7 @@ class Engine:
         self.speculative = speculative
         self.think_frac = think_frac  # share of a reply's token budget reasoning may use before forced to close
         self.ptq1_enabled = ptq1      # experimental: PTQ1_0 (1.75-bit) bundles
+        self.steer = steer            # (direction file or folder, alpha or None): an activation edit, see steering.py
         self.mem_limit = mem_limit  # max fraction of system RAM in use (whole machine)
 
         self.progress = None           # {"phase", "done", "total"} while a long prompt is being prefilled
@@ -341,7 +343,13 @@ class Engine:
         if gb > 0:
             from .prefix_store import PrefixStore
             with open(os.path.join(path, "config.json"), "rb") as f:
-                mid = os.path.basename(path.rstrip("/")) + "-" + hashlib.sha1(f.read()).hexdigest()[:8]
+                key = f.read()
+            if self.steer:      # a steered model computes different activations: its cache is its own
+                from . import steering
+                sf, ra = steering.resolve(self.steer[0])
+                with open(sf, "rb") as g:
+                    key += g.read() + repr(self.steer[1] if self.steer[1] is not None else ra).encode()
+            mid = os.path.basename(path.rstrip("/")) + "-" + hashlib.sha1(key).hexdigest()[:8]
             self.store = PrefixStore(os.path.join(root, mid), int(gb * GiB), log=log)
         self._warmup()
 
@@ -349,7 +357,7 @@ class Engine:
     def _load_weights(self):
         # vision tower is loaded on the first image request (saves ~0.5 GB for text/code work)
         self.model, self.config, self.model_bytes = load(self.path, vision=False, log=self.log,
-                                                         ptq1=self.ptq1_enabled)
+                                                         ptq1=self.ptq1_enabled, steer=self.steer)
         if getattr(self.model, "ptq1", False) and self.speculative:
             # verifying 2-16 rows would dequantize whole matrices for a few rows of work
             self.speculative = False
@@ -520,9 +528,14 @@ class Engine:
         if self.store:
             hit = self.store.lookup(ids)
             if hit:
-                self.cache, snaps, toks = self.store.load(hit, self.model)
-                self.snapshots, self.cache_tokens = [(toks, snaps)], list(toks)
-                return len(toks)
+                try:
+                    self.cache, snaps, toks = self.store.load(hit, self.model)
+                except Exception as e:      # a half-written or damaged file: serve from scratch, drop the entry
+                    self.log(f"prefix cache: an entry could not be read and was dropped ({e!r})")
+                    self.store.discard(hit[0])
+                else:
+                    self.snapshots, self.cache_tokens = [(toks, snaps)], list(toks)
+                    return len(toks)
         self.cache = self.model.make_cache()
         self.cache_tokens, self.snapshots = [], []
         return 0
@@ -694,6 +707,7 @@ class Engine:
         spec = {"verifies": 0, "drafted": 0, "accepted": 0}
         looped = [False]
         in_think = False        # (set below once the budget is known; emit() reads it when it runs)
+        cache_stale = False   # set when a stop cut off tokens the state already contains
         t1 = time.time()
 
         def emit(tok):
@@ -876,6 +890,8 @@ class Engine:
                     if piece:
                         yield t_, piece
                     if done:
+                        if j < acc:       # accepted tokens after the stop are in the state but not in `fed`
+                            cache_stale = True
                         break
                 if not done and _think_check():
                     in_think = False
@@ -895,6 +911,8 @@ class Engine:
             yield None, tail
         mx.eval([a for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)])
         self.cache_tokens = fed
+        if cache_stale:
+            self.cache, self.cache_tokens = None, []     # the recurrent state ran past `fed` and cannot be trimmed
         if media is not None:
             self.cache = None  # 3-D positions: not reusable as a text prefix
         t_dec = time.time() - t1

@@ -24,6 +24,9 @@ JOBS = queue.Queue()
 _DONE = object()
 
 
+MAX_BODY = 64 * 2**20          # bytes of one request body
+
+
 def worker(init):
     """All MLX work runs on this one thread: MLX GPU streams are thread-local.
 
@@ -211,6 +214,28 @@ def normalize_messages(messages):
     return out
 
 
+SAMPLING_KEYS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty")
+
+
+def check_params(body):
+    """None, or the sentence that says which request parameter is unusable (so the answer is a 400 before the
+    model is woken or a prompt is rendered, not a 500 from deep inside the sampler)."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+    for k in SAMPLING_KEYS + ("seed",):
+        v = body.get(k)
+        if v is not None and not num(v):
+            return f"{k} must be a number"
+    for k in ("max_tokens", "max_completion_tokens"):
+        v = body.get(k)
+        if v is not None and not (isinstance(v, int) and not isinstance(v, bool) and v >= 1):
+            return f"{k} must be a positive integer"
+    stop = body.get("stop")
+    if stop is not None and not (isinstance(stop, str) or (isinstance(stop, list) and len(stop) <= 16
+                                                           and all(isinstance(x, str) for x in stop))):
+        return "stop must be a string or a list of up to 16 strings"
+    return None
+
+
 def resolve_options(body):
     kw = dict(body.get("chat_template_kwargs") or {})
     thinking = kw.pop("enable_thinking", body.get("enable_thinking"))
@@ -245,7 +270,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _auth(self):
         if not ARGS.api_key:
             return True
-        if self.headers.get("Authorization", "") == f"Bearer {ARGS.api_key}":
+        import hmac
+        if hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {ARGS.api_key}".encode()):
             return True
         self._error(401, "invalid api key", "authentication_error")
         return False
@@ -274,6 +300,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if ENGINE.vision_allowed else False,
                 "vision_capable": bool(getattr(ENGINE, "vision_capable", False)),
                 "parsers": {"reasoning": ARGS.reasoning_parser, "tool_call": ARGS.tool_parser},
+                "images": self._images_ready(),
+                "efforts": list(getattr(ENGINE, "efforts", []) or []),
+                "thinking_supported": bool(getattr(ENGINE, "supports_thinking", True)),
+                "steer": {"file": os.path.basename(ARGS.steer.rstrip("/")), "alpha": ARGS.steer_alpha}
+                if ARGS.steer else None,
                 "busy": ENGINE.lock.locked(),
                 "progress": getattr(ENGINE, "progress", None),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
@@ -305,7 +336,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         try:
             n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:                       # images arrive inline, but not gigabytes: never read that into memory
+                return self._error(413, f"request body is larger than {MAX_BODY // 2**20} MB", "invalid_request_error")
             body = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("the body must be a JSON object")
         except ValueError:
             return self._error(400, "invalid JSON body")
         if path in ("/v1/chat/completions", "/chat/completions"):
@@ -315,6 +350,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._error(404, f"unknown path {self.path}")
 
     # ───────────────────────── images (optional: mflux) ─────────────────────────
+    def _images_ready(self):
+        """True when /v1/images/generations would work: switched on and mflux installed."""
+        if ARGS.images != "on":
+            return False
+        from engine import images
+        home = os.environ.get("LLM_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return bool(images.tool_path(home))
+
     def images(self, body):
         """OpenAI-style /v1/images/generations through mflux. The text model is put to sleep first, so FLUX
         and the language model are never resident together."""
@@ -353,9 +396,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._error(404, f"model {body.get('model')!r} is not loaded; the loaded model is "
                                     f"{ARGS.name!r} (fallback is off)", "invalid_request_error", "model_not_found")
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
+        bad = check_params(body)
+        if bad:
+            return self._error(400, bad, "invalid_request_error")
         thinking, effort, extra = resolve_options(body)
         log(f"trace: request model={body.get('model')!r} messages={len(messages)} tools={len(tools or [])} "
             f"stream={bool(body.get('stream'))} max_tokens={body.get('max_tokens') or body.get('max_completion_tokens')}")
+        if not getattr(ENGINE, "vision_allowed", False):      # no vision tower (or switched off): answer anyway
+            from engine.media import strip_images
+            messages, n_dropped = strip_images(messages)
+            if n_dropped:
+                log(f"trace: {n_dropped} image(s) dropped, this model does not read images")
         try:
             text, images, thinking_open = ENGINE.build_prompt(normalize_messages(messages), tools, thinking, effort, extra)
             ids, media = next(run_job(lambda: iter([ENGINE.encode(text, images)])))
@@ -372,11 +423,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                     f"but the prompt is {len(ids)} tokens.", err_code="context_length_exceeded")
 
         sampling = dict(ENGINE.sampling[bool(thinking_open)] or {})
-        for k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty"):
+        for k in SAMPLING_KEYS:
             if body.get(k) is not None:
                 sampling[k] = body[k]
-        sampling = {k: v for k, v in sampling.items()
-                    if k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty")}
+        sampling = {k: v for k, v in sampling.items() if k in SAMPLING_KEYS}
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         stop = body.get("stop")
         stop = [stop] if isinstance(stop, str) else (stop or None)
@@ -510,6 +560,8 @@ def all_time_stats():
                     r = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(r, dict):
+                    continue
                 t["requests"] += 1
                 t["prompt_tokens"] += r.get("prompt", 0)
                 t["cached_tokens"] += r.get("cached", 0)
@@ -549,7 +601,7 @@ def main():
                     help="reasoning mode when a request doesn't say: auto = whatever the model's own "
                          "chat template does (on for Bonsai-27B, off for the small Qwen3.5 models)")
     ap.add_argument("--effort", default="medium")
-    ap.add_argument("--backend", choices=("auto", "native", "mlxlm"), default="auto",
+    ap.add_argument("--backend", choices=("auto", "native", "mlxlm", "gguf"), default="auto",
                     help="auto: the native engine for Qwen3.5-hybrid bundles, the optional mlx-lm backend "
                          "for every other MLX architecture")
     ap.add_argument("--ptq1", choices=("on", "off"), default="off",
@@ -569,6 +621,10 @@ def main():
     ap.add_argument("--prefill-guard", choices=("on", "off"), default="on",
                     help="check free memory before a long prompt is prefilled and refuse what would not fit")
     ap.add_argument("--no-speculative", action="store_true", help="disable prompt-lookup speculative decoding")
+    ap.add_argument("--steer", default="", help="an activation edit shipped next to a base model: a direction file "
+                    "(.safetensors/.npy/.bin) or a folder holding one; native route only (engine/steering.py)")
+    ap.add_argument("--steer-alpha", type=float, default=None,
+                    help="strength of --steer (default: the folder's adapter.json, else 1.0; 0 = off)")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
     ap.add_argument("--disk-cache-gb", type=_cache_size, default=8,
@@ -599,9 +655,18 @@ def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from engine.compat import CompatEngine, pick_backend
     from engine.generate import Engine
+    if ARGS.steer and ARGS.backend == "mlxlm":
+        ap.error("--steer works on the native engine and the built-in GGUF decoder, not on the mlx-lm backend")
     backend = pick_backend(ARGS.model, ARGS.backend)
-    Backend = Engine if backend == "native" else CompatEngine
-    log(f"backend: {'native engine' if backend == 'native' else 'mlx-lm'}")
+    if ARGS.steer and backend == "mlxlm":
+        ap.error("--steer works on the native engine and the built-in GGUF decoder, not on the mlx-lm backend "
+                 "(this model runs on mlx-lm)")
+    if backend == "gguf":
+        from engine.gguf_engine import GGUFEngine
+        Backend = GGUFEngine
+    else:
+        Backend = Engine if backend == "native" else CompatEngine
+    log(f"backend: {'native engine' if backend == 'native' else 'GGUF on the MLX decoder' if backend == 'gguf' else 'mlx-lm'}")
     init = lambda: Backend(ARGS.model, vision=not ARGS.no_vision, max_context=ARGS.context,
                            max_tokens=ARGS.max_tokens, prefill_step=ARGS.prefill_step, max_pixels=ARGS.max_pixels,
                            thinking={"auto": None, "on": True, "off": False}[ARGS.thinking], effort=ARGS.effort,
@@ -613,6 +678,7 @@ def main():
                            draft_max=ARGS.draft_max, ngram_min=ARGS.ngram_min, cache_limit_mb=ARGS.cache_limit_mb,
                            disk_cache_gb=ARGS.disk_cache_gb, disk_cache_dir=ARGS.disk_cache_dir,
                            think_frac=ARGS.think_frac, ptq1=ARGS.ptq1 == "on",
+                           steer=(ARGS.steer, ARGS.steer_alpha) if ARGS.steer else None,
                            log=log)
     threading.Thread(target=worker, args=(init,), daemon=True).start()
     READY.wait()

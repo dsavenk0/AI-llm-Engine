@@ -21,7 +21,7 @@ from collections import deque
 import mlx.core as mx
 
 from . import memory
-from .generate import (ContextError, GiB, MemoryLimitError, Sampler, is_looping, is_repeating, sampling_presets,
+from .generate import (DRAFT_LEVELS, ContextError, Drafter, GiB, MemoryLimitError, Sampler, is_looping, is_repeating, sampling_presets,
                        summarize)  # noqa: F401  (summarize is re-exported for the server)
 from . import family
 from .stopfilter import StopFilter
@@ -44,8 +44,10 @@ def _json(path):
 
 def pick_backend(path, requested="auto"):
     """"native" for the Qwen3.5-hybrid dense family (incl. its PTQ1 repack); "mlxlm" for the rest."""
-    if requested in ("native", "mlxlm"):
+    if requested in ("native", "mlxlm", "gguf"):
         return requested
+    if os.path.isfile(path) and path.lower().endswith(".gguf"):
+        return "gguf"                   # the engine's own decoder (engine/gguf_engine.py)
     cfg = _json(os.path.join(path, "config.json"))
     if family.native_capable(cfg) or str(cfg.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1"):
         return "native"
@@ -87,21 +89,22 @@ class _Decoder:
 
 class CompatEngine:
     backend = "mlx-lm"
+    REQUIRES_MLX_LM = True       # a subclass with its own model code (engine/gguf_engine.py) sets this False
 
     def __init__(self, path, vision=False, max_context=0, max_tokens=8192, prefill_step=512,
                  thinking=None, effort="medium", mem_limit=0.88, sampling_override=None,
                  cache_limit_mb=128, think_frac=0.6, prefill_guard=True, log=print, **_ignored):
-        if not mlx_lm_available():
+        if self.REQUIRES_MLX_LM and not mlx_lm_available():
             raise RuntimeError(INSTALL_HINT)
         self.path, self.log = path, log
         self.max_tokens, self.prefill_step = max_tokens, prefill_step
         self.effort, self.mem_limit, self.think_frac = effort, mem_limit, think_frac
         self.prefill_guard, self.progress = prefill_guard, None
-        self.config = _json(os.path.join(path, "config.json"))
-        self.gen_cfg = _json(os.path.join(path, "generation_config.json"))
+        self.config, self.gen_cfg = self._read_configs(path)
         self.vision_allowed = False      # text only; mlx-vlm would be a separate optional backend
         self.vision_capable = False
-        self.speculative = False
+        self.speculative = False         # a subclass with a trimmable cache turns it on
+        self.draft_levels, self.ngram_min = tuple(sorted({min(l, 15) for l in DRAFT_LEVELS})), 2
         self.store = None                # no SSD prefix cache on this backend
         self.wired_limit_advice_mb = None
         mx.set_cache_limit(int(cache_limit_mb) * 2**20)
@@ -156,6 +159,14 @@ class CompatEngine:
             f"{'yes' if self.tok.has_tool_calling else 'no'}, sampling from {self.sampling_source}")
 
     # ───────────────────────── loading / sleep ─────────────────────────
+    def _read_configs(self, path):
+        return _json(os.path.join(path, "config.json")), _json(os.path.join(path, "generation_config.json"))
+
+    def _cache_api(self):
+        """(make_cache(model), can_trim(cache), trim(cache, n)) — mlx-lm's by default."""
+        from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
+        return make_prompt_cache, can_trim_prompt_cache, trim_prompt_cache
+
     def _load(self):
         from mlx_lm import load
         from mlx.utils import tree_flatten
@@ -346,7 +357,7 @@ class CompatEngine:
     # ───────────────────────── generate ─────────────────────────
     def _prefix_cache(self, ids):
         """A prompt cache holding ids[:n] for the largest reusable n (< len(ids)); returns (cache, n)."""
-        from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
+        make_prompt_cache, can_trim_prompt_cache, trim_prompt_cache = self._cache_api()
         n = 0
         if self.cache is not None and self.cache_tokens:
             m = min(len(self.cache_tokens), len(ids) - 1)
@@ -447,36 +458,152 @@ class CompatEngine:
                 return True
             return False
 
-        y = sampler(logits)
-        mx.async_eval(y)
-        for _ in range(max_tokens):
-            nxt = sampler(model(y.reshape(1, 1), cache=cache))
-            mx.async_eval(nxt)
-            tok = y.item()
-            fed.append(tok)
-            done, piece = emit(tok)
-            if piece:
-                yield tok, piece
-            if done:
-                break
-            if closing and think_check():
-                in_think = False
-                lg, stopped = None, False
+        make_cache_, can_trim_, trim_ = self._cache_api()
+        spec = {"drafted": 0, "accepted": 0, "verifies": 0}
+        if self.speculative and can_trim_(cache):
+            # Prompt-lookup speculation with exact acceptance (the native engine's scheme): plain steps stay
+            # pipelined; verification starts only while the output copies text already in prompt + output.
+            drafter = Drafter(ids, nmin=self.ngram_min, nmax=max(4, self.ngram_min))
+            levels = self.draft_levels
+            y = sampler(logits)
+            mx.async_eval(y)
+            lvl, spec_mode, done = 1, False, False
+
+            def force_close():
+                nonlocal done
+                lg = None
                 for cid in closing:   # teacher-force the close so the model sees reasoning ended
                     lg = model(mx.array([[cid]]), cache=cache)
                     fed.append(cid)
+                    drafter.add(cid)
                     d2, p2 = emit(cid)
                     if p2:
                         yield cid, p2
                     if d2:
-                        stopped = True
-                        break
-                if stopped:
+                        done = True
+                        return None
+                return lg
+
+            while not done:
+                if not spec_mode:
+                    nxt = sampler(model(y.reshape(1, 1), cache=cache))
+                    mx.async_eval(nxt)
+                    tok = y.item()
+                    drafter.add(tok)
+                    fed.append(tok)
+                    done, piece = emit(tok)
+                    if piece:
+                        yield tok, piece
+                    if not done and closing and think_check():
+                        in_think = False
+                        lg = yield from force_close()
+                        if lg is None:
+                            done = True
+                        else:
+                            y = sampler(lg)
+                            mx.async_eval(y)
+                    else:
+                        y = nxt
+                    spec_mode = bool(drafter.propose(1))        # the suffix was seen before: likely copying
+                    continue
+                tok = y if isinstance(y, int) else y.item()
+                if tok in self.eos:
+                    out_tokens.append(tok)
+                    finish = "stop"
                     break
-                y = sampler(lg)
-                mx.async_eval(y)
-            else:
-                y = nxt
+                drafter.add(tok)
+                room = max_tokens - len(out_tokens) - 1
+                draft = drafter.propose(levels[lvl])[:max(0, room)]
+                if not draft:                                    # back to pipelined plain decoding
+                    y = sampler(model(mx.array([[tok]]), cache=cache))
+                    mx.async_eval(y)
+                    fed.append(tok)
+                    done, piece = emit(tok)
+                    if piece:
+                        yield tok, piece
+                    if not done and closing and think_check():
+                        in_think = False
+                        lg = yield from force_close()
+                        if lg is None:
+                            done = True
+                        else:
+                            y = sampler(lg)
+                            mx.async_eval(y)
+                    spec_mode = False
+                    continue
+                lg = model(mx.array([[tok] + draft]), cache=cache)
+                acc, nxt = 0, None
+                if sampler.greedy:
+                    best = mx.argmax(lg[0], axis=-1).tolist()
+                    while acc < len(draft) and best[acc] == draft[acc]:
+                        acc += 1
+                    nxt = best[acc]
+                else:
+                    for i, d in enumerate(draft):
+                        ok, t_ = sampler.verify(lg[0, i], d)
+                        if not ok:
+                            nxt = t_
+                            break
+                        acc += 1
+                    if nxt is None:
+                        nxt = sampler(lg[:, len(draft):len(draft) + 1]).item()
+                if acc < len(draft):
+                    trim_(cache, len(draft) - acc)               # forget the rejected draft tokens
+                spec["verifies"] += 1
+                spec["drafted"] += len(draft)
+                spec["accepted"] += acc
+                full = acc == len(draft) == levels[lvl]
+                lvl = min(lvl + 1, len(levels) - 1) if full else max(0, min(lvl, acc) - (acc == 0))
+                for j, t_ in enumerate([tok] + draft[:acc]):
+                    if j:
+                        drafter.add(t_)
+                    fed.append(t_)
+                    done, piece = emit(t_)
+                    if piece:
+                        yield t_, piece
+                    if done:
+                        break
+                if not done and closing and think_check():
+                    in_think = False
+                    lg2 = yield from force_close()
+                    if lg2 is None:
+                        done = True
+                    else:
+                        y = sampler(lg2)
+                        mx.async_eval(y)
+                else:
+                    y = nxt
+        else:
+            y = sampler(logits)
+            mx.async_eval(y)
+            for _ in range(max_tokens):
+                nxt = sampler(model(y.reshape(1, 1), cache=cache))
+                mx.async_eval(nxt)
+                tok = y.item()
+                fed.append(tok)
+                done, piece = emit(tok)
+                if piece:
+                    yield tok, piece
+                if done:
+                    break
+                if closing and think_check():
+                    in_think = False
+                    lg, stopped = None, False
+                    for cid in closing:   # teacher-force the close so the model sees reasoning ended
+                        lg = model(mx.array([[cid]]), cache=cache)
+                        fed.append(cid)
+                        d2, p2 = emit(cid)
+                        if p2:
+                            yield cid, p2
+                        if d2:
+                            stopped = True
+                            break
+                    if stopped:
+                        break
+                    y = sampler(lg)
+                    mx.async_eval(y)
+                else:
+                    y = nxt
         rest = stops.flush()
         if rest:
             yield None, rest
@@ -484,6 +611,12 @@ class CompatEngine:
         if tail and finish == "length":
             yield None, tail
         mx.eval([c.state for c in cache])
+        if spec["verifies"]:
+            # a stop string that completed on an accepted draft token leaves the later accepted ones in the cache
+            # without them being in `fed`: cut them off, or the next request's reuse would be off by that many
+            extra = getattr(cache[0], "offset", len(fed)) - len(fed)
+            if extra > 0:
+                trim_(cache, extra)
         self.cache_tokens = fed   # every fed token (the last one included) is in the cache: its forward ran before emit()
         t_dec = time.time() - t1
         n_out = len(out_tokens)
@@ -494,7 +627,8 @@ class CompatEngine:
             "decode_tps": round(n_out / t_dec, 2) if t_dec > 0 else 0,
             "finish_reason": finish, "think_forced": forced, "loop_stopped": looped[0],
             "peak_gb": round(mx.get_peak_memory() / GiB, 2),
-            "draft_accept": None, "verifies": 0, "ram_used": round(memory.used_fraction(), 3),
+            "draft_accept": round(spec["accepted"] / spec["drafted"], 2) if spec["drafted"] else None,
+            "verifies": spec["verifies"], "ram_used": round(memory.used_fraction(), 3),
         }
         self.stats["requests"] += 1
         self.stats["last"] = st
@@ -502,8 +636,10 @@ class CompatEngine:
         T_["requests"] += 1
         for k in ("prompt_tokens", "cached_tokens", "completion_tokens", "prefill_s", "decode_s"):
             T_[k] += st[k]
+        T_["drafted"] += spec["drafted"]
+        T_["accepted"] += spec["accepted"]
         self.history.append({"t": round(time.time()), "prompt": st["prompt_tokens"], "cached": st["cached_tokens"],
                              "out": st["completion_tokens"], "prefill_tps": st["prefill_tps"],
-                             "decode_tps": st["decode_tps"], "accept": None})
+                             "decode_tps": st["decode_tps"], "accept": st["draft_accept"]})
         mx.clear_cache()
         yield st

@@ -175,6 +175,21 @@ class TestNativeServer(unittest.TestCase):
         self.assertGreater(u["prompt_tokens"], 0)
         self.assertLessEqual(u["completion_tokens"], 16)                 # clamped, not rejected
 
+    def test_a_picture_for_a_text_only_model_is_dropped_not_refused(self):
+        url = "data:image/png;base64,iVBORw0KGgo="
+        parts = [{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": "hello world"}]
+        code, r = self.srv.chat(parts)
+        self.assertEqual(code, 200, r)
+        self.assertGreater(r["usage"]["prompt_tokens"], 0)
+        code, text_only = self.srv.chat("hello world")
+        self.assertGreater(r["usage"]["prompt_tokens"], text_only["usage"]["prompt_tokens"])    # the note was added
+        self.assertEqual(self.srv.get("/health")["vision"], False)
+        status, h, raw = self.srv.request("POST", "/v1/chat/completions",
+                                          {"model": "synth", "temperature": 0, "max_tokens": 4, "stream": True,
+                                           "messages": [{"role": "user", "content": parts}]})
+        self.assertEqual(status, 200)
+        self.assertIn(b"[DONE]", raw)
+
     def test_temperature_zero_is_deterministic_and_second_call_hits_the_prefix_cache(self):
         code, a = self.srv.chat("the quick brown fox jumps over the lazy dog " * 3)
         code, b = self.srv.chat("the quick brown fox jumps over the lazy dog " * 3)
@@ -233,6 +248,38 @@ class TestNativeServer(unittest.TestCase):
         code, r = self.srv.chat("word " * 3000)
         self.assertEqual(code, 400)
         self.assertEqual(r["error"]["code"], "context_length_exceeded")
+
+    def test_unusable_parameters_are_400s_before_anything_runs(self):
+        for kw, word in (({"max_tokens": "many"}, "max_tokens"), ({"max_tokens": 0}, "max_tokens"),
+                         ({"max_tokens": True}, "max_tokens"), ({"max_completion_tokens": -3}, "max_completion_tokens"),
+                         ({"temperature": "hot"}, "temperature"), ({"top_p": [1]}, "top_p"),
+                         ({"seed": "x"}, "seed"), ({"stop": 5}, "stop"), ({"stop": ["a", 1]}, "stop"),
+                         ({"stop": ["a"] * 17}, "stop"), ({"temperature": float("inf")}, "temperature")):
+            with self.subTest(kw):
+                code, r = self.srv.chat("hi", **kw)
+                self.assertEqual(code, 400, r)
+                self.assertIn(word, r["error"]["message"])
+        code, r = self.srv.chat("hi", max_tokens=3, temperature=0.0, top_k=5, seed=3, stop=["zz"])
+        self.assertEqual(code, 200, r)
+
+    def test_a_damaged_stats_file_does_not_break_health(self):
+        with open(self.stats, "a") as f:
+            f.write("5\n[1]\n\"x\"\nnot json\n")
+        self.assertEqual(self.srv.get("/v1/stats")["all_time"]["requests"] >= 0, True)
+        self.assertEqual(self.srv.get("/health")["status"], "ok")
+
+    def test_an_oversized_or_non_object_body_is_refused_without_being_read(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+        conn.putrequest("POST", "/v1/chat/completions")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(10 ** 11))           # announced, never sent
+        conn.endheaders()
+        r = conn.getresponse()
+        self.assertEqual(r.status, 413)
+        conn.close()
+        code, r = self.srv.json("POST", "/v1/chat/completions", raw=b'["not", "an", "object"]')
+        self.assertEqual(code, 400)
 
     # ───────────── behaviour under load ─────────────
     def test_parallel_requests_are_serialized_not_dropped(self):
@@ -318,6 +365,15 @@ class TestNativeServerOptions(unittest.TestCase):
                               "--reasoning-parser", "bogus"], cwd=ROOT, capture_output=True, text=True, timeout=60)
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("--reasoning-parser", bad.stderr)
+
+    def test_an_activation_edit_is_refused_where_it_cannot_be_applied(self):
+        import subprocess
+        bad = subprocess.run([sys.executable, "-B", "-m", "engine.server", "--model", self.dir, "--backend", "mlxlm",
+                              "--steer", "/nonexistent/direction.safetensors"],
+                             cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("--steer", bad.stderr)
+        self.assertIn("mlx-lm", bad.stderr)
 
     def test_the_prefill_guard_can_be_switched_off(self):
         srv = self.with_server("--prefill-guard", "off")
