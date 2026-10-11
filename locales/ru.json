@@ -197,5 +197,6 @@
   "CA bundle (PEM)": "Набор CA (PEM)",
   "empty to clear": "пусто — сбросить",
   "This model has no vision tower.": "У этой модели нет модуля изображений.",
-  "Images: {state} for {name}": "Изображения: {state} для {name}"
+  "Images: {state} for {name}": "Изображения: {state} для {name}",
+  "Search MLX models on ModelScope": "Поиск MLX-моделей на ModelScope"
 }

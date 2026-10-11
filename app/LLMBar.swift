@@ -912,6 +912,29 @@ struct SettingsTab: View {
                                  "Больше — прозрачнее; меньше — текст читается лучше на пёстрых обоях."))
                 }
             }
+            Card {
+                Caption(text: L("Requests & logging", "Запросы и журнал"))
+                toggle(L("Model fallback", "Запасная модель"), Binding(get: { e.g("fallback_model", true) }, set: { e.setG("fallback_model", $0) }),
+                       hint: L("A request that names another model is answered by the loaded one. Off = 404 model_not_found.",
+                               "Запрос с другим именем модели обслуживает загруженная. Выкл. = 404 model_not_found."))
+                toggle(L("Prefill memory guard", "Защита памяти prefill"), Binding(get: { e.g("prefill_guard", true) }, set: { e.setG("prefill_guard", $0) }),
+                       hint: L("Check free memory before a long prompt and refuse what would not fit (no out-of-memory crash).",
+                               "Проверять память перед длинным промптом и отклонять то, что не влезет (без падения по памяти)."))
+                labeledPicker(L("Log level", "Уровень журнала"), Binding(get: { e.g("log_level", "info") }, set: { e.setG("log_level", $0) }),
+                              [("error", L("Error", "Ошибка")), ("warning", L("Warn", "Предупр.")), ("info", L("Info", "Инфо")),
+                               ("debug", L("Debug", "Отладка")), ("trace", L("Trace", "Трасс."))])
+                Hint(text: L("Lines are tagged [request] [memory] [model] [cache] [sleep] [quality] [error] — filter with grep.",
+                             "Строки помечены [request] [memory] [model] [cache] [sleep] [quality] [error] — фильтруйте через grep."))
+            }
+            Card {
+                Caption(text: L("Proxy", "Прокси"))
+                textRow(L("HTTP proxy", "HTTP-прокси"), "proxy_http", "http://proxy.local:8080")
+                textRow(L("HTTPS proxy", "HTTPS-прокси"), "proxy_https", "http://proxy.local:8080")
+                textRow(L("No proxy for", "Без прокси для"), "no_proxy", "localhost,127.0.0.1,*.internal")
+                textRow(L("CA bundle (PEM)", "Набор CA (PEM)"), "ca_bundle", "/etc/ssl/certs/ca-bundle.pem")
+                Hint(text: L("Used for model downloads, hub search and the agent's web tools. Empty = direct. The engine on this Mac is never proxied.",
+                             "Для загрузки моделей, поиска и веб-инструментов агента. Пусто = напрямую. Движок на этом Mac никогда не идёт через прокси."))
+            }
             Card(glow: HUD.amber) {
                 // the whole header row is the button — a stock DisclosureGroup only reacts to its tiny chevron
                 Button(action: { withAnimation(.easeOut(duration: 0.15)) { advanced.toggle() } }) {
@@ -932,6 +955,8 @@ struct SettingsTab: View {
                         adv("top_k", "Top-k", L("Sample among the k most likely tokens", "Выбор среди k самых вероятных токенов"))
                         adv("min_p", "Min-p", L("Drop tokens below min_p × top probability", "Отсечь токены ниже min_p × максимум"))
                         adv("presence_penalty", "Presence", L("Penalty for repeated tokens", "Штраф за повторы"))
+                        adv("repetition_penalty", "Repetition", L("1.0 = off; 1.05–1.2 divides the score of tokens already written — stops answers that cycle",
+                                                                    "1.0 = выкл.; 1.05–1.2 снижает вес уже использованных токенов — против зацикливания"))
                         adv("draft_max", L("Draft length", "Длина черновика"), L("Longest speculative draft, 1–15 (15)", "Самый длинный черновик, 1–15 (15)"))
                         adv("ngram_min", L("N-gram min", "Мин. n-грамма"), L("Shortest match that starts a draft, 1–4 (2)", "Минимальное совпадение для черновика, 1–4 (2)"))
                         adv("cache_limit_mb", L("MLX cache, MB", "Кэш MLX, МБ"), L("Allocator cache between requests (128)", "Кэш аллокатора между запросами (128)"))
@@ -985,6 +1010,15 @@ struct SettingsTab: View {
         }.help(hint)
     }
 
+    func textRow(_ label: String, _ key: String, _ placeholder: String) -> some View {
+        HStack {
+            Text(label).font(.system(size: 12)).foregroundColor(HUD.text)
+            Spacer()
+            TextField(placeholder, text: Binding(get: { e.g(key, "") }, set: { e.setG(key, $0) }))
+                .font(HUD.mono(11)).frame(width: 190).multilineTextAlignment(.trailing).textFieldStyle(.roundedBorder)
+        }
+    }
+
     func adv(_ key: String, _ label: String, _ hint: String) -> some View {
         HStack {
             Text(label).font(.system(size: 12)).foregroundColor(HUD.text)
@@ -995,6 +1029,58 @@ struct SettingsTab: View {
     }
 }
 
+
+// MARK: - long names that scroll while the pointer is over them
+
+private struct MarqueeWidth: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+private struct MarqueeAvail: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// One line of text. When it does not fit it is faded at the edge, and while `active` (the row is under the
+/// pointer) it glides to its end and back, so the whole name can be read without widening the panel.
+struct MarqueeText: View {
+    let text: String
+    let font: Font
+    let color: Color
+    var active: Bool
+    @State private var natural: CGFloat = 0
+    @State private var avail: CGFloat = 0
+    @State private var shift: CGFloat = 0
+
+    private var overflow: CGFloat { max(0, natural - avail) }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Text(text).font(font).lineLimit(1).fixedSize().hidden()           // measures the natural width
+                .background(GeometryReader { g in Color.clear.preference(key: MarqueeWidth.self, value: g.size.width) })
+            Text(text).font(font).foregroundColor(color).lineLimit(1).fixedSize().offset(x: shift)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GeometryReader { g in Color.clear.preference(key: MarqueeAvail.self, value: g.size.width) })
+        .clipped()
+        .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                     .init(color: .black, location: overflow > 1 && shift == 0 ? 0.88 : 1),
+                                     .init(color: overflow > 1 && shift == 0 ? .clear : .black, location: 1)],
+                             startPoint: .leading, endPoint: .trailing))
+        .onPreferenceChange(MarqueeWidth.self) { natural = $0 }
+        .onPreferenceChange(MarqueeAvail.self) { avail = $0 }
+        .onChange(of: active) { on in
+            if on, overflow > 1 {
+                withAnimation(.linear(duration: Double(overflow) / 32 + 0.4).delay(0.2).repeatForever(autoreverses: true)) {
+                    shift = -(overflow + 6)
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.2)) { shift = 0 }
+            }
+        }
+        .help(text)
+    }
+}
 
 // MARK: - Models tab (installed · switch · hub search · download)
 
@@ -1087,6 +1173,8 @@ struct ModelsTab: View {
     @State private var searching = false
     @State private var searchError: String? = nil
     @State private var editing: String? = nil
+    @State private var hoverRow: String? = nil
+    @State private var hubSource = "hf"            // hf | modelscope
 
     /// what the row says besides size and format: why it cannot run, or which route it takes
     func note(_ m: ModelInfo) -> String {
@@ -1154,10 +1242,10 @@ struct ModelsTab: View {
                             Circle().fill(m.path == e.modelPath ? HUD.phosphor : HUD.track).frame(width: 7, height: 7)
                                 .shadow(color: HUD.phosphor.opacity(m.path == e.modelPath ? HUD.glow : 0), radius: 3)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(m.name).font(.system(size: 12, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
-                                Text("\(String(format: "%.1f", m.size)) GB · \(m.format)" + note(m))
-                                    .font(HUD.mono(9)).foregroundColor(m.supported ? HUD.dim : HUD.magenta).lineLimit(1)
-                                    .help(m.supported ? "" : m.problems.joined(separator: ", "))
+                                MarqueeText(text: m.name, font: .system(size: 12, weight: .medium), color: HUD.text,
+                                            active: hoverRow == m.path)
+                                MarqueeText(text: "\(String(format: "%.1f", m.size)) GB · \(m.format)" + note(m),
+                                            font: HUD.mono(9), color: m.supported ? HUD.dim : HUD.magenta, active: hoverRow == m.path)
                             }
                             Spacer()
                             if m.path == e.modelPath {
@@ -1184,10 +1272,20 @@ struct ModelsTab: View {
                         }
                         if editing == m.path { modelSettings(m) }
                     }
+                    .contentShape(Rectangle())
+                    .onHover { inside in hoverRow = inside ? m.path : (hoverRow == m.path ? nil : hoverRow) }
                 }
             }
             Card(glow: HUD.phosphor) {
-                Caption(text: L("Hugging Face hub", "Hugging Face"), color: HUD.phosphor)
+                HStack {
+                    Caption(text: hubSource == "hf" ? L("Hugging Face hub", "Hugging Face") : "ModelScope", color: HUD.phosphor)
+                    Spacer()
+                    Picker("", selection: $hubSource) {
+                        Text("HF").tag("hf")
+                        Text("ModelScope").tag("modelscope")
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                        .onChange(of: hubSource) { _ in results = []; searchError = nil }
+                }
                 HStack {
                     TextField(L("Search MLX models", "Поиск MLX-моделей"), text: $query)
                         .textFieldStyle(.roundedBorder).font(HUD.mono(12)).onSubmit(search)
@@ -1271,7 +1369,7 @@ struct ModelsTab: View {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         searching = true; searchError = nil
-        CLI.run(["search", q, "--json"]) { code, out in
+        CLI.run(["search", q, "--json"] + (hubSource == "modelscope" ? ["--source", "modelscope"] : [])) { code, out in
             searching = false
             guard code == 0, let d = out.data(using: .utf8),
                   let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else {

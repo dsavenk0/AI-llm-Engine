@@ -1098,8 +1098,56 @@ def hub_route(tags):
     return engine_route({}, t)
 
 
+MS_ENDPOINT = os.environ.get("MODELSCOPE_ENDPOINT", "https://www.modelscope.cn").rstrip("/")
+MS_PREFIX = "ms:"       # a repo id from ModelScope carries this prefix: "ms:mlx-community/Qwen3-0.6B-4bit"
+
+
+def _split_source(repo):
+    """("hf" | "modelscope", id without the prefix)"""
+    return ("modelscope", repo[len(MS_PREFIX):]) if repo.startswith(MS_PREFIX) else ("hf", repo)
+
+
+def _ms(path, data=None, method="GET", timeout=20):
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(MS_ENDPOINT + path, data=body, method=method,
+                                 headers={"User-Agent": "AI-llm-Engine", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        out = json.loads(r.read())
+    if out.get("Code") not in (200, None) or out.get("Success") is False:
+        raise OSError(out.get("Message") or "ModelScope error")
+    return out.get("Data", out)
+
+
+def ms_files(repo):
+    """The repo's files in the shape the hub listing has: [{rfilename, size, lfs: {sha256}}]."""
+    data = _ms(f"/api/v1/models/{urllib.parse.quote(repo)}/repo/files?Revision=master&Recursive=true")
+    return [{"rfilename": f["Path"], "size": f.get("Size") or 0, "lfs": {"sha256": f.get("Sha256") or None}}
+            for f in data.get("Files", []) if f.get("Type") == "blob"]
+
+
+def ms_search(query, limit=20):
+    """MLX models on ModelScope (a mirror that is reachable where huggingface.co is not), same shape as
+    hf_search; ids carry the "ms:" prefix so a pull knows where to go."""
+    data = _ms("/api/v1/dolphin/models", method="PUT", data={
+        "PageSize": limit, "PageNumber": 1, "SortBy": "Default", "Target": "", "SingleCriterion": [],
+        "Name": f"{query} mlx" if "mlx" not in query.lower() else query})
+    out = []
+    for m in data.get("Model", {}).get("Models", []):
+        tags = list(dict.fromkeys([*(m.get("Libraries") or []), *(m.get("Tags") or [])]))
+        if "mlx" not in [t.lower() for t in tags]:
+            continue
+        rid = f"{m.get('Path')}/{m.get('Name')}"
+        size = (m.get("StorageSize") or 0) / 2**30 or None
+        state = install_state(MS_PREFIX + rid)
+        route = hub_route([*tags, "safetensors"])
+        out.append({"id": MS_PREFIX + rid, "downloads": m.get("Downloads", 0), "likes": m.get("Stars", 0), "size": size,
+                    "route": route, "compatible": route != "none", "local": state == "complete",
+                    "partial": state == "partial", "fits": size is not None and size + 2.0 <= RAM_GB * 0.75})
+    return out
+
+
 def _pull_dest(repo):
-    return os.path.join(HOME, ".cache", "huggingface", "hub", *repo.split("/"))
+    return os.path.join(HOME, ".cache", "huggingface", "hub", *_split_source(repo)[1].split("/"))
 
 
 def install_state(repo, siblings=None):
@@ -1124,8 +1172,11 @@ def install_state(repo, siblings=None):
     return "complete" if has and not parts else "partial"
 
 
-def hf_search(query, limit=20):
-    """MLX models on the hub, most downloaded first, with size and engine compatibility."""
+def hf_search(query, limit=20, source="hf"):
+    """MLX models on the hub, most downloaded first, with size and engine compatibility.
+    source="modelscope" searches ModelScope instead (ids come back with the "ms:" prefix)."""
+    if source == "modelscope":
+        return ms_search(query, limit)
     from concurrent.futures import ThreadPoolExecutor
     found = _hf(f"/api/models?search={urllib.parse.quote(query)}&filter=mlx&sort=downloads&direction=-1&limit={limit}")
 
@@ -1223,7 +1274,14 @@ def _sha256(path):
 
 def hf_pull(repo, progress=False):
     """Download a repo into ~/.cache/huggingface/hub/<org>/<name> with resume (Range) and atomic renames."""
-    info = _hf(f"/api/models/{repo}?blobs=true")
+    source, rid = _split_source(repo)
+    if source == "modelscope":
+        try:
+            info = {"siblings": ms_files(rid), "sha": "master"}
+        except (OSError, urllib.error.URLError, ValueError, KeyError) as e:
+            print(R(T("Download failed: {name}: {err}").format(name=repo, err=e))); return False
+    else:
+        info = _hf(f"/api/models/{repo}?blobs=true")
     files = [f for f in info.get("siblings", []) if not f["rfilename"].lower().endswith(PULL_SKIP)]
     total = sum(f.get("size") or 0 for f in files)
     dest = _pull_dest(repo)
@@ -1236,7 +1294,7 @@ def hf_pull(repo, progress=False):
     state = {"done": 0, "last": 0.0}
     t0, rev = time.time(), info.get("sha", "main")
     headers = {"User-Agent": "AI-llm-Engine"}
-    if os.environ.get("HF_TOKEN"):
+    if os.environ.get("HF_TOKEN") and source == "hf":      # the Hugging Face token goes to Hugging Face only
         headers["Authorization"] = "Bearer " + os.environ["HF_TOKEN"]
 
     def tick(n, name):
@@ -1262,7 +1320,11 @@ def hf_pull(repo, progress=False):
             if os.path.exists(q):
                 state["done"] += min(os.path.getsize(q), size or os.path.getsize(q))
                 break
-        url = f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{urllib.parse.quote(name)}"
+        if source == "modelscope":
+            url = (f"{MS_ENDPOINT}/api/v1/models/{urllib.parse.quote(rid)}/repo?Revision={rev}"
+                   f"&FilePath={urllib.parse.quote(name)}")
+        else:
+            url = f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{urllib.parse.quote(name)}"
         try:
             download_file(url, path, size, (f.get("lfs") or {}).get("sha256"), headers,
                           lambda n, name=name: tick(n, name))
@@ -1278,11 +1340,11 @@ def hf_pull(repo, progress=False):
     return True
 
 
-def search_cmd(query, as_json=False):
+def search_cmd(query, as_json=False, source="hf"):
     if not query:
         query = input(T("Search MLX models on Hugging Face") + " › ").strip()
     try:
-        res = hf_search(query)
+        res = hf_search(query, source=source)
     except Exception as e:
         print(R(T("Search failed:") + f" {e}")); return False
     if as_json:
@@ -1490,7 +1552,8 @@ def main():
         "agent": lambda: __import__("agent").main(sys.argv[2:]),
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
-        "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if a != "--json"), "--json" in sys.argv),
+        "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
+                                     "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__), "": menu, "menu": menu,
     }
     if cmd not in actions:

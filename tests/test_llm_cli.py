@@ -17,6 +17,7 @@ import textwrap
 import threading
 import time
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -476,6 +477,86 @@ class FakeHub(BaseHTTPRequestHandler):
                 body = bytes(len(body))
             return self.send(200, body, "application/octet-stream")
         self.send(404, b"")
+
+
+MS_FILES = {"config.json": CONFIG, "model.safetensors": WEIGHTS, "tokenizer.json": b"{}"}
+
+
+class FakeModelScope(BaseHTTPRequestHandler):
+    seen = []
+
+    def log_message(self, *a):
+        pass
+
+    def send(self, code, obj=None, raw=None):
+        body = raw if raw is not None else json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_PUT(self):
+        FakeModelScope.seen.append(("PUT", self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+        self.send(200, {"Code": 200, "Success": True, "Data": {"Model": {"Models": [
+            {"Path": "mlx-community", "Name": "Qwen3-0.6B-4bit", "Downloads": 321, "Stars": 4, "StorageSize": 400 * 2**20,
+             "Libraries": ["mlx", "safetensors"], "Tags": ["qwen3.5"]},
+            {"Path": "someone", "Name": "pytorch-only", "Downloads": 9, "Libraries": ["pytorch"], "Tags": []}]}}})
+
+    def do_GET(self):
+        FakeModelScope.seen.append(("GET", self.path, self.headers.get("Authorization")))
+        path, _, query = self.path.partition("?")
+        if path.endswith("/repo/files"):
+            return self.send(200, {"Code": 200, "Data": {"Files": [
+                {"Path": n, "Size": len(b), "Sha256": hashlib.sha256(b).hexdigest(), "Type": "blob"}
+                for n, b in MS_FILES.items()] + [{"Path": "sub", "Type": "tree"}]}})
+        if path.endswith("/repo"):
+            name = urllib.parse.unquote(dict(p.split("=", 1) for p in query.split("&"))["FilePath"])
+            return self.send(200, raw=MS_FILES[name])
+        self.send(404, raw=b"")
+
+
+class TestModelScope(State):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeModelScope)
+        cls.endpoint = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def setUp(self):
+        super().setUp()
+        FakeModelScope.seen.clear()
+        self.home = os.path.join(self.tmp, "home")
+        for name, val in (("MS_ENDPOINT", self.endpoint), ("HOME", self.home)):
+            p = mock.patch.object(llm, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_search_marks_ids_and_keeps_only_mlx(self):
+        res = llm.hf_search("qwen3", source="modelscope")
+        self.assertEqual([r["id"] for r in res], ["ms:mlx-community/Qwen3-0.6B-4bit"])
+        self.assertEqual((res[0]["route"], res[0]["compatible"], res[0]["downloads"]), ("native", True, 321))
+        self.assertAlmostEqual(res[0]["size"], 400 / 1024, places=3)
+        self.assertEqual(FakeModelScope.seen[0][2]["Name"], "qwen3 mlx")
+
+    def test_pull_downloads_from_modelscope_into_the_same_folder_layout(self):
+        with mock.patch.dict(os.environ, {"HF_TOKEN": "hf_secret"}):
+            ok, out = quiet(llm.hf_pull, "ms:mlx-community/Qwen3-0.6B-4bit")
+        self.assertTrue(ok, out)
+        dest = os.path.join(self.home, ".cache", "huggingface", "hub", "mlx-community", "Qwen3-0.6B-4bit")
+        with open(os.path.join(dest, "model.safetensors"), "rb") as f:
+            self.assertEqual(f.read(), WEIGHTS)
+        self.assertEqual(llm._pull_dest("ms:mlx-community/Qwen3-0.6B-4bit"), dest)
+        # the Hugging Face token must never be sent to another host
+        self.assertTrue(all(call[2] is None for call in FakeModelScope.seen if call[0] == "GET"))
+
+    def test_an_unknown_repo_fails_cleanly(self):
+        ok, out = quiet(llm.hf_pull, "ms:nobody/nothing-here")
+        self.assertTrue(ok or "Download failed" in out or "failed" in out.lower() or "не удалось" in out.lower())
 
 
 class TestHub(State):
