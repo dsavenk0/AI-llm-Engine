@@ -9,7 +9,7 @@ commands are shown (with a diff) and need confirmation unless /auto is on.
 Hard-to-reverse or outward-facing commands (git push, rm -rf, sudo, ...) always
 ask, even with /auto on — see DANGEROUS_PATTERNS.
 Commands: /auto  /clear  /think on|off  /web on|off  /mcp [on|off|add <preset>]  /compact
-          /fix-tests [command]  /memory  /remember <note>  /exit
+          /workers [on|off]  /fix-tests [command]  /memory  /remember <note>  /exit
 
 Long sessions are compacted automatically before they fill the context window; standing
 project instructions are read from .llm/memory.md, AGENTS.md or CLAUDE.md (harness/).
@@ -138,6 +138,17 @@ class Agent:
             self.mcp_ok[server] = self.auto or llm.ask_yn(
                 Y(T("Allow tools of the MCP server “{s}” for this session?").format(s=server)), False)
         return self.mcp_ok[server]
+
+    def allow_delegate(self, what):
+        return self.auto or llm.ask_yn(Y(T("Delegate: {what}?").format(what=what)), False)
+
+    def set_workers(self, on):
+        """Offer the configured workers to the model as one `delegate` tool."""
+        from harness import delegate
+        self.extra.pop("delegate", None)
+        if on:
+            self.extra.update(delegate.tools(self.root, delegate.load(self.root), self.allow_delegate))
+        return "delegate" in self.extra
 
     def set_mcp(self, on):
         """Connect (or disconnect) the MCP servers from .llm/mcp.json; their tools join the tool list."""
@@ -391,7 +402,7 @@ class Agent:
         print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
 
     def repl(self):
-        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /fix-tests  /compact  /memory  /remember  /exit"))
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /workers  /fix-tests  /compact  /memory  /remember  /exit"))
         while True:
             mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
             try:
@@ -410,6 +421,15 @@ class Agent:
             if line == "/clear":
                 self.messages = self.messages[:1]
                 print(DIM(T("History cleared.")))
+                continue
+            if line.startswith("/workers"):
+                from harness import delegate
+                workers = delegate.load(self.root)
+                if line.split()[1:] in (["on"], ["off"]):
+                    on = self.set_workers(line.endswith("on"))
+                    if line.endswith("on") and not on:
+                        print(Y(T("No usable workers — see .llm/workers.json")))
+                print("\n".join(delegate.summary(workers)) or DIM(T("No workers configured — .llm/workers.json")))
                 continue
             if line.startswith("/fix-tests"):
                 try:

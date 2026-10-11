@@ -164,5 +164,8 @@
   "(after {n} fix rounds)": "(после {n} раундов правок)",
   "✗ Tests fail (round {n}/{m}).": "✗ Тесты падают (раунд {n}/{m}).",
   "Out of rounds — tests still failing.": "Раунды закончились — тесты всё ещё падают.",
-  "The same failure after two attempts — stopping; the edits are not helping.": "Та же ошибка после двух попыток — останавливаюсь, правки не помогают."
+  "The same failure after two attempts — stopping; the edits are not helping.": "Та же ошибка после двух попыток — останавливаюсь, правки не помогают.",
+  "Delegate: {what}?": "Передать задачу: {what}?",
+  "No usable workers — see .llm/workers.json": "Нет доступных исполнителей — см. .llm/workers.json",
+  "No workers configured — .llm/workers.json": "Исполнители не настроены — .llm/workers.json"
 }
