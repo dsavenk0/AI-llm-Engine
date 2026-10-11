@@ -265,6 +265,11 @@ class TestRepetitionDetector(unittest.TestCase):
         chunk = "Okay, now let's process the user's message again. "
         self.assertTrue(is_repeating(chunk * 3))
 
+    def test_detects_a_two_phrase_cycle(self):
+        # not one repeated sentence but a cycle of two — "A, then B, then A, then B..."
+        cycle = "Let me reconsider the question. Wait, actually let's re-examine this. "
+        self.assertTrue(is_repeating(cycle * 3))
+
     def test_ignores_normal_prose(self):
         self.assertFalse(is_repeating("The quick brown fox jumps over the lazy dog. " * 3 + "but not quite the same."))
 

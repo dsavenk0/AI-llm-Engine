@@ -168,12 +168,17 @@ def mrope_positions(ids, grids, image_token, merge):
     return pos, cur - n
 
 
-def is_repeating(tail, min_n=20, max_n=200, reps=3):
-    """True if the tail of `tail` is `reps` consecutive copies of some chunk — the
-    verbatim loops ("Okay, now let's process the user's message again" x N) a
-    reasoning model can get stuck in."""
+def is_repeating(tail, min_n=20, max_n=300, long_n=80):
+    """True if the tail of `tail` is consecutive copies of some chunk — a reasoning
+    model stuck repeating one phrase ("Okay, let's process the message again" x N,
+    `n` short, needs 3 copies to rule out coincidence) or cycling through a few
+    phrases ("A, then B, then A, then B...", `n` covers the whole A+B cycle, so 2
+    exact copies of that longer chunk are already a strong loop signal)."""
     L = len(tail)
-    for n in range(min(max_n, L // reps), min_n - 1, -1):
+    for n in range(min(max_n, L // 2), min_n - 1, -1):
+        reps = 2 if n >= long_n else 3
+        if n * reps > L:
+            continue
         chunks = [tail[L - (k + 1) * n: L - k * n] for k in range(reps)]
         if chunks[0].strip() and all(c == chunks[0] for c in chunks[1:]):
             return True
@@ -257,8 +262,19 @@ class Engine:
         self.model, self.config, self.model_bytes = load(self.path, vision=False, log=self.log)
         # Keep the weights resident: without a wired limit macOS may compress or
         # page them out under pressure and decode speed collapses.
+        need = self.model_bytes + 0.5 * GiB
         rec = mx.device_info().get("max_recommended_working_set_size", int(self.model_bytes * 1.3))
-        mx.set_wired_limit(int(min(rec, self.model_bytes + 0.5 * GiB)))
+        mx.set_wired_limit(int(min(rec, need)))
+        # macOS caps `rec` from the system's iogpu.wired_limit_mb; below `need` the engine
+        # is silently given less GPU memory than this model wants, which costs decode speed.
+        # We only suggest the sysctl (it needs sudo and survives only until reboot) — never run it.
+        if need > rec:
+            self.wired_limit_advice_mb = int((need + GiB) // 2**20)  # +1 GB headroom for other apps
+            self.log(f"memory: Metal's recommended working set is {rec / GiB:.1f} GB, this model wants "
+                     f"~{need / GiB:.1f} GB — raise it with: sudo sysctl iogpu.wired_limit_mb="
+                     f"{self.wired_limit_advice_mb} (resets on reboot)")
+        else:
+            self.wired_limit_advice_mb = None
 
     def sleep(self):
         """Free the GPU/unified memory held by the weights; the next request wakes the model."""

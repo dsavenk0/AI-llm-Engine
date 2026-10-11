@@ -516,6 +516,20 @@ struct EngineTab: View {
                 }
             }
             memRow(L("Free", "Свободно"), free, HUD.track, L("Available without swapping", "Доступно без свопа"))
+            if let mb = e.health?["wired_limit_advice_mb"] as? Int {
+                HStack(alignment: .top, spacing: 6) {
+                    Text("⚠").foregroundColor(HUD.amber)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L("Metal's GPU memory cap is below what this model needs.",
+                               "Лимит GPU-памяти Metal меньше, чем нужно этой модели."))
+                            .font(.system(size: 11)).foregroundColor(HUD.amber)
+                        Text("sudo sysctl iogpu.wired_limit_mb=\(mb)")
+                            .font(HUD.mono(11)).foregroundColor(HUD.text)
+                        Text(L("Run in Terminal; resets on reboot.", "Выполнить в Terminal; сбрасывается при перезагрузке."))
+                            .font(.system(size: 10)).foregroundColor(HUD.dim)
+                    }
+                }.padding(.top, 2)
+            }
         }
     }
 

@@ -276,6 +276,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               "model": round(ENGINE.model_bytes / 2**30, 2)},
                 "system_ram_used": round(__import__("engine.memory", fromlist=["x"]).used_fraction(), 3),
                 "mem_limit": ENGINE.mem_limit,
+                "wired_limit_advice_mb": ENGINE.wired_limit_advice_mb,
                 "memory_breakdown": ENGINE.memory_breakdown(),
                 "cached_tokens": len(ENGINE.cache_tokens),
                 "requests": ENGINE.stats["requests"], "last": ENGINE.stats["last"],

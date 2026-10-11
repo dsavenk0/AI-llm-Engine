@@ -74,6 +74,19 @@ TTY = sys.stdout.isatty()
 def c(code, s): return f"\033[{code}m{s}\033[0m" if TTY else str(s)
 B, DIM = (lambda s: c("1", s)), (lambda s: c("2", s))
 G, R, Y, CY = (lambda s: c("32", s)), (lambda s: c("31", s)), (lambda s: c("33", s)), (lambda s: c("36", s))
+MINT = lambda s: c("1;38;2;77;242;194", s)  # the app's accent color (LLMBar, docs/banner.png)
+
+
+def print_banner():
+    """One-time welcome banner for the interactive menu (skipped when not a TTY)."""
+    if not TTY:
+        return
+    title, sub = "  Ai>_   AI-llm-Engine", "  " + T("local MLX engine — fast, minimal, yours")
+    width = max(len(title), len(sub)) + 1
+    print(MINT("  ╭" + "─" * width + "╮"))
+    print(MINT("  │") + B(title.ljust(width)) + MINT("│"))
+    print(MINT("  │") + DIM(sub.ljust(width)) + MINT("│"))
+    print(MINT("  ╰" + "─" * width + "╯"))
 
 
 # ───────────────────────────── i18n ─────────────────────────────
@@ -887,6 +900,10 @@ def status(cfg):
                 w=mb("weights", "vision"), kv=mb("kv"), ssm=mb("ssm", "snapshots"), buf=mb("activations", "mlx_cache"), p=mb("process")))
         if h.get("system_ram_used") is not None:
             print(f"{T('Guard'):8s}: " + T("system RAM {u:.0%} of limit {l:.0%}").format(u=h["system_ram_used"], l=h["mem_limit"]))
+        if h.get("wired_limit_advice_mb"):
+            print(Y(T("⚠ Metal's GPU memory cap is below what this model needs — the Mac may swap/throttle.")))
+            print(DIM(f"  sudo sysctl iogpu.wired_limit_mb={h['wired_limit_advice_mb']}") +
+                  DIM("  (" + T("resets on reboot") + ")"))
         if last:
             print(f"{T('Last'):8s}: " + T("{pt} in ({ct} cached, {pp} tok/s) → {out} out @ {dt} tok/s").format(
                 pt=last.get("prompt_tokens"), ct=last.get("cached_tokens"), pp=last.get("prefill_tps"),
@@ -968,6 +985,7 @@ def logs():
 
 def menu():
     cfg = load_cfg()
+    print_banner()
     actions = [
         ("Start", lambda: start(cfg)), ("Stop", lambda: stop(cfg)),
         ("Restart", lambda: restart(cfg)), ("Select model", lambda: choose_model(cfg)),
@@ -983,7 +1001,7 @@ def menu():
         h, m = health(cfg, 1), current_model(cfg)
         st = G("● " + T("running")) if h else (Y("● " + T("loading")) if read_pid(ENGINE_PID) else R("● " + T("stopped")))
         avail, swap = mem_info()
-        print(B("\n╭─ llm ─ " + T("local MLX engine") + " ─╮"))
+        print(B("\n╭─ " + T("Status") + " ─╮"))
         print(f"  {B(m['name']) if m else Y(T('no model selected'))}  {st}")
         print(DIM("  " + T("RAM free {avail:.1f} GB · swap {swap:.1f} GB").format(avail=avail, swap=swap)
                   + (f" · http://localhost:{cfg['port']}/v1" if h else "")))
