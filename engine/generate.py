@@ -625,21 +625,34 @@ class Engine:
 
         dec = StreamDecoder(self.tok)
         out_tokens, text, finish = [], "", "length"
+        sent = 0            # characters of `text` already handed to the caller (stop strings are held back)
+        cut_by_stop = False
         spec = {"verifies": 0, "drafted": 0, "accepted": 0}
         t1 = time.time()
 
         def emit(tok):
-            """Returns (stop, piece). Handles eos / stop strings / cancellation."""
-            nonlocal text, finish
+            """Returns (stop, piece). Handles eos / stop strings / cancellation.
+
+            A stop string is never part of the answer (OpenAI semantics): the text is cut where it
+            begins, and while the tail of the text could still turn into a stop string it is held back
+            instead of being streamed."""
+            nonlocal text, finish, sent, cut_by_stop
             out_tokens.append(tok)
             if tok in self.eos:
                 finish = "stop"
                 return True, None
             piece = dec.add(tok)
             text += piece
-            if stop and any(s_ in text for s_ in stop):
-                finish = "stop"
-                return True, piece
+            if stop:
+                hits = [i for i in (text.find(s_, max(0, sent - len(s_) + 1)) for s_ in stop if s_) if i >= 0]
+                if hits:
+                    cut = min(hits)
+                    piece, sent, cut_by_stop, finish = text[sent:cut], cut, True, "stop"
+                    return True, piece
+                hold = max((k for s_ in stop if s_ for k in range(min(len(s_) - 1, len(text)), 0, -1)
+                            if text.endswith(s_[:k])), default=0)
+                end = len(text) - hold
+                piece, sent = text[sent:end], max(sent, end)
             if should_stop and should_stop():
                 finish = "cancelled"
                 return True, piece
@@ -809,6 +822,8 @@ class Engine:
                         mx.async_eval(y)
                 else:
                     y = nxt
+        if stop and not cut_by_stop and sent < len(text):
+            yield None, text[sent:]          # held back as a possible stop string that never completed
         tail = dec.flush()
         if tail and finish == "length":
             yield None, tail

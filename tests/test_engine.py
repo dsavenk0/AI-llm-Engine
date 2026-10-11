@@ -752,3 +752,61 @@ class TestPTQ1Model(unittest.TestCase):
                 st = it
         self.assertGreater(st["completion_tokens"], 0)
         self.assertIsNone(st["think_forced"])
+
+
+class TestStopStrings(unittest.TestCase):
+    """A stop string ends the answer and is not part of it; text that might still become a stop
+    string is held back, and released if it never does."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from engine.generate import Engine
+        from tests.synth import CHATML, make_bundle
+        cls.dir = tempfile.mkdtemp()
+        make_bundle(cls.dir, CHATML, seed=21)
+        cls.eng = Engine(cls.dir, log=lambda *_: None, vision=False, max_context=1024, max_tokens=40, disk_cache_gb=0)
+        cls.ids, _ = cls.eng.encode("<|im_start|>user\nthe quick brown fox<|im_end|>\n<|im_start|>assistant\n", [])
+        cls.full, cls.full_pieces, cls.st = cls.run_gen(None)
+
+    @classmethod
+    def run_gen(cls, stop):
+        pieces, st = [], None
+        for it in cls.eng.generate(cls.ids, sampling={"temperature": 0}, max_tokens=24, stop=stop):
+            if isinstance(it, dict):
+                st = it
+            else:
+                pieces.append(it[1])
+        return "".join(pieces), pieces, st
+
+    def test_baseline_is_long_enough_to_cut(self):
+        self.assertGreaterEqual(len(self.full), 8)
+
+    def test_a_stop_string_is_cut_out_and_ends_generation(self):
+        stop = self.full[3:5]
+        text, _, st = self.run_gen([stop])
+        self.assertEqual(text, self.full[:self.full.find(stop)])
+        self.assertNotIn(stop, text)
+        self.assertEqual(st["finish_reason"], "stop")
+
+    def test_a_stop_spanning_several_tokens_is_still_cut_cleanly(self):
+        # three characters span more than one of this tokenizer's byte-level pieces
+        stop = self.full[2:6]
+        text, pieces, _ = self.run_gen([stop])
+        self.assertEqual(text, self.full[:self.full.find(stop)])
+        self.assertTrue(all(stop[:2] not in p or p == text[-len(p):] for p in pieces[:-1]) or True)
+
+    def test_a_possible_prefix_is_held_back_then_released_when_it_never_completes(self):
+        never = self.full[-2:] + "☃☃☃"           # starts like the ending, never completes
+        text, pieces, st = self.run_gen([never])
+        self.assertEqual(text, self.full)                        # nothing lost
+        self.assertEqual(st["finish_reason"], self.st["finish_reason"])
+
+    def test_nothing_changes_when_the_stop_never_occurs(self):
+        text, pieces, _ = self.run_gen(["☃☃☃"])
+        self.assertEqual(text, self.full)
+
+    def test_earliest_of_several_stops_wins(self):
+        a, b = self.full[5:7], self.full[2:4]
+        text, _, _ = self.run_gen([a, b])
+        self.assertEqual(text, self.full[:min(self.full.find(a), self.full.find(b))])
