@@ -193,6 +193,23 @@ Optional extras, each off until you ask (nothing is contacted or added to the pr
 | automatic | `.llm/map.md` — a model-free map of the project (rebuilt only when files change) and `.llm/session.md` — the agent's own notes, saved on exit and read at start, so a restart does not re-scan the project. `/map` and `/save` do it on demand. |
 | `/compact` | Long sessions are compacted automatically at 70% of the context window; this does it now. |
 
+### Benchmarks
+
+`./llm eval` has two modes. Without arguments it runs the small built-in regression suite (math, code, sanity).
+With `--suite` it runs standard benchmarks zero-shot through the model's chat template, on a seeded random subset:
+
+```sh
+./llm eval --suite list
+./llm eval --suite gsm8k,mmlu,arc,hellaswag --limit 100
+./llm eval --suite humaneval,mbpp --allow-code     # executes the model's code locally
+./llm eval --suite mmlu --limit 0                  # 0 = the full dataset
+```
+
+GSM8K, MMLU, MMLU-Pro, ARC-Challenge, HellaSwag, TruthfulQA (MC1), WinoGrande, HumanEval and MBPP are supported;
+datasets come from the Hugging Face datasets server and are cached. The score is generative zero-shot accuracy with a
+95 % interval, so it is comparable between models and between runs of this tool, not with published
+log-likelihood or few-shot numbers. Stop the engine first.
+
 ### Editors: Continue, Kilo Code, opencode
 
 Nothing is tied to one editor. Run `./llm connect` and pick one, or name it directly:

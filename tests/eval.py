@@ -237,6 +237,52 @@ def measure_one(path):
     return res
 
 
+BENCH_BASELINE = os.path.join(ROOT, "tests", "bench_baseline.json")
+
+
+def run_benchmarks(args):
+    """--suite: the standard benchmarks (tests/benchmarks.py) on each requested model."""
+    from tests import benchmarks as B
+    if args.suite == "list":
+        for k, v in B.SUITES.items():
+            print(f"{k:12s} {v['title']:18s} {v['area']:10s} {'runs model code' if v['kind'] == 'code' else ''}")
+        return
+    names = B.parse_suites(args.suite)
+    from engine.generate import Engine
+    base_all = {}
+    if os.path.exists(BENCH_BASELINE):
+        with open(BENCH_BASELINE) as f:
+            base_all = json.load(f).get("models", {})
+    think = {"auto": None, "on": True, "off": False}[args.think]
+    global GREEDY
+    GREEDY = args.greedy
+    out = {}
+    for path in model_paths(args):
+        key = model_key(path)
+        print(f"\n=== {key} · {', '.join(names)} · limit {args.limit or 'full'} · seed {args.seed} ===")
+        eng = Engine(path, vision=False, max_context=4096, max_tokens=2048, log=lambda *a: None)
+        out[key] = {}
+        for name in names:
+            res = B.run_suite(eng, name, ask, limit=args.limit, seed=args.seed, think=think, allow_code=args.allow_code)
+            out[key][f"{name}@{args.limit}/{args.seed}"] = res
+            line = B.format_result(name, res)
+            b = base_all.get(key, {}).get(f"{name}@{args.limit}/{args.seed}")
+            if b and "correct" in res and b.get("total") == res["total"]:
+                line += f"   baseline {b['correct']}/{b['total']}  {res['correct'] - b['correct']:+d}"
+            print(line)
+            if args.verbose and res.get("fails"):
+                print("    " + "\n    ".join(res["fails"]))
+        del eng
+    if args.save:
+        merged = base_all
+        for k, v in out.items():
+            merged.setdefault(k, {}).update({s: {kk: vv for kk, vv in r.items() if kk != "fails"} for s, r in v.items()
+                                           if "correct" in r})
+        with open(BENCH_BASELINE, "w") as f:
+            json.dump({"date": time.strftime("%Y-%m-%d"), "models": merged}, f, indent=2)
+        print(f"\nbaseline saved: {BENCH_BASELINE}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", action="append",
@@ -250,11 +296,19 @@ def main():
                     help="temperature 0 instead of the model's sampling presets (reasoning models loop on it)")
     ap.add_argument("--think", choices=("auto", "on", "off"), default="auto",
                     help="reasoning mode: auto = the model's own template default (small Qwen3.5 models: off)")
+    ap.add_argument("--suite", help="standard benchmarks instead of the built-in suites: comma list or 'all' "
+                                    "(see tests/benchmarks.py; 'list' shows them)")
+    ap.add_argument("--limit", type=int, default=50, help="questions per benchmark suite (0 = the full dataset)")
+    ap.add_argument("--seed", type=int, default=0, help="which random subset of each dataset")
+    ap.add_argument("--allow-code", action="store_true",
+                    help="let HumanEval/MBPP run the model's code on this machine")
     args = ap.parse_args()
     global GREEDY, THINK
     GREEDY = args.greedy
     THINK = {"auto": None, "on": True, "off": False}[args.think]
 
+    if args.suite:
+        return run_benchmarks(args)
     paths = model_paths(args)
     base_all = {}
     if os.path.exists(BASELINE):

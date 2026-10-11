@@ -17,6 +17,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
   ./llm eval [--save]        accuracy suite (math/code/sanity) vs tests/eval_baseline.json
+  ./llm eval --suite gsm8k,mmlu --limit 100   standard benchmarks (--suite list shows them)
   ./llm calibrate [--apply]  find the largest context that actually prefills on this Mac
 
 The manager itself is stdlib-only; the engine runs from ./.venv.
