@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
-from ui import agentloop, codeinfo  # noqa: E402
+from ui import agentloop, codeinfo, diagnostics  # noqa: E402
 
 SKIP_DIRS = {".git", ".llm", "node_modules", "__pycache__", ".venv", "venv", ".build", "DerivedData", ".idea",
              ".DS_Store"}
@@ -383,7 +383,24 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("text too large to analyze")
         lang = body.get("language") or codeinfo.detect_language(body.get("path", ""), text)
         return self._json(200, {"language": lang, "spans": codeinfo.highlight(text, lang),
-                                "outline": codeinfo.outline(text, lang)})
+                                "outline": codeinfo.outline(text, lang),
+                                "diagnostics": diagnostics.diagnose(text, lang)})
+
+    def api_diagnostics(self, P, q, body):
+        """The language's own parser (swiftc/node/bash…) when installed — slower, so asked for separately."""
+        text = body.get("text", "")
+        if len(text) > MAX_FILE:
+            raise ValueError("text too large to check")
+        lang = body.get("language") or codeinfo.detect_language(body.get("path", ""), text)
+        found = diagnostics.diagnose(text, lang)
+        deep = diagnostics.deep_check(text, lang) if body.get("deep", True) else []
+        seen, merged = set(), []
+        for d in found + deep:                       # the same problem from two tiers is shown once
+            key = (d["line"], d["message"])
+            if key not in seen:
+                seen.add(key)
+                merged.append(d)
+        return self._json(200, {"language": lang, "diagnostics": merged, "deep": diagnostics.available(lang)})
 
     def api_search(self, P, q, body):
         pattern = q.get("q", "")
