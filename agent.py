@@ -8,7 +8,8 @@ The model gets file and shell tools scoped to the workspace. Writes, edits and
 commands are shown (with a diff) and need confirmation unless /auto is on.
 Hard-to-reverse or outward-facing commands (git push, rm -rf, sudo, ...) always
 ask, even with /auto on — see DANGEROUS_PATTERNS.
-Commands: /auto  /clear  /think on|off  /web on|off  /compact  /memory  /remember <note>  /exit
+Commands: /auto  /clear  /think on|off  /web on|off  /mcp [on|off|add <preset>]  /compact
+          /memory  /remember <note>  /exit
 
 Long sessions are compacted automatically before they fill the context window; standing
 project instructions are read from .llm/memory.md, AGENTS.md or CLAUDE.md (harness/).
@@ -106,6 +107,7 @@ class Agent:
         self.messages = [{"role": "system", "content": self.system_prompt()}]
         self.extra = {}              # optional tools from harness modules: name -> (schema, callable)
         self.web_allowed = None      # None = ask once per session before anything leaves the machine
+        self.mcp, self.mcp_failed, self.mcp_ok = [], {}, {}
         self.prompt_tokens = 0       # size of the last prompt, from the server's usage report
         self.context = (llm.health(cfg) or {}).get("context") or 0
 
@@ -129,6 +131,25 @@ class Agent:
             for name in ("web_search", "web_fetch"):
                 self.extra.pop(name, None)
         self.web_allowed = None
+
+    def allow_mcp(self, what):
+        server = what.split(":")[0].replace("call ", "")
+        if server not in self.mcp_ok:
+            self.mcp_ok[server] = self.auto or llm.ask_yn(
+                Y(T("Allow tools of the MCP server “{s}” for this session?").format(s=server)), False)
+        return self.mcp_ok[server]
+
+    def set_mcp(self, on):
+        """Connect (or disconnect) the MCP servers from .llm/mcp.json; their tools join the tool list."""
+        from harness import mcp
+        for srv in self.mcp:
+            for t in srv.tools_list:
+                self.extra.pop(mcp.tool_name(srv.name, t["name"]), None)
+            srv.close()
+        self.mcp, self.mcp_failed, self.mcp_ok = [], {}, {}
+        if on:
+            self.mcp, self.mcp_failed = mcp.load_servers(self.root)
+            self.extra.update(mcp.tools(self.mcp, self.allow_mcp))
 
     # ───────────────────────── tools ─────────────────────────
     def path(self, p):
@@ -340,7 +361,7 @@ class Agent:
         print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
 
     def repl(self):
-        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web on|off  /compact  /memory  /remember  /exit"))
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /compact  /memory  /remember  /exit"))
         while True:
             mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
             try:
@@ -363,6 +384,19 @@ class Agent:
             if line.startswith("/web"):
                 self.set_web(not line.endswith("off"))
                 print(DIM(T("Web search and page reading: {v}").format(v=T("off") if line.endswith("off") else T("on"))))
+                continue
+            if line.startswith("/mcp"):
+                from harness import mcp
+                arg = line[4:].split()
+                try:
+                    if arg[:1] == ["add"]:
+                        print(DIM(T("Added to {p}").format(p=mcp.add_preset(self.root, arg[1] if len(arg) > 1 else ""))))
+                    elif arg[:1] in (["on"], ["off"]):
+                        self.set_mcp(arg[0] == "on")
+                    print("\n".join(mcp.status(self.root, self.mcp, self.mcp_failed))
+                          or DIM(T("No MCP servers configured — /mcp add context7")))
+                except (ValueError, IndexError) as e:
+                    print(Y(str(e)))
                 continue
             if line == "/compact":
                 self.compact(force=True)
@@ -403,7 +437,11 @@ def main(args):
         print(Y(T("The model is not running.")) + " " + T("Starting…"))
         if not llm.start(cfg, sys.stdin.isatty()):
             return False
-    Agent(cfg, root).repl()
+    a = Agent(cfg, root)
+    try:
+        a.repl()
+    finally:
+        a.set_mcp(False)
     return True
 
 

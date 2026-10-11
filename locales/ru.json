@@ -154,5 +154,8 @@
   "Usage: /remember <note>": "Использование: /remember <заметка>",
   "packed JANG storage": "упакованное хранение JANG (ядра пока нет)",
   "The agent wants to {what}. Allow web access for this session?": "Агент хочет: {what}. Разрешить доступ в интернет на эту сессию?",
-  "Web search and page reading: {v}": "Поиск в интернете и чтение страниц: {v}"
+  "Web search and page reading: {v}": "Поиск в интернете и чтение страниц: {v}",
+  "Allow tools of the MCP server “{s}” for this session?": "Разрешить инструменты MCP-сервера «{s}» на эту сессию?",
+  "Added to {p}": "Добавлено в {p}",
+  "No MCP servers configured — /mcp add context7": "MCP-серверы не настроены — /mcp add context7"
 }
