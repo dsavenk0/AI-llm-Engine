@@ -167,5 +167,8 @@
   "The same failure after two attempts — stopping; the edits are not helping.": "Та же ошибка после двух попыток — останавливаюсь, правки не помогают.",
   "Delegate: {what}?": "Передать задачу: {what}?",
   "No usable workers — see .llm/workers.json": "Нет доступных исполнителей — см. .llm/workers.json",
-  "No workers configured — .llm/workers.json": "Исполнители не настроены — .llm/workers.json"
+  "No workers configured — .llm/workers.json": "Исполнители не настроены — .llm/workers.json",
+  "Could not save notes:": "Не удалось сохранить заметки:",
+  "Notes saved to {p}": "Заметки сохранены в {p}",
+  "Project map: {n} files → {p}": "Карта проекта: {n} файлов → {p}"
 }

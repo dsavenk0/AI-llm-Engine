@@ -8,11 +8,13 @@ The model gets file and shell tools scoped to the workspace. Writes, edits and
 commands are shown (with a diff) and need confirmation unless /auto is on.
 Hard-to-reverse or outward-facing commands (git push, rm -rf, sudo, ...) always
 ask, even with /auto on — see DANGEROUS_PATTERNS.
-Commands: /auto  /clear  /think on|off  /web on|off  /mcp [on|off|add <preset>]  /compact
+Commands: /auto  /clear  /think on|off  /web on|off  /mcp [on|off|add <preset>]  /compact  /map  /save
           /workers [on|off]  /fix-tests [command]  /memory  /remember <note>  /exit
 
-Long sessions are compacted automatically before they fill the context window; standing
-project instructions are read from .llm/memory.md, AGENTS.md or CLAUDE.md (harness/).
+Long sessions are compacted automatically before they fill the context window. Between
+sessions the agent keeps files in <workspace>/.llm/ (harness/): map.md (a model-free map of the
+project, rebuilt only when files change), session.md (its own notes, saved on exit and read at
+start) and memory.md (your /remember notes; AGENTS.md / CLAUDE.md are read too).
 """
 import difflib
 import fnmatch
@@ -25,7 +27,7 @@ import time
 import urllib.request
 
 import llm
-from harness import compact, memory
+from harness import compact, memory, projectmap
 from llm import B, CY, DIM, G, R, T, Y
 
 MAX_TOOL_OUTPUT = 12000
@@ -112,7 +114,31 @@ class Agent:
         self.context = (llm.health(cfg) or {}).get("context") or 0
 
     def system_prompt(self):
-        return SYSTEM.format(root=self.root) + memory.system_block(self.root)
+        return (SYSTEM.format(root=self.root) + memory.system_block(self.root)
+                + projectmap.system_block(self.root) + memory.session_block(self.root))
+
+    NOTES_PROMPT = (
+        "You keep working notes for a coding agent so the next session does not have to rediscover the "
+        "project. Update the previous notes with what the conversation below adds. Output only the notes, "
+        "markdown, at most 300 words, with these sections: Goal, Done, Decisions & constraints, Open / next, "
+        "Key files. Drop what is finished or no longer true. Be specific (paths, names, commands).\n\n")
+
+    def save_notes(self, quiet=False):
+        """Write .llm/session.md from this conversation (merged with the previous notes)."""
+        if not any(m.get("role") == "user" for m in self.messages[1:]) or len(self.messages) < 4:
+            return False
+        try:
+            old = memory.load_session(self.root)
+            prompt = (self.NOTES_PROMPT + (f"Previous notes:\n{old}\n\n" if old else "")
+                      + "Conversation:\n" + compact.transcript(self.messages[1:]))
+            path = memory.save_session(self.root, self.oneshot(prompt))
+        except Exception as e:  # the server may be gone at exit; never fail the shutdown
+            if not quiet:
+                print(Y(T("Could not save notes:") + f" {e}"))
+            return False
+        if path and not quiet:
+            print(DIM(T("Notes saved to {p}").format(p=os.path.relpath(path, self.root))))
+        return bool(path)
 
     def tool_schemas(self):
         return TOOLS + [schema for schema, _ in self.extra.values()]
@@ -402,7 +428,7 @@ class Agent:
         print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
 
     def repl(self):
-        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /workers  /fix-tests  /compact  /memory  /remember  /exit"))
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /workers  /fix-tests  /compact  /map  /save  /memory  /remember  /exit"))
         while True:
             mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
             try:
@@ -421,6 +447,14 @@ class Agent:
             if line == "/clear":
                 self.messages = self.messages[:1]
                 print(DIM(T("History cleared.")))
+                continue
+            if line == "/map":
+                files = projectmap._files(self.root)
+                self.messages[0]["content"] = self.system_prompt()
+                print(DIM(T("Project map: {n} files → {p}").format(n=len(files), p=projectmap.MAP_PATH)))
+                continue
+            if line == "/save":
+                self.save_notes()
                 continue
             if line.startswith("/workers"):
                 from harness import delegate
@@ -497,6 +531,7 @@ def main(args):
     try:
         a.repl()
     finally:
+        a.save_notes()
         a.set_mcp(False)
     return True
 
