@@ -211,6 +211,31 @@ class TestShellRun(unittest.TestCase):
         left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout.split()
         self.assertEqual(left, [], "the shell's children survived the timeout")
 
+    def test_a_flood_of_output_is_cut_and_the_command_stopped(self):
+        import time
+        from harness import shell
+        t0 = time.time()
+        r = shell.run("yes abcdefghij", timeout=30)              # would fill memory if collected whole
+        self.assertTrue(r.truncated)
+        self.assertEqual((r.returncode, r.timed_out), (125, False))
+        self.assertLessEqual(len(r.stdout), shell.MAX_OUTPUT)
+        self.assertGreater(len(r.stdout), shell.MAX_OUTPUT - 1000)   # the kept part is the beginning, in full
+        self.assertTrue(r.stdout.startswith("abcdefghij\nabcdefghij"))
+        self.assertLess(time.time() - t0, 10)
+        # stderr is limited on its own, and a normal command is untouched
+        e = shell.run("yes e 1>&2", timeout=30)
+        self.assertTrue(e.truncated)
+        self.assertEqual(e.stdout, "")
+        ok = shell.run("printf 'x%.0s' $(seq 1 1000)", timeout=10)
+        self.assertFalse(ok.truncated)
+        self.assertEqual((ok.returncode, len(ok.stdout)), (0, 1000))
+
+    def test_output_that_ends_without_a_newline_and_non_utf8_bytes_survive(self):
+        from harness import shell
+        r = shell.run("printf 'no newline'; printf '\\377\\376'", timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.stdout.startswith("no newline"))        # invalid bytes become U+FFFD, nothing is lost
+
     def test_an_argument_list_runs_without_a_shell(self):
         from harness import shell
         r = shell.run(["/bin/echo", "a b"], shell=False, timeout=10)

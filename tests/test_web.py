@@ -109,6 +109,23 @@ class TestWeb(unittest.TestCase):
         self.assertIn("private/local address", web.fetch("http://169.254.169.254/latest/meta-data/"))
         self.assertIn("only http", web.fetch("file:///etc/passwd"))
 
+    def test_only_global_addresses_pass_including_masked_and_shared_ones(self):
+        import ipaddress
+        for bad in ("127.0.0.1", "10.1.2.3", "192.168.0.9", "172.16.5.5", "169.254.169.254", "100.64.1.1",   # CGNAT
+                    "0.0.0.0", "224.0.0.1", "::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.5",
+                    "::"):
+            with self.assertRaises(ValueError, msg=bad):
+                web._require_public(ipaddress.ip_address(bad), "h")
+        for good in ("93.184.216.34", "8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8"):
+            web._require_public(ipaddress.ip_address(good), "h")
+
+    def test_a_name_that_resolves_to_a_private_address_is_refused(self):
+        from unittest import mock
+        fake = lambda host, port, *a, **k: [(2, 1, 6, "", ("::ffff:127.0.0.1", port, 0, 0))]
+        with mock.patch.object(web.socket, "getaddrinfo", fake):
+            with self.assertRaises(ValueError):
+                web.check_url("http://rebind.example/x")
+
     def test_a_redirect_into_the_lan_is_refused(self):
         # the first hop is allowed (allow_private), the redirect target is checked by the same rule
         class Strict(web._Redirects):

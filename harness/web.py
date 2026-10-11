@@ -9,7 +9,6 @@
 Private and loopback addresses are refused (a page must not be able to steer the agent into
 the user's LAN), redirects are re-checked, downloads are size-capped.
 """
-import html
 import ipaddress
 import json
 import os
@@ -42,10 +41,17 @@ def check_url(url, allow_private=False):
     except socket.gaierror as e:
         raise ValueError(f"cannot resolve {u.hostname}: {e}")
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0].split("%")[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise ValueError(f"refusing to fetch a private/local address ({u.hostname} → {ip})")
+        _require_public(ipaddress.ip_address(info[4][0].split("%")[0]), u.hostname)
     return url
+
+
+def _require_public(ip, host=""):
+    """Refuse anything that is not an ordinary public address: private, loopback, link-local, shared (CGNAT),
+    reserved, multicast, unspecified — and an IPv4 address wearing an IPv6 mask (::ffff:127.0.0.1)."""
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if not ip.is_global or ip.is_multicast or ip.is_loopback or ip.is_link_local:
+        raise ValueError(f"refusing to fetch a private/local address ({host} → {ip})")
 
 
 class _Redirects(urllib.request.HTTPRedirectHandler):
@@ -63,7 +69,21 @@ def _open(url, allow_private, timeout, data=None, headers=None):
     opener = urllib.request.build_opener(handler)
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, "Accept-Language": "en,ru;q=0.8",
                                                           **(headers or {})})
-    return opener.open(req, timeout=timeout)
+    resp = opener.open(req, timeout=timeout)
+    if not allow_private:
+        # the name was checked before connecting; check where the connection really went too, so a name that
+        # resolves differently the second time (DNS rebinding) cannot be used to read a local service
+        try:
+            peer = resp.fp.raw._sock.getpeername()[0]
+        except (AttributeError, OSError, IndexError):
+            peer = None
+        if peer:
+            try:
+                _require_public(ipaddress.ip_address(peer.split("%")[0]), urllib.parse.urlsplit(url).hostname or "")
+            except ValueError:
+                resp.close()
+                raise
+    return resp
 
 
 def _read(resp, limit=MAX_BYTES):

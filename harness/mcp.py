@@ -23,6 +23,8 @@ import urllib.error
 import urllib.request
 
 PROTOCOL = "2025-03-26"
+MAX_RESULT = 100_000          # characters of one tool result that reach the model
+MAX_PAGES = 50                # pages of tools/list followed before giving up (a server that repeats its cursor)
 PRESETS = {
     "context7": {"url": "https://mcp.context7.com/mcp"},
     # Google Stitch (UI designs / mockups). The key is created in Stitch → Settings → API keys and
@@ -65,7 +67,9 @@ def load_config(root):
             data = json.load(f)
     except (OSError, ValueError):
         return {}
-    servers = data.get("servers") or data.get("mcpServers") or {}
+    servers = (data.get("servers") or data.get("mcpServers") or {}) if isinstance(data, dict) else {}
+    if not isinstance(servers, dict):
+        return {}
     return {n: dict(s, enabled=s.get("enabled", True)) for n, s in servers.items() if isinstance(s, dict)}
 
 
@@ -96,8 +100,12 @@ def add_preset(root, name):
             data = json.load(f)
     except (OSError, ValueError):
         data = {}
+    if not isinstance(data, dict):
+        data = {}
     key = "mcpServers" if "mcpServers" in data else "servers"
-    data.setdefault(key, {})[name] = dict(PRESETS[name])
+    if not isinstance(data.get(key), dict):
+        data[key] = {}
+    data[key][name] = dict(PRESETS[name])
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -115,17 +123,22 @@ class _Stdio:
         except OSError as e:
             raise MCPError(f"cannot start {spec.get('command')!r}: {e}")
         self.inbox = queue.Queue()
+        self.exited = False
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
         for line in self.proc.stdout:
             try:
-                self.inbox.put(json.loads(line))
+                m = json.loads(line)
             except ValueError:
-                pass                               # servers sometimes log to stdout
+                continue                           # servers sometimes log to stdout
+            if isinstance(m, dict):                # a bare number or list is noise, not a JSON-RPC message
+                self.inbox.put(m)
         self.inbox.put(None)
 
     def send(self, msg, want_id=None, timeout=60):
+        if self.exited:
+            raise MCPError("server exited")
         try:
             self.proc.stdin.write(json.dumps(msg) + "\n")
             self.proc.stdin.flush()
@@ -139,6 +152,7 @@ class _Stdio:
             except queue.Empty:
                 raise MCPError(f"no answer within {timeout} s")
             if m is None:
+                self.exited = True
                 raise MCPError("server exited")
             if m.get("id") == want_id and ("result" in m or "error" in m):
                 return m
@@ -177,7 +191,10 @@ class _Http:
                     if isinstance(m, dict) and m.get("id") == want_id and ("result" in m or "error" in m):
                         return m
             return None
-        m = json.loads(raw) if raw.strip() else None
+        try:
+            m = json.loads(raw) if raw.strip() else None
+        except ValueError:
+            return None                            # an HTML error page or other noise
         for x in (m if isinstance(m, list) else [m]):
             if isinstance(x, dict) and x.get("id") == want_id:
                 return x
@@ -230,15 +247,17 @@ class Server:
         m = self.transport.send({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or {}},
                                 self._id, timeout)
         if "error" in m:
-            raise MCPError(f"{method}: {m['error'].get('message', m['error'])}")
-        return m.get("result") or {}
+            e = m["error"]
+            raise MCPError(f"{method}: {e.get('message', e) if isinstance(e, dict) else e}")
+        r = m.get("result")
+        return r if isinstance(r, dict) else {}
 
     def connect(self):
         """Handshake + tool listing. Raises MCPError; the reason is also kept in `self.error`."""
         try:
             if self.spec.get("url"):
                 self.transport = _Http(self.spec)
-            elif self.spec.get("command"):
+            elif isinstance(self.spec.get("command"), str) and self.spec["command"]:
                 self.transport = _Stdio(self.spec, self.cwd)
             else:
                 raise MCPError("needs either `url` or `command`")
@@ -246,12 +265,15 @@ class Server:
             self.info = r.get("serverInfo") or {}
             self.transport.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
             tools, cursor = [], None
-            while True:
+            for _ in range(MAX_PAGES):
                 r = self._rpc("tools/list", {"cursor": cursor} if cursor else {})
-                tools += r.get("tools") or []
-                cursor = r.get("nextCursor")
-                if not cursor:
+                got = r.get("tools")
+                tools += [t for t in got if isinstance(t, dict) and isinstance(t.get("name"), str)] \
+                    if isinstance(got, list) else []
+                nxt = r.get("nextCursor")
+                if not nxt or nxt == cursor:
                     break
+                cursor = nxt
             self.tools_list = tools
             self.error = None
         except MCPError as e:
@@ -269,14 +291,19 @@ class Server:
     def call(self, tool, arguments, timeout=300):
         r = self._rpc("tools/call", {"name": tool, "arguments": arguments or {}}, timeout)
         parts = []
-        for c in r.get("content") or []:
+        content = r.get("content")
+        for c in content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
             if c.get("type") == "text":
                 parts.append(c.get("text", ""))
             elif c.get("type") == "resource" and (c.get("resource") or {}).get("text"):
                 parts.append(c["resource"]["text"])
             else:
                 parts.append(f"[{c.get('type', 'content')} omitted]")
-        text = "\n".join(parts) or json.dumps(r.get("structuredContent") or "(empty result)")
+        text = "\n".join(str(p) for p in parts) or json.dumps(r.get("structuredContent") or "(empty result)")
+        if len(text) > MAX_RESULT:
+            text = text[:MAX_RESULT] + f"\n[… {len(text) - MAX_RESULT} more characters cut]"
         return ("error: " + text) if r.get("isError") else text
 
     def close(self):
@@ -307,8 +334,10 @@ def slim(schema, keep=160, depth=0):
         if k in ("properties",) and isinstance(v, dict):
             out[k] = {n: slim(x, keep, depth + 1) for n, x in v.items()}
         elif k in ("items", "anyOf", "oneOf", "allOf", "$defs", "definitions"):
-            out[k] = slim(v, keep, depth + 1) if k != "$defs" and k != "definitions" else \
-                {n: slim(x, keep, depth + 2) for n, x in v.items()}
+            if k in ("$defs", "definitions") and isinstance(v, dict):
+                out[k] = {n: slim(x, keep, depth + 2) for n, x in v.items()}
+            else:
+                out[k] = slim(v, keep, depth + 1)
         else:
             out[k] = v
     return out
@@ -347,6 +376,10 @@ def tools(servers, allow=lambda what: True):
     for s in servers:
         for t in s.enabled_tools():
             name = tool_name(s.name, t["name"])
+            base, n = name, 1
+            while name in out:                              # two names that sanitise (or truncate) the same
+                n += 1
+                name = f"{base[:60]}_{n}"
 
             def call(_s=s, _t=t["name"], **args):
                 if not allow(f"call {_s.name}: {_t}"):
@@ -355,8 +388,8 @@ def tools(servers, allow=lambda what: True):
                     return _s.call(_t, args)
                 except MCPError as e:
                     return f"error: {e}"
-            schema = t.get("inputSchema") or {"type": "object", "properties": {}}
-            if schema.get("type") != "object":
+            schema = t.get("inputSchema")
+            if not isinstance(schema, dict) or schema.get("type") != "object":
                 schema = {"type": "object", "properties": {}}
             schema = slim(schema)
             desc = (t.get("description") or t.get("title") or t["name"]).strip().replace("\n\n", "\n")

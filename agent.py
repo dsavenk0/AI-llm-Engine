@@ -307,6 +307,8 @@ class Agent:
         print(DIM(out[-2000:]))
         if p.timed_out:
             return f"error: timed out after 120 s (the command was stopped)\n{out}"
+        if getattr(p, "truncated", False):
+            return f"error: the command printed too much and was stopped; the start of its output:\n{out[:4000]}"
         return f"exit code {p.returncode}\n{out}"
 
     def call_tool(self, name, args):

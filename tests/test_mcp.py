@@ -127,6 +127,130 @@ class TestStdio(unittest.TestCase):
         self.assertIn("cannot start", s.error)
 
 
+HOSTILE_SERVER = textwrap.dedent('''
+    import json, os, sys
+    mode = os.environ["MCP_MODE"]
+    def out(o): print(json.dumps(o), flush=True)
+    for line in sys.stdin:
+        m = json.loads(line)
+        if "id" not in m:
+            continue
+        i, meth = m["id"], m["method"]
+        if mode == "noise":                       # JSON that is not a message, between real replies
+            for junk in (1, [1, 2], "text", None):
+                print(json.dumps(junk), flush=True)
+        if meth == "initialize":
+            out({"jsonrpc": "2.0", "id": i, "result": {"serverInfo": {"name": "H", "version": "1"}}})
+        elif meth == "tools/list":
+            if mode == "loop":                    # the same cursor for ever
+                out({"jsonrpc": "2.0", "id": i, "result": {"tools": [{"name": "t"}], "nextCursor": "same"}})
+            elif mode == "badtools":
+                out({"jsonrpc": "2.0", "id": i, "result": {"tools": [{"description": "no name"}, 5, {"name": 7},
+                     {"name": "ok", "inputSchema": "nope"}]}})
+            elif mode == "result-not-dict":
+                out({"jsonrpc": "2.0", "id": i, "result": "oops"})
+            else:
+                out({"jsonrpc": "2.0", "id": i, "result": {"tools": [{"name": "a b"}, {"name": "a_b"}, {"name": "a-b"}]}})
+        elif meth == "tools/call":
+            if mode == "error-string":
+                out({"jsonrpc": "2.0", "id": i, "error": "plain string"})
+            elif mode == "bad-content":
+                out({"jsonrpc": "2.0", "id": i, "result": {"content": [5, None, {"type": "text", "text": "fine"}]}})
+            elif mode == "huge":
+                out({"jsonrpc": "2.0", "id": i, "result": {"content": [{"type": "text", "text": "x" * 300000}]}})
+            elif mode == "die":
+                sys.exit(0)
+            else:
+                out({"jsonrpc": "2.0", "id": i, "result": {"content": [{"type": "text", "text": "ok"}]}})
+''')
+
+
+class TestHostileStdioServers(unittest.TestCase):
+    def server(self, mode):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "h.py")
+        with open(path, "w") as f:
+            f.write(HOSTILE_SERVER)
+        spec = {"command": sys.executable, "args": ["-B", path], "env": {"MCP_MODE": mode}}
+        s = mcp.Server("h", spec, cwd=d)
+        self.addCleanup(s.close)
+        return s
+
+    def test_json_noise_between_messages_is_ignored(self):
+        s = self.server("noise").connect()
+        self.assertEqual(s.call("t", {}), "ok")
+
+    def test_a_repeating_cursor_does_not_loop_for_ever(self):
+        s = self.server("loop").connect()
+        self.assertLessEqual(len(s.tools_list), 2)                  # stops at the first repeat
+
+    def test_tools_without_a_name_are_skipped_and_a_bad_schema_gets_the_default(self):
+        s = self.server("badtools").connect()
+        self.assertEqual([t["name"] for t in s.tools_list], ["ok"])
+        m = mcp.tools([s])
+        self.assertEqual(m["h__ok"][0]["function"]["parameters"], {"type": "object", "properties": {}})
+
+    def test_colliding_names_get_distinct_keys(self):
+        s = self.server("names").connect()
+        names = list(mcp.tools([s]))
+        self.assertEqual(len(names), 3)
+        self.assertEqual(len(set(names)), 3)
+        self.assertTrue(all(len(n) <= 64 for n in names))
+
+    def test_a_result_that_is_not_an_object_is_an_empty_result(self):
+        s = self.server("result-not-dict").connect()
+        self.assertEqual(s.tools_list, [])
+
+    def test_an_error_that_is_a_string_is_reported(self):
+        s = self.server("error-string").connect()
+        with self.assertRaisesRegex(mcp.MCPError, "plain string"):
+            s._rpc("tools/call", {"name": "t", "arguments": {}})
+
+    def test_odd_content_items_are_skipped(self):
+        s = self.server("bad-content").connect()
+        self.assertEqual(s.call("t", {}), "fine")
+
+    def test_a_huge_result_is_cut(self):
+        s = self.server("huge").connect()
+        out = s.call("t", {})
+        self.assertLess(len(out), mcp.MAX_RESULT + 100)
+        self.assertIn("more characters cut", out)
+
+    def test_a_server_that_dies_fails_fast_afterwards(self):
+        import time
+        s = self.server("die").connect()
+        with self.assertRaisesRegex(mcp.MCPError, "exited"):
+            s.call("t", {})
+        t0 = time.time()
+        with self.assertRaisesRegex(mcp.MCPError, "exited"):
+            s.call("t", {})
+        self.assertLess(time.time() - t0, 2)                 # not another 60 s wait
+
+
+class TestConfigShapes(unittest.TestCase):
+    def test_a_config_that_is_not_an_object_is_empty_and_a_preset_repairs_it(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".llm"))
+        p = os.path.join(d, ".llm", "mcp.json")
+        for body in ("[1, 2]", '{"servers": [1]}', '"x"', "{"):
+            with open(p, "w") as f:
+                f.write(body)
+            self.assertEqual(mcp.load_config(d), {}, body)
+        with open(p, "w") as f:
+            f.write("[1, 2]")
+        mcp.add_preset(d, "context7")
+        self.assertIn("context7", mcp.load_config(d))
+
+    def test_a_command_that_is_not_a_string_is_an_error_not_a_crash(self):
+        s = mcp.Server("x", {"command": ["npx", "-y"]})
+        with self.assertRaises(mcp.MCPError):
+            s.connect()
+
+    def test_html_instead_of_json_is_no_response(self):
+        self.assertIsNone(mcp._Http._parse("<html>502</html>", "text/html", 1))
+        self.assertIsNone(mcp._Http._parse("{broken", "application/json", 1))
+
+
 class TestHttp(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
