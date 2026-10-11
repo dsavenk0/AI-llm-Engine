@@ -238,7 +238,7 @@ BROKEN = {"mbpp": {180, 367, 493}}
 
 
 # ───────────────────────────── data ─────────────────────────────
-def _get(url, retries=8):
+def _get(url, retries=12):
     """GET JSON; the datasets server rate-limits (429): honour Retry-After, back off, and keep going."""
     delay = 1.0
     for attempt in range(retries):
@@ -355,7 +355,11 @@ def run_suite(eng, name, ask, limit=DEFAULT_LIMIT, seed=0, think=None, allow_cod
     spec = SUITES[name]
     if spec["kind"] == "code" and not allow_code:
         return {"skipped": "runs the model's code locally; pass --allow-code"}
-    rows = rows if rows is not None else load_rows(name, limit, seed)
+    if rows is None:
+        try:
+            rows = load_rows(name, limit, seed)
+        except Exception as e:    # a rate-limited or unreachable dataset must not cost the other suites' results
+            return {"skipped": f"data unavailable ({type(e).__name__}: {str(e)[:80]})"}
     rng = random.Random(seed)
     res = {"correct": 0, "total": 0, "unparsed": 0, "truncated": 0, "think_forced": 0, "tokens": 0, "seconds": 0.0}
     fails = []

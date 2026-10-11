@@ -424,6 +424,13 @@ class TestRunLoop(unittest.TestCase):
         ok = lambda eng, prompt, mt, think: ("```python\ndef mul(a, b):\n    return a * b\n```", {})
         self.assertEqual(B.run_suite(None, "mbpp", ok, rows=[MBPP], allow_code=True)["correct"], 1)
 
+    def test_an_unreachable_dataset_skips_that_suite_instead_of_aborting(self):
+        with mock.patch.object(B, "load_rows", side_effect=OSError("429 Too Many Requests")):
+            r = B.run_suite(None, "mmlu", lambda *a: ("A", {}))
+        self.assertIn("skipped", r)
+        self.assertIn("data unavailable", r["skipped"])
+        self.assertIn("429", B.format_result("mmlu", r))
+
     def test_code_is_not_run_without_permission(self):
         called = []
         r = B.run_suite(None, "humaneval", lambda *a: called.append(1) or ("", {}), rows=[HUMAN])
