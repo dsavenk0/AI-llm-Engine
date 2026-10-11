@@ -397,21 +397,25 @@ class TestIntegration(unittest.TestCase):
         if not self.eng.supports_thinking:
             self.skipTest("model has no thinking mode")
         old_frac = self.eng.think_frac
-        self.eng.think_frac = 0.2  # tiny budget: the model can't possibly finish reasoning in time
+        self.eng.think_frac = 0.1  # a tiny budget: no reasoning model finishes thinking inside it
         try:
             self.eng.cache = None
             text, _, thinking_open = self.eng.build_prompt([{"role": "user", "content": "What is 2+2?"}],
                                                             thinking=True)
+            self.assertTrue(thinking_open)
             ids, _ = self.eng.encode(text, [])
             out, st = "", None
-            for item in self.eng.generate(ids, sampling={"temperature": 0}, max_tokens=64,
+            for item in self.eng.generate(ids, sampling={"temperature": 0}, max_tokens=160,
                                           thinking_open=thinking_open):
                 if isinstance(item, dict):
                     st = item
                 else:
                     out += item[1]
-            self.assertIn("</think>", out)  # forced closed, not just cut off mid-thought
-            self.assertEqual(st["finish_reason"], "stop")
+            # what is under test is the forced close — not how tersely this particular model then
+            # answers (a wordy one may still be talking when the token limit arrives)
+            self.assertEqual(st["think_forced"], "budget")
+            self.assertIn("</think>", out)
+            self.assertTrue(out.split("</think>", 1)[1].strip(), "the model said nothing after the close")
         finally:
             self.eng.think_frac = old_frac
 
@@ -488,7 +492,7 @@ class TestSamplingPresets(unittest.TestCase):
         # temperature 1.0 over the whole vocabulary, no top-k/top-p
         from engine.generate import sampling_presets
         p, src = sampling_presets({}, {})
-        self.assertEqual(src, "qwen3.5 defaults")
+        self.assertEqual(src, "family defaults")
         for thinking in (True, False):
             self.assertGreater(p[thinking]["top_k"], 0)
             self.assertLess(p[thinking]["top_p"], 1.0)
@@ -610,3 +614,141 @@ class TestModelsWithoutReasoningOrVision(unittest.TestCase):
                            disk_cache_gb=0, log=lambda *_: None)
         self.assertTrue(forced_on.thinking)
         self.assertFalse(forced_on.thinking_default)  # the default itself is unchanged
+
+
+class TestEveryMlxQuantization(unittest.TestCase):
+    """The engine reads each module's bits / group size / mode off its tensors, so any MLX
+    quantization of the model loads. Each scheme is built twice from the same weights —
+    quantized, and as the dequantized float it represents — and the two must agree: they take
+    different code paths (quantized_matmul vs a plain matmul) to compute one function."""
+
+    SCHEMES = {
+        "affine 2-bit":              lambda n: ("affine", 2, 64),
+        "affine 3-bit":              lambda n: ("affine", 3, 64),
+        "affine 4-bit g32":          lambda n: ("affine", 4, 32),
+        "affine 4-bit g128":         lambda n: ("affine", 4, 128),
+        "affine 5-bit":              lambda n: ("affine", 5, 64),
+        "affine 6-bit":              lambda n: ("affine", 6, 64),
+        "affine 8-bit":              lambda n: ("affine", 8, 64),
+        "mxfp4":                     lambda n: ("mxfp4", 4, 32),
+        "mxfp8":                     lambda n: ("mxfp8", 8, 32),
+        "nvfp4":                     lambda n: ("nvfp4", 4, 16),
+        # what mlx-community ships: most at 4-bit, the head and embeddings wider
+        "mixed 4-bit / 8-bit head+embed": lambda n: ("affine", 8, 64) if n in ("lm_head", "embed_tokens")
+                                          else ("affine", 4, 64),
+        "mixed per module":          lambda n: {"mlp.down_proj": ("affine", 8, 32), "lm_head": ("affine", 6, 32),
+                                                "embed_tokens": ("affine", 6, 64)}.get(n, ("affine", 4, 64)),
+        "attention float, mlp 4-bit": lambda n: None if n.startswith(("self_attn", "linear_attn")) else ("affine", 4, 64),
+        "mxfp4 body, affine 8-bit head": lambda n: ("affine", 8, 64) if n in ("lm_head", "embed_tokens")
+                                          else ("mxfp4", 4, 32),
+        "no quantization at all":    lambda n: None,
+    }
+
+    def logits(self, path):
+        from engine.generate import Engine
+        eng = Engine(path, vision=False, max_context=256, max_tokens=8, disk_cache_gb=0, log=lambda *_: None)
+        text, _, _ = eng.build_prompt([{"role": "user", "content": "the quick brown fox"}])
+        ids, _ = eng.encode(text, [])
+        out = eng.model(mx.array([ids]), eng.model.make_cache())
+        mx.eval(out)
+        return np.asarray(out.astype(mx.float32))[0, -1]
+
+    def test_each_scheme_loads_and_matches_its_dequantized_twin(self):
+        import tempfile
+        from tests.synth import make_bundle
+        for i, (name, scheme) in enumerate(self.SCHEMES.items()):
+            with self.subTest(scheme=name):
+                q, f = tempfile.mkdtemp(), tempfile.mkdtemp()
+                make_bundle(q, seed=10 + i, scheme=scheme)
+                make_bundle(f, seed=10 + i, scheme=scheme, twin=True)
+                lq, lf = self.logits(q), self.logits(f)
+                self.assertTrue(np.isfinite(lq).all(), name)
+                scale = float(np.abs(lf).max()) + 1e-6
+                self.assertLess(float(np.abs(lq - lf).max()) / scale, 0.02, name)
+                self.assertEqual(int(lq.argmax()), int(lf.argmax()), name)
+
+    def test_text_only_exports_without_the_language_model_prefix(self):
+        # mlx-lm style exports name tensors model.* / lm_head.*; the loader maps them across
+        import tempfile
+        from tests.synth import make_bundle
+        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_bundle(a, seed=5, prefix="language_model.")
+        make_bundle(b, seed=5, prefix="")
+        np.testing.assert_allclose(self.logits(a), self.logits(b), rtol=1e-3, atol=1e-3)
+
+    def test_parts_of_a_fused_projection_must_share_a_quantization(self):
+        import tempfile
+        from tests.synth import make_bundle
+        d = tempfile.mkdtemp()
+        # q_proj at 4-bit but k_proj at 8-bit cannot become one fused matrix: refuse, with the reason
+        make_bundle(d, seed=7, scheme=lambda n: ("affine", 8, 64) if n == "self_attn.k_proj" else ("affine", 4, 64))
+        with self.assertRaises(ValueError) as ctx:
+            self.logits(d)
+        self.assertIn("share", str(ctx.exception))
+
+
+class TestPTQ1Model(unittest.TestCase):
+    """A synthetic PTQ1_0 bundle (tests/synth.py) end to end: the experimental gate, the loader's
+    repack, and the two kernels agreeing with each other and with the dequantized float twin."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from tests.synth import make_ptq1_bundle
+        cls.q, cls.f = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_ptq1_bundle(cls.q, seed=3)
+        make_ptq1_bundle(cls.f, seed=3, twin=True)
+
+    def engine(self, path, **kw):
+        from engine.generate import Engine
+        return Engine(path, vision=False, max_context=256, max_tokens=8, disk_cache_gb=0, thinking=False,
+                      log=lambda *_: None, **kw)
+
+    def last_logits(self, eng, one_by_one=False):
+        text, _, _ = eng.build_prompt([{"role": "user", "content": "the quick brown fox jumps"}], thinking=False)
+        ids, _ = eng.encode(text, [])
+        cache = eng.model.make_cache()
+        if one_by_one:
+            for t in ids:
+                out = eng.model(mx.array([[t]]), cache)
+        else:
+            out = eng.model(mx.array([ids]), cache)
+        mx.eval(out)
+        return np.asarray(out.astype(mx.float32))[0, -1]
+
+    def test_it_is_off_unless_asked_for(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.engine(self.q)
+        self.assertIn("experimental", str(ctx.exception))
+        self.assertIn("PTQ1", str(ctx.exception))
+
+    def test_loads_with_the_option_and_turns_speculation_off(self):
+        eng = self.engine(self.q, ptq1=True)
+        self.assertTrue(eng.model.ptq1)
+        self.assertFalse(eng.speculative)
+        # the packed weights are in the tiled layout the kernel streams
+        w = eng.model.language_model.model.layers[0].mlp.gate_up_proj.weight
+        self.assertEqual((w.dtype, w.ndim, tuple(w.shape[2:])), (mx.uint8, 4, (1024, 28)))
+
+    def test_prefill_matches_the_dequantized_float_twin_exactly(self):
+        lq = self.last_logits(self.engine(self.q, ptq1=True))
+        lf = self.last_logits(self.engine(self.f))
+        np.testing.assert_allclose(lq, lf, atol=1e-4)
+        self.assertEqual(int(lq.argmax()), int(lf.argmax()))
+
+    def test_one_token_decode_kernel_matches_the_prefill_path(self):
+        eng = self.engine(self.q, ptq1=True)
+        lp, ld = self.last_logits(eng), self.last_logits(eng, one_by_one=True)
+        self.assertLess(float(np.abs(lp - ld).max()) / float(np.abs(lp).max()), 0.01)
+        self.assertEqual(int(lp.argmax()), int(ld.argmax()))
+
+    def test_generates(self):
+        eng = self.engine(self.q, ptq1=True)
+        text, _, _ = eng.build_prompt([{"role": "user", "content": "hello"}], thinking=False)
+        ids, _ = eng.encode(text, [])
+        st = None
+        for it in eng.generate(ids, sampling={"temperature": 0}, max_tokens=6):
+            if isinstance(it, dict):
+                st = it
+        self.assertGreater(st["completion_tokens"], 0)
+        self.assertIsNone(st["think_forced"])

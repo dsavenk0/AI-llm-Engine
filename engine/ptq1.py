@@ -54,8 +54,12 @@
 # pressure), more than 4 rows per thread or 512/1024-thread threadgroups (no
 # gain), half-precision tables (no gain, less accurate).
 #
-# Still NOT wired into the engine: matvec only (M=1). Prefill and the 16-row
-# speculative verify pass need a matmul path, and the loader needs PTQ1 tensors.
+# Wiring: the engine loads PTQ1 bundles (prism_hadamard_qwen35_ptq1) behind the
+# experimental `--ptq1 on` option. Decode (one row) uses the lookup-table kernel above;
+# more rows (prefill chunks) dequantize a slab of the matrix to fp16 and use MLX's
+# matmul, in row chunks so the temporary stays ~100 MB. Speculative verification
+# (2-16 rows) would pay that dequantization for 16 rows' worth of work, so the engine
+# turns speculation off for these models.
 import mlx.core as mx
 
 TG = 256         # threads per threadgroup; thread t owns table entry b = t
@@ -185,6 +189,90 @@ def ptq1_matvec(x, wt, n):
     )
     y = y.reshape(splits, n)
     return (y[0] if splits == 1 else y.sum(axis=0)).astype(x.dtype)
+
+
+_DEQ_SRC = """
+    // one thread = one (row, block): 28 bytes in, 128 half weights out
+    const uint tid = thread_position_in_grid.x;
+    constexpr int NB = K / 128;
+    const uint total = ROWS * NB;
+    if (tid >= total) return;
+    const uint b = tid % NB, r = tid / NB;
+    long base;
+    if (TILED) {
+        const uint tile = r / (TG * RPT), rr = r % (TG * RPT);
+        base = ((long(tile) * NB + b) * (TG * RPT) + rr) * 28;
+    } else {
+        base = (long(r) * NB + b) * 28;
+    }
+    uint qw[7];
+    for (int k = 0; k < 7; ++k) {
+        const device uchar* p = w + base + 4 * k;
+        qw[k] = uint(p[0]) | (uint(p[1]) << 8) | (uint(p[2]) << 16) | (uint(p[3]) << 24);
+    }
+    const float d = float(as_type<half2>(qw[6]).y);
+    device half* o = out + (long(r) * NB + b) * 128;
+    const uint p3[5] = {1u, 3u, 9u, 27u, 81u};
+    for (int j = 0; j < 16; ++j) {
+        const uint byte = (qw[j >> 2] >> (8 * (j & 3))) & 0xFFu;
+        for (int n = 0; n < 5; ++n)
+            o[16 * n + j] = half((float((((byte * p3[n]) & 0xFFu) * 3u) >> 8) - 1.0f) * d);
+    }
+    for (int m = 0; m < 8; ++m) {
+        const uint byte = (qw[4 + (m >> 2)] >> (8 * (m & 3))) & 0xFFu;
+        for (int n = 0; n < 5; ++n)
+            o[80 + 8 * n + m] = half((float((((byte * p3[n]) & 0xFFu) * 3u) >> 8) - 1.0f) * d);
+    }
+    for (int h = 0; h < 2; ++h) {
+        const uint byte = (qw[6] >> (8 * h)) & 0xFFu;
+        for (int n = 0; n < 4; ++n)
+            o[120 + 2 * n + h] = half((float((((byte * p3[n]) & 0xFFu) * 3u) >> 8) - 1.0f) * d);
+    }
+"""
+_deq = mx.fast.metal_kernel(name="engine_ptq1_dequant", input_names=["w"], output_names=["out"], source=_DEQ_SRC)
+
+
+def _dequant(w, rows, k, tiled):
+    (out,) = _deq(inputs=[w], template=[("ROWS", rows), ("K", k), ("TILED", tiled), ("TG", TG), ("RPT", RPT)],
+                  grid=(((rows * (k // 128) + 255) // 256) * 256, 1, 1), threadgroup=(256, 1, 1),
+                  output_shapes=[(rows, k)], output_dtypes=[mx.float16])
+    return out
+
+
+def dequantize(wt, n):
+    """Packed (tiled) weights -> fp16 [n, K]. Whole matrix: use only for small ones / tests."""
+    return _dequant(wt, wt.shape[0] * TILE, wt.shape[1] * 128, True)[:n]
+
+
+def dequantize_rows(w):
+    """Row-major PTQ1 rows [R, K/128*28] (e.g. embedding rows picked by token id) -> fp16 [R, K]."""
+    return _dequant(w, w.shape[0], w.shape[1] // 28 * 128, False)
+
+
+CHUNK_BYTES = 96 * 2**20  # fp16 weights materialized at a time in the matmul path
+
+
+def ptq1_matmul(x, wt, n):
+    """x: [..., K] with more than one row. Dequantizes the matrix a few tiles at a time and uses
+    MLX's matmul, so the temporary fp16 weights stay small."""
+    K = wt.shape[1] * 128
+    flat = x.reshape(-1, K).astype(mx.float16)
+    tiles = max(1, CHUNK_BYTES // (TILE * K * 2))   # 12 tiles at K=5120, 3 at K=17408
+    outs = []
+    for t0 in range(0, wt.shape[0], tiles):
+        chunk = wt[t0:t0 + tiles]
+        rows = min(chunk.shape[0] * TILE, n - t0 * TILE)
+        outs.append(flat @ _dequant(chunk, chunk.shape[0] * TILE, K, True)[:rows].T)
+    y = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=-1)
+    return y.reshape(*x.shape[:-1], n).astype(x.dtype)
+
+
+def linear(x, wt, n):
+    """y = x @ W.T for packed weights `wt` and `n` output rows: the lookup-table kernel for a
+    single row, dequantize + matmul for more."""
+    if x.size // x.shape[-1] == 1:
+        return ptq1_matvec(x, wt, n).reshape(*x.shape[:-1], n)
+    return ptq1_matmul(x, wt, n)
 
 
 def dequantize_ref(w):

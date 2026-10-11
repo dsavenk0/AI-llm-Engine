@@ -14,27 +14,78 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 
+from .quant import MX_MODES, module_spec
+
 F16, F32 = mx.float16, mx.float32
 PAD_MIN = 6  # see Ops.qmm
 
 
 # ───────────────────────────── primitives ─────────────────────────────
 class QLinear(nn.Module):
-    """Affine-quantized linear layer with packed uint32 weights."""
+    """Quantized linear layer with packed uint32 weights: MLX affine at any width/group size, or
+    an mx mode (mxfp4 / mxfp8 / nvfp4: uint8 scales, no biases)."""
 
-    def __init__(self, in_dims, out_dims, bits, group_size, bias=False):
+    def __init__(self, in_dims, out_dims, bits, group_size, bias=False, mode="affine"):
         super().__init__()
-        self.bits, self.group_size = bits, group_size
+        self.bits, self.group_size, self.mode = bits, group_size, mode
         # Lazy placeholders with the checkpoint's shapes; replaced by load_weights.
         self.weight = mx.zeros((out_dims, in_dims * bits // 32), dtype=mx.uint32)
-        self.scales = mx.zeros((out_dims, in_dims // group_size), dtype=F16)
-        self.biases = mx.zeros((out_dims, in_dims // group_size), dtype=F16)
+        if mode == "affine":
+            self.scales = mx.zeros((out_dims, in_dims // group_size), dtype=F16)
+            self.biases = mx.zeros((out_dims, in_dims // group_size), dtype=F16)
+        else:
+            self.scales = mx.zeros((out_dims, in_dims // group_size), dtype=mx.uint8)
         if bias:
             self.bias = mx.zeros((out_dims,), dtype=F16)
 
     def __call__(self, x):
-        y = mx.quantized_matmul(x, self.weight, self.scales, self.biases,
-                                transpose=True, group_size=self.group_size, bits=self.bits)
+        y = mx.quantized_matmul(x, self.weight, self.scales, getattr(self, "biases", None),
+                                transpose=True, group_size=self.group_size, bits=self.bits, mode=self.mode)
+        if "bias" in self:
+            y = y + self.bias
+        return y
+
+
+class PTQ1Linear(nn.Module):
+    """A PTQ1_0 (1.75-bit ternary) linear layer: the packed blocks stay packed in the layout the
+    Metal kernel streams (see ptq1.pack). Experimental — see ptq1.py."""
+
+    def __init__(self, in_dims, out_dims):
+        super().__init__()
+        from .ptq1 import TILE
+        self.out_dims = out_dims
+        self.weight = mx.zeros(((out_dims + TILE - 1) // TILE, in_dims // 128, TILE, 28), dtype=mx.uint8)
+
+    def __call__(self, x):
+        from .ptq1 import linear
+        return linear(x, self.weight, self.out_dims)
+
+
+class PTQ1Embedding(nn.Module):
+    """Token embedding stored as PTQ1_0 rows: only the rows asked for are unpacked."""
+
+    def __init__(self, num, dims):
+        super().__init__()
+        self.dims = dims
+        self.weight = mx.zeros((num, dims // 128 * 28), dtype=mx.uint8)
+
+    def __call__(self, ids):
+        from .ptq1 import dequantize_rows
+        rows = self.weight[ids.reshape(-1)]
+        return dequantize_rows(rows).reshape(*ids.shape, self.dims)
+
+
+class FLinear(nn.Module):
+    """A linear layer the checkpoint stores unquantized (fp16 after loading)."""
+
+    def __init__(self, in_dims, out_dims, bias=False):
+        super().__init__()
+        self.weight = mx.zeros((out_dims, in_dims), dtype=F16)
+        if bias:
+            self.bias = mx.zeros((out_dims,), dtype=F16)
+
+    def __call__(self, x):
+        y = x @ self.weight.T
         if "bias" in self:
             y = y + self.bias
         return y
@@ -219,7 +270,7 @@ class Ops:
     same compiled graph.
     """
 
-    def __init__(self, a, had, bits, gs):
+    def __init__(self, a, had):
         eps = a["rms_norm_eps"]
         nk, nv = a["linear_num_key_heads"], a["linear_num_value_heads"]
         dk, dv = a["linear_key_head_dim"], a["linear_value_head_dim"]
@@ -228,17 +279,27 @@ class Ops:
         inv = dk ** -0.5
         self.had = had
 
-        def qmm(x, w, s, b):
+        def qmm(x, w, s, b, n=None):
+            # What `w` is comes from its shape, so one compiled block serves every layer even when
+            # layers are quantized differently (mixed 4/6/8-bit, float, mx modes).
+            if s is None:
+                if w.dtype == mx.uint8:        # PTQ1_0 packed blocks; n = output rows (the layout pads)
+                    from .ptq1 import linear
+                    return linear(x, w, n)
+                return x @ w.T                 # unquantized weight
+            K = x.shape[-1]
+            bits, gs = w.shape[-1] * 32 // K, K // s.shape[-1]
+            mode = "affine" if b is not None else MX_MODES[(bits, gs)]
             # MLX's small-M kernel re-streams the weights per row (~linear in M),
             # its tiled kernel kicks in at 16 rows and costs about the same for
             # 16..32 rows. Pad 6..15-row inputs (speculative verify) up to 16.
-            rows = x.size // x.shape[-1]
+            rows = x.size // K
             if PAD_MIN <= rows < 16:
-                flat = x.reshape(rows, x.shape[-1])
-                flat = mx.concatenate([flat, mx.zeros((16 - rows, x.shape[-1]), x.dtype)])
-                y = mx.quantized_matmul(flat, w, s, b, transpose=True, group_size=gs, bits=bits)
+                flat = x.reshape(rows, K)
+                flat = mx.concatenate([flat, mx.zeros((16 - rows, K), x.dtype)])
+                y = mx.quantized_matmul(flat, w, s, b, transpose=True, group_size=gs, bits=bits, mode=mode)
                 return y[:rows].reshape(*x.shape[:-1], -1)
-            return mx.quantized_matmul(x, w, s, b, transpose=True, group_size=gs, bits=bits)
+            return mx.quantized_matmul(x, w, s, b, transpose=True, group_size=gs, bits=bits, mode=mode)
 
         def rms(x, w):
             return mx.fast.rms_norm(x, w, eps).astype(F16)
@@ -248,13 +309,13 @@ class Ops:
             return n, had.fwd(n)
 
         def mlp(h, nw, gw, gsc, gb, dw, dsc, db):
-            gu = qmm(had.fwd(rms(h, nw)), gw, gsc, gb)
+            gu = qmm(had.fwd(rms(h, nw)), gw, gsc, gb, 2 * a["intermediate_size"])
             i = gu.shape[-1] // 2
-            return h + qmm(had.fwd(swiglu(gu[..., :i], gu[..., i:])), dw, dsc, db)
+            return h + qmm(had.fwd(swiglu(gu[..., :i], gu[..., i:])), dw, dsc, db, a["hidden_size"])
 
         def gdn_pre(n, nr, conv_state, w, s, b, ba, convw, A_log, dt_bias):
             B, S, _ = n.shape
-            qkvz = qmm(nr, w, s, b)
+            qkvz = qmm(nr, w, s, b, conv_dim + dv * nv)
             qkv, z = qkvz[..., :conv_dim], qkvz[..., conv_dim:]
             beta = mx.sigmoid(ba[..., :nv])
             g = mx.exp(-mx.exp(A_log.astype(F32)) * nn.softplus(ba[..., nv:] + dt_bias))
@@ -279,11 +340,11 @@ class Ops:
         def gdn_post(out, z, normw, x, w, s, b):
             B, S = x.shape[:2]
             o = swiglu(z.reshape(B, S, nv, dv), rms(out, normw)).astype(F16)
-            return x + qmm(had.fwd(o.reshape(B, S, -1)), w, s, b)
+            return x + qmm(had.fwd(o.reshape(B, S, -1)), w, s, b, a["hidden_size"])
 
         def attn_pre(nr, w, s, b, qnw, knw):
             B, L, _ = nr.shape
-            qkv = qmm(nr, w, s, b)
+            qkv = qmm(nr, w, s, b, nh * hd * 2 + 2 * nkv * hd)
             qd, kvd = nh * hd * 2, nkv * hd
             q = qkv[..., :qd].reshape(B, L, nh, 2 * hd)
             gate = q[..., hd:].reshape(B, L, -1)
@@ -295,10 +356,10 @@ class Ops:
         def attn_post(o, gate, x, w, s, b):
             B, _, L, _ = o.shape
             o = o.transpose(0, 2, 1, 3).reshape(B, L, -1)
-            return x + qmm(had.fwd(o * mx.sigmoid(gate)), w, s, b)
+            return x + qmm(had.fwd(o * mx.sigmoid(gate)), w, s, b, a["hidden_size"])
 
         def head(h, nw, w, s, b):
-            return qmm(had.fwd(rms(h, nw)), w, s, b)
+            return qmm(had.fwd(rms(h, nw)), w, s, b, a["vocab_size"])
 
         for name, fn in list(locals().items()):
             if name in ("norm_had", "mlp", "gdn_pre", "gdn_post", "attn_pre", "attn_post", "head"):
@@ -306,7 +367,8 @@ class Ops:
 
 
 def _w(m):
-    return m.weight, m.scales, m.biases
+    # a float module has only a weight: qmm() takes scales=None as "plain matmul"
+    return m.weight, getattr(m, "scales", None), getattr(m, "biases", None)
 
 
 # ───────────────────────────── layers ─────────────────────────────
@@ -316,8 +378,8 @@ class Attention(nn.Module):
         self.nh, self.nkv, self.hd = a["num_attention_heads"], a["num_key_value_heads"], a["head_dim"]
         self.scale = self.hd ** -0.5
         hid = a["hidden_size"]
-        self.qkv_proj = q(hid, self.nh * self.hd * 2 + 2 * self.nkv * self.hd)
-        self.o_proj = q(self.nh * self.hd, hid)
+        self.qkv_proj = q(hid, self.nh * self.hd * 2 + 2 * self.nkv * self.hd, "self_attn.q_proj")
+        self.o_proj = q(self.nh * self.hd, hid, "self_attn.o_proj")
         self.q_norm = RMSNorm(self.hd, a["rms_norm_eps"])
         self.k_norm = RMSNorm(self.hd, a["rms_norm_eps"])
         rp = a["rope_parameters"]
@@ -348,14 +410,15 @@ class GatedDeltaNet(nn.Module):
         dk, dv, nk = a["linear_key_head_dim"], a["linear_value_head_dim"], a["linear_num_key_heads"]
         self.conv_dim = 2 * dk * nk + dv * self.nv
         self.kernel = a["linear_conv_kernel_dim"]
-        self.in_proj_qkvz = q(hid, self.conv_dim + dv * self.nv)
+        self.in_proj_qkvz = q(hid, self.conv_dim + dv * self.nv, "linear_attn.in_proj_qkv")
         # b/a gate projections: float32 in JANG bundles, quantized in mlx-community conversions
-        self.in_proj_ba = q(hid, 2 * self.nv) if ba_quantized else nn.Linear(hid, 2 * self.nv, bias=False)
+        self.in_proj_ba = q(hid, 2 * self.nv, "linear_attn.in_proj_b") if ba_quantized \
+            else nn.Linear(hid, 2 * self.nv, bias=False)
         self.conv1d = nn.Conv1d(self.conv_dim, self.conv_dim, self.kernel, groups=self.conv_dim, bias=False)
         self.dt_bias = mx.ones((self.nv,))
         self.A_log = mx.zeros((self.nv,))
         self.norm = RMSNorm(dv, a["rms_norm_eps"])
-        self.out_proj = q(dv * self.nv, hid)
+        self.out_proj = q(dv * self.nv, hid, "linear_attn.out_proj")
 
     def __call__(self, x, n, nr, ops, cache):
         from .gated_delta import gated_delta_kernel
@@ -376,13 +439,14 @@ class GatedDeltaNet(nn.Module):
 class MLP(nn.Module):
     def __init__(self, a, q):
         super().__init__()
-        self.gate_up_proj = q(a["hidden_size"], 2 * a["intermediate_size"])
-        self.down_proj = q(a["intermediate_size"], a["hidden_size"])
+        self.gate_up_proj = q(a["hidden_size"], 2 * a["intermediate_size"], "mlp.gate_proj")
+        self.down_proj = q(a["intermediate_size"], a["hidden_size"], "mlp.down_proj")
 
 
 class DecoderLayer(nn.Module):
     def __init__(self, a, q, idx, ba_quantized=False):
         super().__init__()
+        q0, q = q, (lambda i, o, name: q0(i, o, f"model.layers.{idx}.{name}"))
         self.is_linear = (idx + 1) % a["full_attention_interval"] != 0
         if self.is_linear:
             self.linear_attn = GatedDeltaNet(a, q, ba_quantized)
@@ -410,22 +474,37 @@ class Positions:
 
 
 class QEmbedding(nn.Module):
-    def __init__(self, num, dims, bits, group_size):
+    def __init__(self, num, dims, bits, group_size, mode="affine"):
         super().__init__()
-        self.bits, self.group_size = bits, group_size
+        self.bits, self.group_size, self.mode = bits, group_size, mode
         self.weight = mx.zeros((num, dims * bits // 32), dtype=mx.uint32)
-        self.scales = mx.zeros((num, dims // group_size), dtype=F16)
-        self.biases = mx.zeros((num, dims // group_size), dtype=F16)
+        if mode == "affine":
+            self.scales = mx.zeros((num, dims // group_size), dtype=F16)
+            self.biases = mx.zeros((num, dims // group_size), dtype=F16)
+        else:
+            self.scales = mx.zeros((num, dims // group_size), dtype=mx.uint8)
 
     def __call__(self, ids):
-        return mx.dequantize(self.weight[ids], self.scales[ids], self.biases[ids],
-                             group_size=self.group_size, bits=self.bits).astype(F16)
+        b = getattr(self, "biases", None)
+        return mx.dequantize(self.weight[ids], self.scales[ids], None if b is None else b[ids],
+                             group_size=self.group_size, bits=self.bits, mode=self.mode).astype(F16)
+
+
+class FEmbedding(nn.Module):
+    """An embedding table the checkpoint stores unquantized."""
+
+    def __init__(self, num, dims):
+        super().__init__()
+        self.weight = mx.zeros((num, dims), dtype=F16)
+
+    def __call__(self, ids):
+        return self.weight[ids].astype(F16)
 
 
 class TextModel(nn.Module):
     def __init__(self, a, q, qe):
         super().__init__()
-        self.embed_tokens = qe(a["vocab_size"], a["hidden_size"])
+        self.embed_tokens = qe(a["vocab_size"], a["hidden_size"], "model.embed_tokens")
         self.layers = [DecoderLayer(a, q, i, a.get("ba_quantized", False)) for i in range(a["num_hidden_layers"])]
         self.norm = RMSNorm(a["hidden_size"], a["rms_norm_eps"])
 
@@ -435,30 +514,54 @@ class LanguageModel(nn.Module):
         super().__init__()
         self.model = TextModel(a, q, qe)
         if not a.get("tie_word_embeddings", False):
-            self.lm_head = q(a["hidden_size"], a["vocab_size"])
+            self.lm_head = q(a["hidden_size"], a["vocab_size"], "lm_head")
 
 
 class Model(nn.Module):
     """Language model (+ optional vision tower) with Hadamard-aware forward."""
 
-    def __init__(self, config, qcfg, vision=None, keys=()):
+    def __init__(self, config, qcfg=None, vision=None, keys=()):
         super().__init__()
         self.args = a = dict(config["text_config"])
         a["ba_quantized"] = any(k.endswith("linear_attn.in_proj_b.scales") for k in keys)
         a.setdefault("head_dim", a["hidden_size"] // a["num_attention_heads"])
         self.config = config
-        bits, gs = qcfg["bits"], qcfg["group_size"]
-        q = lambda i, o: QLinear(i, o, bits, gs)
-        qe = lambda n, d: QEmbedding(n, d, bits, gs)
+        qcfg = qcfg or {}
+        # `keys` is {tensor name: (shape, dtype)} when the loader has the checkpoint's header; each
+        # module's bits / group size / mode are then read off its own tensors (see quant.py).
+        shapes = keys if isinstance(keys, dict) else {}
+        hint = qcfg.get("mode")
+
+        def is_ptq1(name):
+            w = shapes.get(f"language_model.{name}.weight")
+            return w is not None and w[1] == mx.uint8 and f"language_model.{name}.scales" not in shapes
+
+        def q(i, o, name):
+            if is_ptq1(name):
+                return PTQ1Linear(i, o)
+            spec = module_spec(shapes, f"language_model.{name}", i, hint)
+            if spec is None and not shapes and "bits" in qcfg:  # no header available: the global config
+                spec = (qcfg["bits"], qcfg["group_size"], hint or "affine")
+            if spec is None:
+                return FLinear(i, o)
+            return QLinear(i, o, spec[0], spec[1], mode=spec[2])
+
+        def qe(n, d, name):
+            if is_ptq1(name):
+                return PTQ1Embedding(n, d)
+            spec = module_spec(shapes, f"language_model.{name}", d, hint)
+            if spec is None and not shapes and "bits" in qcfg:
+                spec = (qcfg["bits"], qcfg["group_size"], hint or "affine")
+            return FEmbedding(n, d) if spec is None else QEmbedding(n, d, spec[0], spec[1], spec[2])
+
         self.language_model = LanguageModel(a, q, qe)
         if vision is not None:
             self.vision_tower = vision
-        self.qbits, self.qgs = bits, gs
         self.set_hadamard(Identity())
 
     def set_hadamard(self, had):
         self.had = had
-        self.ops = Ops(self.args, had, self.qbits, self.qgs)
+        self.ops = Ops(self.args, had)
 
     @property
     def layers(self):

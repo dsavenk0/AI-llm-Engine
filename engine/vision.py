@@ -12,11 +12,15 @@ import mlx.nn as nn
 import numpy as np
 
 from .model import F16, QLinear
+from .quant import module_spec
 
 
 def make_linear(keys, qcfg, prefix, i, o, bias=True):
     """QLinear if the checkpoint stores this module quantized, else nn.Linear."""
     if f"{prefix}.scales" in keys:
+        if isinstance(keys, dict):  # {name: (shape, dtype)}: read the module's own quantization
+            spec = module_spec(keys, prefix, i, qcfg.get("mode") if qcfg else None)
+            return QLinear(i, o, spec[0], spec[1], bias=bias, mode=spec[2])
         m = qcfg.get(prefix, qcfg)
         return QLinear(i, o, m["bits"], m["group_size"], bias=bias)
     return nn.Linear(i, o, bias=bias)

@@ -60,17 +60,19 @@ def template_thinks_by_default(render):
         return True
 
 
-def sampling_presets(jang, gen):
+def sampling_presets(jang, gen, fallback=None):
     """{thinking: bool -> sampling kwargs}: the bundle's own presets, else its
-    generation_config, else the Qwen3.5 family defaults. Returns (presets, source)."""
+    generation_config, else `fallback` (a {bool: kwargs} pair, or one kwargs dict for both
+    modes; default: the Qwen3.5 family presets). Returns (presets, source)."""
     modes = jang.get("chat", {}).get("sampling_modes") or {}
-    base = {k: gen[k] for k in ("temperature", "top_p", "top_k") if k in gen}
+    base = {k: gen[k] for k in ("temperature", "top_p", "top_k", "min_p") if k in gen}
+    fb = QWEN35_SAMPLING if fallback is None else (fallback if True in fallback else {True: fallback, False: fallback})
     if modes.get("thinking") or modes.get("instruct_nothinking"):
-        return ({True: dict(modes.get("thinking") or base or QWEN35_SAMPLING[True]),
-                 False: dict(modes.get("instruct_nothinking") or base or QWEN35_SAMPLING[False])}, "jang_config")
+        return ({True: dict(modes.get("thinking") or base or fb[True]),
+                 False: dict(modes.get("instruct_nothinking") or base or fb[False])}, "jang_config")
     if base:
         return {True: dict(base), False: dict(base)}, "generation_config"
-    return {True: dict(QWEN35_SAMPLING[True]), False: dict(QWEN35_SAMPLING[False])}, "qwen3.5 defaults"
+    return {True: dict(fb[True]), False: dict(fb[False])}, "family defaults"
 
 
 class Sampler:
@@ -227,13 +229,14 @@ class Engine:
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
                  max_pixels=1024 * 1024, thinking=None, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
-                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, log=print):
+                 disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, ptq1=False, log=print):
         self.path, self.log = path, log
         self.max_context, self.max_tokens, self.prefill_step = max_context, max_tokens, prefill_step  # 0 = auto
         self.max_pixels = max_pixels
         self.thinking, self.effort = thinking, effort
         self.speculative = speculative
         self.think_frac = think_frac  # share of a reply's token budget reasoning may use before forced to close
+        self.ptq1_enabled = ptq1      # experimental: PTQ1_0 (1.75-bit) bundles
         self.mem_limit = mem_limit  # max fraction of system RAM in use (whole machine)
 
         self.sleeping, self.last_used = False, time.time()
@@ -248,7 +251,7 @@ class Engine:
         gen = _json(os.path.join(path, "generation_config.json"))
         self.pp_cfg = _json(os.path.join(path, "preprocessor_config.json"))
         self.sampling, source = sampling_presets(jang, gen)
-        if source == "qwen3.5 defaults":
+        if source == "family defaults":
             log("sampling: the bundle ships no presets — using the Qwen3.5 family defaults "
                 "(temperature 1.0/0.7, top-p 0.95/0.8, top-k 20)")
         for mode in self.sampling.values():  # manual overrides win over the model's presets
@@ -311,7 +314,12 @@ class Engine:
     # ───────────────────────── sleep / wake ─────────────────────────
     def _load_weights(self):
         # vision tower is loaded on the first image request (saves ~0.5 GB for text/code work)
-        self.model, self.config, self.model_bytes = load(self.path, vision=False, log=self.log)
+        self.model, self.config, self.model_bytes = load(self.path, vision=False, log=self.log,
+                                                         ptq1=self.ptq1_enabled)
+        if getattr(self.model, "ptq1", False) and self.speculative:
+            # verifying 2-16 rows would dequantize whole matrices for a few rows of work
+            self.speculative = False
+            self.log("PTQ1 model: speculative decoding turned off (a multi-row pass costs a full dequantization)")
         # Keep the weights resident: without a wired limit macOS may compress or
         # page them out under pressure and decode speed collapses.
         need = self.model_bytes + 0.5 * GiB

@@ -48,7 +48,34 @@ def _split_key(k):
     return head[:j + 1], head[j + 1:], leaf
 
 
-def load(path, vision=True, log=print):
+_ST_DTYPES = {"F32": mx.float32, "F16": mx.float16, "BF16": mx.bfloat16, "U8": mx.uint8, "U32": mx.uint32,
+              "I32": mx.int32, "I8": mx.int8, "BOOL": mx.bool_, "F64": mx.float32}
+
+
+def canonical(k):
+    """Text-only exports name the language model `model.*` / `lm_head.*`; VLM conversions put it
+    under `language_model.`. The engine's modules use the latter, so map the former onto it."""
+    if k.startswith(("model.", "lm_head.")) and not k.startswith("model.visual"):
+        return "language_model." + k
+    return k
+
+
+def read_shapes(files):
+    """{canonical tensor name: (shape, dtype)} from the safetensors headers alone — nothing is
+    read or mapped, so this is cheap even for a multi-GB checkpoint."""
+    import struct
+    shapes = {}
+    for f in files:
+        with open(f, "rb") as fh:
+            n = struct.unpack("<Q", fh.read(8))[0]
+            header = json.loads(fh.read(n))
+        for k, t in header.items():
+            if k != "__metadata__":
+                shapes[canonical(k)] = (tuple(t["shape"]), _ST_DTYPES.get(t["dtype"]))
+    return shapes
+
+
+def load(path, vision=True, log=print, ptq1=False):
     t0 = time.time()
     config = _json(os.path.join(path, "config.json"))
     jang = _json(os.path.join(path, "jang_config.json"))
@@ -59,19 +86,23 @@ def load(path, vision=True, log=print):
     tc = config["text_config"]
     if tc.get("num_experts", 0):
         raise ValueError("MoE Qwen3.5 variants are not supported by this engine")
-    qcfg = config.get("quantization") or config.get("quantization_config")
-    if not qcfg or "bits" not in qcfg:
-        raise ValueError("engine needs an MLX-quantized checkpoint (config.quantization)")
+    qcfg = config.get("quantization") or config.get("quantization_config") or {}
+    is_ptq1 = qcfg.get("format") == "PTQ1_0" or str(config.get("schema", "")).startswith("prism_hadamard_qwen35_ptq1")
+    if is_ptq1 and not ptq1:
+        raise ValueError("this is a PTQ1_0 (1.75-bit ternary) bundle — supported as an experimental option: "
+                         "enable Settings → Advanced → \"Experimental: PTQ1 models\" (or pass --ptq1 on)")
 
     files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
-    index = _json(os.path.join(path, "model.safetensors.index.json")).get("weight_map")
-    keys = set(index) if index else {k for f in files for k in mx.load(f).keys()}
+    if not files:
+        raise ValueError("no .safetensors files in the model folder")
+    shapes = read_shapes(files)
+    keys = set(shapes)
 
     vis = None
     if vision and config.get("vision_config") and any(k.startswith("vision_tower.") for k in keys):
         from .vision import VisionModel
-        vis = VisionModel(config["vision_config"], keys, qcfg)
-    model = Model(config, qcfg, vis, keys)
+        vis = VisionModel(config["vision_config"], shapes, qcfg)
+    model = Model(config, qcfg, vis, shapes)
     from mlx.utils import tree_flatten
     expected_shapes = {k: v.shape for k, v in tree_flatten(model.parameters())}
 
@@ -79,13 +110,23 @@ def load(path, vision=True, log=print):
     layout = jang.get("layout", {})
     shift = layout.get("language_norms") == "zero-centered-runtime-plus-one" or config.get("jang_norms_pre_shifted") is False
     shift_decided = bool(layout.get("language_norms")) or "jang_norms_pre_shifted" in config
+    if is_ptq1:
+        # GGUF-derived: norm weights are already in final form (means 0.8-1.9 in the real file), and
+        # the Hadamard block size is listed per module in config["modules"].
+        shift, shift_decided = False, True
+        blocks = {m.get("block") for m in config.get("modules", []) if m.get("block")}
+        if len(blocks) == 1:
+            had_cfg = {"block_size": blocks.pop()}
+        elif blocks:
+            raise ValueError(f"mixed Hadamard block sizes {sorted(blocks)} are not supported")
 
     signs, pending, loaded = {}, {}, set()
     for f in files:
         shard = mx.load(f)
         out = {}
-        for k in list(shard):
-            v = shard.pop(k)  # drop the shard's reference so fused parts can be freed early
+        for raw in list(shard):
+            v = shard.pop(raw)  # drop the shard's reference so fused parts can be freed early
+            k = canonical(raw)
             if k.startswith("vision_tower.") and vis is None:
                 continue
             if "mtp." in k or k.startswith("model.visual"):
@@ -104,6 +145,10 @@ def load(path, vision=True, log=print):
                     shift_decided = True
                 if shift:
                     v = v + 1.0
+            if (k.endswith(".weight") and v.ndim == 2 and v.dtype in (mx.bfloat16, mx.float32)
+                    and k.startswith("language_model.") and f"{k[:-7]}.scales" not in keys
+                    and not k.endswith(("in_proj_a.weight", "in_proj_b.weight"))):
+                v = v.astype(mx.float16)  # an unquantized linear / embedding: keep the pipeline fp16
             if k.endswith("conv1d.weight") and v.ndim == 3 and v.shape[-1] != 1:
                 v = v.moveaxis(2, 1)
             if k.endswith("patch_embed.proj.weight") and v.ndim == 5 and v.shape[-1] != 3:
@@ -114,6 +159,11 @@ def load(path, vision=True, log=print):
                 slot = pending.setdefault((sp[0], fused, sp[2]), [None] * n)
                 slot[i] = v
                 if all(x is not None for x in slot):
+                    if len({tuple(x.shape[1:]) for x in slot}) > 1 or len({x.dtype for x in slot}) > 1:
+                        raise ValueError(
+                            f"{sp[0]}{fused}.{sp[2]}: the parts of one fused projection must share their bit "
+                            f"width, group size and mode, but have shapes {[tuple(x.shape) for x in slot]} — "
+                            f"this mixed quantization isn't supported (e.g. q_proj 4-bit with k_proj 8-bit)")
                     # materialize now: parts + result live together only for this one tensor
                     fused_arr = mx.concatenate(slot, axis=0)
                     mx.eval(fused_arr)
@@ -121,11 +171,17 @@ def load(path, vision=True, log=print):
                     del pending[(sp[0], fused, sp[2])]
                 continue
             out[k] = v
+        for k in list(out):
+            v = out[k]
+            if v.dtype == mx.uint8 and v.ndim == 2 and len(expected_shapes.get(k, ())) == 4:
+                from .ptq1 import pack
+                out[k] = pack(v)  # row-major PTQ1 blocks -> tiled layout, once, at load
         bad = [k for k, v in out.items() if k in expected_shapes and tuple(v.shape) != tuple(expected_shapes[k])]
         if bad:
             k = bad[0]
             raise ValueError(f"unexpected tensor shape for {k}: {tuple(out[k].shape)} vs {tuple(expected_shapes[k])} "
-                             f"(per-module bit widths are not supported yet)")
+                             f"(the parts of one fused projection — q/k/v, gate/up, qkv/z — must share "
+                             f"their bit width, group size and mode)")
         model.load_weights(list(out.items()), strict=False)
         loaded.update(out)
         # evaluate only this shard's tensors: model.parameters() would also
@@ -155,6 +211,7 @@ def load(path, vision=True, log=print):
     elif signs:
         raise ValueError("bundle ships .signs tensors but declares no Hadamard contract")
 
+    model.ptq1 = is_ptq1
     model.eval()
     nbytes = sum(v.nbytes for _, v in tree_flatten(model.parameters()))
     log(f"loaded {os.path.basename(path.rstrip('/'))}: {nbytes / 2**30:.2f} GiB, "
@@ -174,10 +231,11 @@ def attach_vision(model, path, log=print):
     from .vision import VisionModel
     t0 = time.time()
     config = model.config
-    qcfg = config.get("quantization") or config.get("quantization_config")
+    qcfg = config.get("quantization") or config.get("quantization_config") or {}
     index = _json(os.path.join(path, "model.safetensors.index.json")).get("weight_map") or {}
     keys = {k for k in index if k.startswith("vision_tower.")}
-    vis = VisionModel(config["vision_config"], set(index), qcfg)
+    shapes = read_shapes(sorted(glob.glob(os.path.join(path, "*.safetensors"))))
+    vis = VisionModel(config["vision_config"], shapes, qcfg)
     weights = {}
     for f in sorted({index[k] for k in keys}):
         shard = mx.load(os.path.join(path, f))
