@@ -21,7 +21,7 @@ from collections import deque
 import mlx.core as mx
 
 from . import memory
-from .generate import (ContextError, GiB, MemoryLimitError, Sampler, is_repeating, sampling_presets,
+from .generate import (ContextError, GiB, MemoryLimitError, Sampler, is_looping, is_repeating, sampling_presets,
                        summarize)  # noqa: F401  (summarize is re-exported for the server)
 from . import family
 from .stopfilter import StopFilter
@@ -387,6 +387,7 @@ class CompatEngine:
 
         budget = int(max_tokens * self.think_frac) if thinking_open and self.think_frac else None
         in_think, forced = budget is not None, None
+        looped = [False]
         think_end = self.think_tags[1] if self.think_tags else None
         closing = self.tok.encode(f"\n{think_end}\n\n", add_special_tokens=False) if think_end else []
 
@@ -415,6 +416,12 @@ class CompatEngine:
                 finish = "length"
                 self.log(f"memory: stopped generation at {memory.used_fraction():.0%} RAM")
                 return True, piece
+            if len(out_tokens) % 16 == 0 and not in_think:
+                answer = text[text.rfind(think_end) + len(think_end):] if think_end and think_end in text else text
+                if is_looping(answer):
+                    finish, looped[0] = "stop", True
+                    self.log(f"repetition: the answer was looping; stopped after {len(out_tokens)} tokens")
+                    return True, piece
             return len(out_tokens) >= max_tokens, piece
 
         def think_check():
@@ -477,7 +484,8 @@ class CompatEngine:
             "prefill_s": round(t_prefill, 3), "decode_s": round(t_dec, 3),
             "prefill_tps": round((len(ids) - reused) / t_prefill, 1) if t_prefill > 0 else 0,
             "decode_tps": round(n_out / t_dec, 2) if t_dec > 0 else 0,
-            "finish_reason": finish, "think_forced": forced, "peak_gb": round(mx.get_peak_memory() / GiB, 2),
+            "finish_reason": finish, "think_forced": forced, "loop_stopped": looped[0],
+            "peak_gb": round(mx.get_peak_memory() / GiB, 2),
             "draft_accept": None, "verifies": 0, "ram_used": round(memory.used_fraction(), 3),
         }
         self.stats["requests"] += 1

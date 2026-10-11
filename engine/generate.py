@@ -77,11 +77,13 @@ def sampling_presets(jang, gen, fallback=None):
 
 
 class Sampler:
-    def __init__(self, vocab, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, presence_penalty=0.0, seed=None):
+    def __init__(self, vocab, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, presence_penalty=0.0, seed=None,
+                 repetition_penalty=1.0):
         self.temp, self.top_p, self.top_k, self.min_p = temperature, top_p, top_k, min_p
         self.pp = presence_penalty
+        self.rp = repetition_penalty or 1.0      # >1 discourages every token already generated (HF/llama.cpp rule)
         self.vocab = vocab
-        self.seen = mx.zeros((vocab,), dtype=mx.bool_) if presence_penalty else None
+        self.seen = mx.zeros((vocab,), dtype=mx.bool_) if (presence_penalty or self.rp != 1.0) else None
         self.key = mx.random.key(seed) if seed is not None else None
 
     @property
@@ -96,9 +98,7 @@ class Sampler:
 
     def _dist(self, row):
         """Candidate token ids and their log-weights after penalty/temp/top-k/min-p/top-p."""
-        row = row.astype(mx.float32)
-        if self.seen is not None:
-            row = row - self.pp * self.seen.astype(mx.float32)
+        row = self._penalize(row.astype(mx.float32))
         if self.top_k and self.top_k < self.vocab:
             idx = mx.argpartition(-row, self.top_k - 1)[:self.top_k]
         else:
@@ -113,6 +113,17 @@ class Sampler:
             vals = mx.where(mx.cumsum(probs) - probs > self.top_p, -mx.inf, vals)
         return idx, vals
 
+    def _penalize(self, r):
+        """Presence penalty (subtract) and repetition penalty (divide a positive logit, multiply a negative
+        one) for the tokens generated so far."""
+        if self.seen is None:
+            return r
+        if self.pp:
+            r = r - self.pp * self.seen.astype(mx.float32)
+        if self.rp != 1.0:
+            r = mx.where(self.seen, mx.where(r > 0, r / self.rp, r * self.rp), r)
+        return r
+
     def _mark(self, tok):
         if self.seen is not None:
             self.seen = mx.logical_or(self.seen, mx.arange(self.vocab) == tok)
@@ -121,8 +132,7 @@ class Sampler:
         """Sample from the last position of [1, L, V] logits; returns a lazy scalar."""
         row = logits[0, -1]
         if self.temp <= 0:
-            r = row.astype(mx.float32)
-            tok = mx.argmax(r - self.pp * self.seen.astype(mx.float32) if self.seen is not None else r)
+            tok = mx.argmax(self._penalize(row.astype(mx.float32)))
         else:
             idx, vals = self._dist(row)
             tok = idx[mx.random.categorical(vals, key=self._rand())]
@@ -222,6 +232,25 @@ def is_repeating(tail, min_n=20, max_n=300, long_n=80):
             continue
         chunks = [tail[L - (k + 1) * n: L - k * n] for k in range(reps)]
         if chunks[0].strip() and all(c == chunks[0] for c in chunks[1:]):
+            return True
+    return False
+
+
+def is_looping(tail, min_n=6, max_n=400, window=3000):
+    """True when the answer's end is one chunk repeated back to back — a small model cycling through the
+    same list or sentence until the token limit. Separator lines ("-----", "=====") and other chunks made
+    of a few distinct characters need far more repeats before they count."""
+    tail = tail[-window:]
+    L = len(tail)
+    for n in range(min_n, min(max_n, L // 3) + 1):
+        chunk = tail[L - n:]
+        if not chunk.strip():
+            continue
+        k = 1
+        while (k + 1) * n <= L and tail[L - (k + 1) * n: L - k * n] == chunk:
+            k += 1
+        plain = len(set(chunk)) <= 3
+        if k >= 3 and k * n >= (1800 if plain else 300):
             return True
     return False
 
@@ -629,6 +658,8 @@ class Engine:
         out_tokens, text, finish = [], "", "length"
         stops = StopFilter(stop)
         spec = {"verifies": 0, "drafted": 0, "accepted": 0}
+        looped = [False]
+        in_think = False        # (set below once the budget is known; emit() reads it when it runs)
         t1 = time.time()
 
         def emit(tok):
@@ -654,6 +685,11 @@ class Engine:
             if len(out_tokens) % 32 == 0 and not self._check_memory("decode"):
                 finish = "length"
                 self.log(f"memory: stopped generation at {memory.used_fraction():.0%} RAM")
+                return True, piece
+            if len(out_tokens) % 16 == 0 and not in_think and is_looping(text[text.rfind("</think>") + 8:]
+                                                                         if "</think>" in text else text):
+                finish, looped[0] = "stop", True
+                self.log(f"repetition: the answer was looping; stopped after {len(out_tokens)} tokens")
                 return True, piece
             return len(out_tokens) >= max_tokens, piece
 
@@ -834,7 +870,8 @@ class Engine:
             "prefill_s": round(t_prefill, 3), "decode_s": round(t_dec, 3),
             "prefill_tps": round((len(ids) - reused) / t_prefill, 1) if t_prefill > 0 else 0,
             "decode_tps": round(n_out / t_dec, 2) if t_dec > 0 else 0,
-            "finish_reason": finish, "think_forced": forced, "peak_gb": round(mx.get_peak_memory() / GiB, 2),
+            "finish_reason": finish, "think_forced": forced, "loop_stopped": looped[0],
+            "peak_gb": round(mx.get_peak_memory() / GiB, 2),
             "draft_accept": round(spec["accepted"] / spec["drafted"], 2) if spec["drafted"] else None,
             "verifies": spec["verifies"],
             "ram_used": round(memory.used_fraction(), 3),

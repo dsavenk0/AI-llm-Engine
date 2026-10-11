@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -141,6 +142,32 @@ class TestAgentRestart(unittest.TestCase):
                        {"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
         self.assertFalse(a.save_notes(quiet=True))
         self.assertEqual(memory.load_session(root), "KEEP ME")
+
+
+class TestBigTrees(unittest.TestCase):
+    def test_the_home_folder_is_not_a_project(self):
+        import time
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, "Library", "x"))
+            with open(os.path.join(home, "Library", "x", "f.txt"), "w") as f:
+                f.write("x")
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                t0 = time.time()
+                self.assertEqual(projectmap._files(home), [])
+                self.assertEqual(projectmap.system_block(home), "")
+                self.assertLess(time.time() - t0, 1)
+            self.assertFalse(os.path.exists(os.path.join(home, ".llm")))      # and nothing is written there
+
+    def test_a_huge_tree_without_git_is_cut_short(self):
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(30):
+                os.makedirs(os.path.join(d, f"pkg{i}"))
+                for j in range(40):
+                    open(os.path.join(d, f"pkg{i}", f"m{j}.py"), "w").close()
+            with mock.patch.object(projectmap, "WALK_MAX_FILES", 100):
+                files = projectmap._files(d)
+            self.assertLessEqual(len(files), 140)         # stops at the end of the directory that crossed the cap
+            self.assertGreater(len(files), 0)
 
 
 if __name__ == "__main__":

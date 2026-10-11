@@ -19,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine.generate import Drafter, Sampler, is_repeating, mrope_positions  # noqa: E402
+from engine.generate import Drafter, Sampler, is_looping, is_repeating, mrope_positions  # noqa: E402
 from engine.model import F16, Hadamard, KVCache, MRoPE, QLinear, SSMCache  # noqa: E402
 from engine.server import OutputParser, normalize_messages, parse_tool_calls, resolve_options  # noqa: E402
 
@@ -150,6 +150,38 @@ class TestSampler(unittest.TestCase):
         logits = mx.array([[[2.0, 1.9]]])
         s = Sampler(2, temperature=0, presence_penalty=1.0)
         self.assertEqual([s(logits).item() for _ in range(2)], [0, 1])
+
+
+    def test_repetition_penalty_divides_positive_and_multiplies_negative_logits(self):
+        s = Sampler(2, temperature=0, repetition_penalty=1.5)
+        up = mx.array([[[2.0, 1.9]]])
+        self.assertEqual([s(up).item() for _ in range(2)], [0, 1])      # 2.0 / 1.5 < 1.9 once token 0 is used
+        s = Sampler(2, temperature=0, repetition_penalty=1.5)
+        down = mx.array([[[-1.0, -1.05]]])
+        self.assertEqual([s(down).item() for _ in range(2)], [0, 1])    # -1.0 * 1.5 < -1.05: pushed down, not up
+
+    def test_no_penalties_means_no_state(self):
+        self.assertIsNone(Sampler(4, temperature=0, repetition_penalty=1.0).seen)
+        self.assertIsNotNone(Sampler(4, temperature=0, repetition_penalty=1.1).seen)
+
+
+class TestLoopDetector(unittest.TestCase):
+    def test_a_looping_list_is_caught(self):
+        cycle = "Lisp, ML, Rust, Swift, Go, Rust, Scala, Haskell, OCaml, "
+        self.assertTrue(is_looping("Languages: " + cycle * 8))
+
+    def test_normal_text_and_structured_output_are_not(self):
+        self.assertFalse(is_looping("The quick brown fox jumps over the lazy dog. " * 2 + "Then it sleeps."))
+        self.assertFalse(is_looping(", ".join(str(i) for i in range(300))))
+        rows = "\n".join(f"| item {i} | {i * 7 % 13} | ok |" for i in range(60))
+        self.assertFalse(is_looping(rows))
+        self.assertFalse(is_looping("hi"))
+        self.assertFalse(is_looping("x" * 40))
+
+    def test_separator_lines_need_many_repeats(self):
+        self.assertFalse(is_looping("Title\n" + "=" * 100 + "\n"))
+        self.assertFalse(is_looping("-" * 500))
+        self.assertTrue(is_looping("-" * 3000))              # that is a loop, not a rule
 
 
 class TestDrafter(unittest.TestCase):

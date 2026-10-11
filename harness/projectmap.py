@@ -18,13 +18,24 @@ TEXT_EXT = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".sh", ".js
             ".sql", ".cfg", ".ini", ".mk", ""}
 IMAGES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".icns", ".svg", ".pdf", ".mp4", ".mov")
 MAX_FILES = 600
+WALK_MAX_FILES = 8000        # outside a git repo the tree is walked: stop here …
+WALK_SECONDS = 3.0           # … or after this long (a home folder has millions of files)
 MAX_BYTES = 400_000          # files bigger than this are listed, not read
 PROMPT_CHARS = 4000          # what goes into the system prompt
 DECL = re.compile(r"^\s*(?:export\s+)?(?:public\s+|private\s+|final\s+|async\s+)*"
                   r"(?:def|class|func|function|struct|enum|protocol|interface|fn|type|impl)\s+([A-Za-z_]\w*)", re.M)
 
 
+def is_workspace(root):
+    """False for the home folder and the filesystem root: they are not projects, and mapping them
+    would walk every document and application the user owns."""
+    real = os.path.realpath(root)
+    return real not in (os.path.realpath(os.path.expanduser("~")), os.sep)
+
+
 def _files(root):
+    if not is_workspace(root):
+        return []
     try:
         out = subprocess.run(["git", "-C", root, "ls-files", "-co", "--exclude-standard"], capture_output=True,
                              text=True, timeout=10)
@@ -32,12 +43,16 @@ def _files(root):
             return sorted(p for p in out.stdout.split("\n") if p and not set(p.split("/")[:-1]) & SKIP_DIRS)
     except (OSError, subprocess.TimeoutExpired):
         pass
+    import time
+    deadline = time.monotonic() + WALK_SECONDS
     found = []
     for d, dirs, names in os.walk(root):
         dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
         for n in sorted(names):
             if not n.startswith("."):
                 found.append(os.path.relpath(os.path.join(d, n), root))
+        if len(found) >= WALK_MAX_FILES or time.monotonic() > deadline:
+            break                                  # a partial map is better than a start that never finishes
     return found
 
 

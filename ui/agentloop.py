@@ -121,6 +121,8 @@ class Tools:
         for d, dirs, files in os.walk(base):
             dirs[:] = sorted(x for x in dirs if x not in self.P.skip and not x.startswith("."))
             for f in sorted(files):
+                if self.P.escapes(os.path.join(d, f)):
+                    continue
                 if not pattern or fnmatch.fnmatch(f, pattern):
                     out.append(self.P.rel(os.path.join(d, f)))
                     if len(out) >= 300:
@@ -144,8 +146,13 @@ class Tools:
 
     def edit_file(self, path, old, new, _call_id="", **_):
         full = self.P.resolve(path)
-        with open(full, encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        try:
+            with open(full, encoding="utf-8") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            return f"error: {path} is not UTF-8 text; it is not edited (saving would damage it)"
+        if not old:
+            return "error: `old` is empty; give the exact snippet to replace"
         n = text.count(old)
         if n != 1:
             return f"error: the snippet occurs {n} times in {path}; give a unique exact snippet"
@@ -267,6 +274,8 @@ def run_agent(project, engine_port, messages, emit, run, think=False, auto_edit=
             try:
                 args = json.loads(c["function"].get("arguments") or "{}")
             except ValueError:
+                args = {}
+            if not isinstance(args, dict):
                 args = {}
             emit({"type": "tool", "id": c["id"], "name": name, "category": CATEGORY.get(name, "other"),
                   "args": {k: _short(str(v)) for k, v in args.items() if k not in ("content", "old", "new")}})

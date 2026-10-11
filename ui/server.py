@@ -10,11 +10,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +55,8 @@ class Project:
                 if glob and not fnmatch.fnmatch(f, glob):
                     continue
                 full = os.path.join(d, f)
+                if self.escapes(full):
+                    continue
                 try:
                     if os.path.getsize(full) > MAX_FILE:
                         continue
@@ -83,6 +85,14 @@ class Project:
     def rel(self, full):
         return os.path.relpath(full, self.root)
 
+    def escapes(self, full):
+        """True for a symlink whose target is outside the project: listed or searched, it would show
+        content that read() and the attachments refuse."""
+        if not os.path.islink(full):
+            return False
+        real = os.path.realpath(full)
+        return not (real == self.root or real.startswith(self.root + os.sep)) or ".git" in real.split(os.sep)
+
     # ---- tree / files
     def tree(self, rel=""):
         base = self.resolve(rel)
@@ -107,7 +117,7 @@ class Project:
         for d, dirs, files in os.walk(self.root):
             dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
             for f in sorted(files):
-                if not f.startswith("."):
+                if not f.startswith(".") and not self.escapes(os.path.join(d, f)):
                     out.append(self.rel(os.path.join(d, f)))
                     if len(out) >= limit:
                         return out
@@ -124,7 +134,10 @@ class Project:
             raw = f.read()
         if b"\x00" in raw[:8192]:
             return {"path": self.rel(full), "binary": True, "size": st.st_size}
-        text = raw.decode("utf-8", errors="replace")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return {"path": self.rel(full), "not_utf8": True, "size": st.st_size}
         lang = codeinfo.detect_language(full, text)
         return {"path": self.rel(full), "text": text, "language": lang, "mtime": st.st_mtime_ns,
                 "size": st.st_size, "outline": codeinfo.outline(text, lang),
@@ -138,9 +151,18 @@ class Project:
             raise FileExistsError("the file changed on disk since it was opened")
         os.makedirs(os.path.dirname(full), exist_ok=True)
         tmp = full + ".ui-tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, full)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            if os.path.exists(full):
+                shutil.copymode(full, tmp)          # a saved script stays executable
+            os.replace(tmp, full)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return os.stat(full).st_mtime_ns
 
     # ---- git
@@ -157,8 +179,17 @@ class Project:
     def git_status(self):
         if not self.is_repo():
             return {"repo": False}
-        p = self.git("status", "--porcelain=v1", "-b", check=True)
-        lines = p.stdout.splitlines()
+        p = self.git("status", "--porcelain=v1", "-z", "-b", check=True)
+        lines, items = [], p.stdout.split("\0")
+        i = 0
+        while i < len(items):
+            entry = items[i]
+            i += 1
+            if not entry:
+                continue
+            if entry[:1] in "RC" or entry[1:2] in "RC":       # a rename/copy is followed by its source path
+                i += 1
+            lines.append(entry)
         head = lines[0][3:] if lines else ""
         branch, ahead, behind, upstream = head, 0, 0, None
         m = re.match(r"(.+?)\.\.\.(\S+)(?: \[(.*)\])?$", head)
@@ -175,9 +206,7 @@ class Project:
         files = []
         for line in lines[1:]:
             code, path = line[:2], line[3:]
-            if " -> " in path:
-                path = path.split(" -> ")[1]
-            files.append({"path": path.strip('"'), "index": code[0], "worktree": code[1],
+            files.append({"path": path, "index": code[0], "worktree": code[1],
                           "status": "untracked" if code == "??" else "modified" if "M" in code else
                           "added" if "A" in code else "deleted" if "D" in code else "renamed" if "R" in code else code})
         remotes = self.git("remote").stdout.split()
@@ -198,17 +227,19 @@ class Project:
             raise ValueError("a commit message is required")
         if not self.is_repo():
             raise RuntimeError("not a git repository")
+        only = []
         if all_changes:
             self.git("add", "-A", check=True)
         elif paths:
             for rel in paths:
                 self.resolve(rel, must_exist=False)
             self.git("add", "--", *paths, check=True)
+            only = ["--", *paths]                   # not whatever else happens to be staged already
         else:
             raise ValueError("choose files to commit (or all changes)")
-        if not self.git("diff", "--cached", "--name-only").stdout.strip():
+        if not self.git("diff", "--cached", "--name-only", *only).stdout.strip():
             raise RuntimeError("nothing staged to commit")
-        self.git("commit", "-m", message, check=True)
+        self.git("commit", "-m", message, *only, check=True)
         return self.git("log", "-1", "--format=%h %s").stdout.strip()
 
     def git_push(self, remote=None, branch=None):
@@ -221,6 +252,8 @@ class Project:
         if remote not in st["remotes"]:
             raise ValueError(f"unknown remote {remote!r}")
         branch = branch or st["branch"]
+        if branch.startswith("-") or self.git("check-ref-format", "--branch", branch).returncode != 0:
+            raise ValueError(f"not a branch name: {branch!r}")
         args = ["push", remote, branch] if st["upstream"] else ["push", "-u", remote, branch]
         p = self.git(*args)
         out = (p.stdout + p.stderr).strip()
@@ -268,6 +301,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- helpers
     def _headers(self, code, ctype, length=None, extra=None):
+        self._sent = True
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         if length is not None:
@@ -302,7 +336,12 @@ class Handler(BaseHTTPRequestHandler):
         return secrets.compare_digest(tok or "", self.server.token)
 
     def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ValueError("bad Content-Length")
+        if n < 0:
+            raise ValueError("bad Content-Length")
         if n > MAX_BODY:
             raise ValueError("request body too large")
         raw = self.rfile.read(n) if n else b""
@@ -319,6 +358,7 @@ class Handler(BaseHTTPRequestHandler):
         self._route("PUT")
 
     def _route(self, method):
+        self._sent = False
         if not self._host_ok():
             return self._error(403, "requests must come from localhost")
         u = urllib.parse.urlsplit(self.path)
@@ -350,6 +390,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(504, "git timed out")
         except RuntimeError as e:
             return self._error(500, str(e))
+        except (KeyError, TypeError, AttributeError, IndexError) as e:     # a malformed request body
+            if self._sent:
+                self.close_connection = True
+                return None
+            return self._error(400, f"bad request: {type(e).__name__}: {e}")
 
     # ---- API
     def api_info(self, P, q, body):

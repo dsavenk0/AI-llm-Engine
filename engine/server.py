@@ -346,10 +346,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                     f"but the prompt is {len(ids)} tokens.", err_code="context_length_exceeded")
 
         sampling = dict(ENGINE.sampling[bool(thinking_open)] or {})
-        for k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty"):
+        for k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty"):
             if body.get(k) is not None:
                 sampling[k] = body[k]
-        sampling = {k: v for k, v in sampling.items() if k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty")}
+        sampling = {k: v for k, v in sampling.items()
+                    if k in ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty")}
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         stop = body.get("stop")
         stop = [stop] if isinstance(stop, str) else (stop or None)
@@ -533,7 +534,7 @@ def main():
     ap.add_argument("--disk-cache-dir", default="", help="where the SSD prefix cache lives (default: "
                     "~/.cache/ai-llm-engine/prefix) — point it at a faster/bigger external SSD if you have one")
     tune = ap.add_argument_group("fine tuning (defaults come from the model's presets)")
-    for flag in ("temperature", "top-p", "top-k", "min-p", "presence-penalty"):
+    for flag in ("temperature", "top-p", "top-k", "min-p", "presence-penalty", "repetition-penalty"):
         tune.add_argument(f"--{flag}", type=int if flag == "top-k" else float, default=None)
     tune.add_argument("--draft-max", type=int, default=15, help="longest speculative draft (1..15)")
     tune.add_argument("--ngram-min", type=int, default=2, help="shortest n-gram match that starts a draft (1..4)")
@@ -559,7 +560,8 @@ def main():
                            thinking={"auto": None, "on": True, "off": False}[ARGS.thinking], effort=ARGS.effort,
                            speculative=not ARGS.no_speculative, mem_limit=ARGS.mem_limit,
                            sampling_override={"temperature": ARGS.temperature, "top_p": ARGS.top_p, "top_k": ARGS.top_k,
-                                              "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty},
+                                              "min_p": ARGS.min_p, "presence_penalty": ARGS.presence_penalty,
+                                              "repetition_penalty": ARGS.repetition_penalty},
                            draft_max=ARGS.draft_max, ngram_min=ARGS.ngram_min, cache_limit_mb=ARGS.cache_limit_mb,
                            disk_cache_gb=ARGS.disk_cache_gb, disk_cache_dir=ARGS.disk_cache_dir,
                            think_frac=ARGS.think_frac, ptq1=ARGS.ptq1 == "on",
