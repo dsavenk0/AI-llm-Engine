@@ -112,7 +112,8 @@ def run_tests(cwd, targets, patterns, timeout):
     # mutant makes the run hang, and their open pipes would keep us waiting past the timeout
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             start_new_session=True,
-                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", LLM_HOME=cwd))
+                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", LLM_HOME=cwd,
+                                     HOME=os.path.join(cwd, ".home")))     # a mutant must not write into the real HOME
     try:
         proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

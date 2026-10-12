@@ -248,7 +248,10 @@ class TestReviewFixes(Base):
         self.assertEqual(self.call("POST", "/api/extensions/install",
                                    {"namespace": "../x", "name": "b", "confirm": True})[0], 400)
         self.assertEqual(self.call("POST", "/api/extensions/remove", {"id": "../x"})[0], 400)
-        code, r = self.call("GET", "/api/extensions/snippets?language=python")
+        import tempfile
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"LLM_EXTENSIONS_DIR": tempfile.mkdtemp()}):     # not this Mac's real store
+            code, r = self.call("GET", "/api/extensions/snippets?language=python")
         self.assertEqual((code, r["snippets"]), (200, []))
 
     def test_modes_plan_is_read_only_auto_runs_only_safe_commands_and_manual_asks(self):
@@ -397,7 +400,7 @@ class TestReviewFixes(Base):
         hits = Project(self.root).search_hits("needle", ".")
         self.assertIn(("odd:name.txt", 1, "needle here"), hits)
         code, r = self.call("GET", "/api/search?q=needle")
-        self.assertIn({"path": "odd:name.txt", "line": 1, "text": "needle here"}, r["hits"])
+        self.assertIn({"path": "odd:name.txt", "line": "1", "text": "needle here"}, r["hits"])   # a string: the app decodes one
 
     def test_a_symlink_inside_the_project_is_still_fine(self):
         self.put("real.txt", "inside\n")

@@ -681,7 +681,8 @@ class Handler(BaseHTTPRequestHandler):
         if not pattern:
             raise ValueError("empty query")
         hits = P.search_hits(pattern, q.get("path", "."), q.get("glob"), limit=200)
-        return self._json(200, {"hits": [{"path": p, "line": n, "text": t} for p, n, t in hits]})
+        # `line` stays a string: the editor app decodes it as one (a number here broke its search panel)
+        return self._json(200, {"hits": [{"path": p, "line": str(n), "text": t} for p, n, t in hits]})
 
     def api_agent_answer(self, P, q, body):
         run = agentloop.RUNS.get(body.get("run", ""))
