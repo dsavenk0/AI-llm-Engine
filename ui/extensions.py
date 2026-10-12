@@ -75,7 +75,9 @@ def search(query, size=20, get=fetch):
     q = urllib.parse.urlencode({"query": query, "size": max(1, min(int(size), 50)), "sortBy": "relevance"})
     try:
         data = json.loads(get(f"{API}/-/search?{q}"))
-        listing = data.get("extensions", [])
+        listing = data.get("extensions") or []
+        if not isinstance(listing, list):
+            raise ValueError("extensions is not a list")
     except (ValueError, AttributeError):
         raise ExtensionError("open-vsx.org answered with something unexpected")
     out = []
@@ -202,8 +204,10 @@ def install_vsix(data, expected_sha256=None, dest_root=None):
     """Unpack the declarative parts of a .vsix (bytes). Returns the manifest. Nothing is executed."""
     if len(data) > MAX_VSIX:
         raise ExtensionError("the extension package is too large")
-    if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256.strip().split()[0].lower():
-        raise ExtensionError("the download does not match its published checksum")
+    if expected_sha256 is not None:
+        want = str(expected_sha256).strip().split()
+        if not want or hashlib.sha256(data).hexdigest() != want[0].lower():
+            raise ExtensionError("the download does not match its published checksum")
     try:
         z = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
@@ -246,9 +250,14 @@ def install(namespace, name, version=None, get=fetch):
             raise ExtensionError("invalid extension id")
     if version is not None and not VERSION_RE.match(str(version)):
         raise ExtensionError("invalid version")
-    meta = json.loads(get(f"{API}/{urllib.parse.quote(namespace)}/{urllib.parse.quote(name)}"
-                          + (f"/{urllib.parse.quote(str(version))}" if version else "")))
-    files = meta.get("files") or {}
+    try:
+        meta = json.loads(get(f"{API}/{urllib.parse.quote(namespace)}/{urllib.parse.quote(name)}"
+                              + (f"/{urllib.parse.quote(str(version))}" if version else "")))
+    except ValueError:
+        raise ExtensionError("open-vsx.org answered with something unexpected")
+    if not isinstance(meta, dict):
+        raise ExtensionError("open-vsx.org answered with something unexpected")
+    files = meta.get("files") if isinstance(meta.get("files"), dict) else {}
     if not files.get("download"):
         raise ExtensionError("this extension has no download")
     if not files.get("sha256"):                    # the file comes from a CDN: its checksum is what vouches for it
@@ -287,6 +296,8 @@ def installed(base=None):
             try:
                 with open(p, encoding="utf-8") as f:
                     m = json.load(f)
+                if not isinstance(m, dict):
+                    continue
                 m["folder"] = d
                 out.append(m)
             except (OSError, ValueError):

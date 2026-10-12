@@ -189,5 +189,82 @@ class TestExtensions(unittest.TestCase):
         X._check_url("https://openvsx.eclipsecontent.org/a/b.vsix")               # the CDN open-vsx.org redirects to
 
 
+class TestExtensionsMore(unittest.TestCase):
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+
+    def test_limits_are_what_the_docs_say(self):
+        self.assertEqual((X.MAX_VSIX, X.MAX_MEMBER, X.MAX_UNPACKED), (40 * 2**20, 6 * 2**20, 60 * 2**20))
+
+    def test_search_clamps_its_size_and_survives_odd_answers(self):
+        seen = []
+        get = lambda url, **kw: (seen.append(url), b'{"extensions": []}')[1]
+        X.search("night", size=0, get=get)
+        X.search("night", size=999, get=get)
+        X.search("night", size=7, get=get)
+        self.assertTrue(seen[0].endswith("size=1&sortBy=relevance") or "size=1&" in seen[0])
+        self.assertIn("size=50&", seen[1])
+        self.assertIn("size=7&", seen[2])
+        for body in (b'{"extensions": null}', b'{}', b'[]', b'{"extensions": "x"}', b'{"extensions": {"a": 1}}'):
+            try:
+                self.assertIsInstance(X.search("n", get=lambda url, **kw: body), list)
+            except X.ExtensionError:
+                pass                                                  # a clean error is fine; a crash is not
+
+    def test_an_answer_that_is_not_an_object_or_not_json_is_a_clean_error(self):
+        for body in (b"<html>", b"[1, 2]", b'"x"'):
+            with self.assertRaises(X.ExtensionError, msg=body):
+                X.install("acme", "night", get=lambda url, **kw: body)
+
+    def test_a_blank_checksum_is_a_mismatch_not_a_crash(self):
+        vsix = make_vsix({"themes/night.json": THEME, "snippets/py.json": SNIPPETS})
+        for bad in ("   ", "\n", "deadbeef"):
+            with self.assertRaises(X.ExtensionError, msg=repr(bad)):
+                X.install_vsix(vsix, bad, dest_root=self.base)
+        import hashlib
+        good = hashlib.sha256(vsix).hexdigest()
+        X.install_vsix(vsix, good.upper() + "  night.vsix", dest_root=self.base)      # sha256sum's format, any case
+
+    def test_a_package_that_claims_too_much_or_holds_a_huge_file_is_refused(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("extension/package.json", json.dumps({"name": "n", "publisher": "p",
+                       "contributes": {"themes": [{"label": "L", "path": "./t.json"}]}}))
+            z.writestr("extension/t.json", "x" * (X.MAX_MEMBER + 1))
+        with self.assertRaises(X.ExtensionError):
+            X.install_vsix(buf.getvalue(), dest_root=self.base)
+        self.assertEqual(os.listdir(self.base), [])                                  # nothing half-installed
+
+    def test_jsonc_keeps_escaped_quotes_comment_markers_in_strings_and_a_bom(self):
+        self.assertEqual(X.jsonc('{"a": "he said \\"//hi\\" /* x */", "b": 1 // tail\n}'),
+                         {"a": 'he said "//hi" /* x */', "b": 1})
+        self.assertEqual(X.jsonc("\ufeff{\"a\": 1 /* c */}"), {"a": 1})
+        self.assertEqual(X.jsonc('{"a": [1, {"b": 2,},],}'), {"a": [1, {"b": 2}]})
+
+    def test_installed_skips_manifests_that_are_not_objects(self):
+        for name, body in (("ok.ext-1", '{"id": "ok.ext"}'), ("bad.ext-1", "[1]"), ("worse.ext-1", "{")):
+            os.makedirs(os.path.join(self.base, name))
+            with open(os.path.join(self.base, name, "manifest.json"), "w") as f:
+                f.write(body)
+        got = X.installed(self.base)
+        self.assertEqual([m["id"] for m in got], ["ok.ext"])
+        self.assertEqual(got[0]["folder"], "ok.ext-1")
+
+    def test_an_extension_with_odd_contributions_still_installs_what_is_valid(self):
+        pkg = {"name": "odd", "publisher": "acme", "version": "0.1.0",
+               "contributes": {"themes": ["x", {"path": "./missing.json"}, {"label": "Ok", "path": "./t.json"}],
+                               "snippets": [{"path": "./s.json"}, {"language": "go", "path": "./s.json"}],
+                               "languages": [{"id": "go", "extensions": [".go"], "aliases": ["Go"]}, "x", {}],
+                               "iconThemes": [{"id": "i"}], "debuggers": [{"type": "x"}]}}
+        vsix = make_vsix({"t.json": '{"name": "n", "colors": {}}', "s.json": "{}"}, pkg)
+        m = X.install_vsix(vsix, dest_root=self.base)
+        self.assertEqual([t["label"] for t in m["themes"]], ["Ok"])
+        self.assertEqual([s["language"] for s in m["snippets"]], ["go"])
+        self.assertEqual(m["languages"], [{"id": "go", "extensions": [".go"], "aliases": ["Go"]}])
+        self.assertEqual(m["skipped"], ["debuggers"])                              # iconThemes is declarative, not skipped
+        self.assertFalse(m["has_code"] and "main" not in pkg)
+        self.assertEqual(m["version"], "0.1.0")
+
+
 if __name__ == "__main__":
     unittest.main()
