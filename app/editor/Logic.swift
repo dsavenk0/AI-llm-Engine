@@ -713,3 +713,42 @@ enum ContextMeter {
         n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
     }
 }
+
+// MARK: - several terminals in the bottom panel
+
+/// The tabs of the integrated terminal: which exist, which is shown, and what they are called. Each tab keeps a
+/// number that is never reused while the panel lives, so closing "zsh 2" and opening another does not make two
+/// tabs with the same name, and a session can be found again by it.
+struct TerminalTabs: Equatable {
+    private(set) var serials: [Int] = [1]
+    private(set) var active = 0
+    private var next = 2
+
+    var count: Int { serials.count }
+    var activeSerial: Int { serials[active] }
+
+    mutating func add() {
+        serials.append(next)
+        next += 1
+        active = serials.count - 1
+    }
+
+    mutating func select(_ i: Int) {
+        if serials.indices.contains(i) { active = i }
+    }
+
+    /// Closes tab `i`; false (nothing changes) for the last one — a panel always has a shell.
+    @discardableResult
+    mutating func close(_ i: Int) -> Bool {
+        guard serials.count > 1, serials.indices.contains(i) else { return false }
+        serials.remove(at: i)
+        if active > i { active -= 1 } else if active >= serials.count { active = serials.count - 1 }
+        return true
+    }
+
+    func title(_ i: Int, shell: String) -> String {
+        let name = (shell as NSString).lastPathComponent
+        guard serials.indices.contains(i) else { return name }
+        return serials[i] == 1 ? name : "\(name) \(serials[i])"
+    }
+}

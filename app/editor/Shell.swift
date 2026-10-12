@@ -302,10 +302,38 @@ private struct BottomPanel: View {
 
 private struct TerminalPanel: View {
     @ObservedObject var ws: Workspace
+    private var shell: String { ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh" }
+
+    /// A slim strip of terminals: one per tab, the shown one underlined, and a plus for another shell.
+    private var tabs: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(ws.terminalTabs.serials.enumerated()), id: \.element) { i, _ in
+                let on = i == ws.terminalTabs.active
+                HStack(spacing: 4) {
+                    Text(ws.terminalTabs.title(i, shell: shell)).font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(on ? .primary : .secondary)
+                    if ws.terminalTabs.count > 1 {
+                        Button { ws.closeTerminal(at: i) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
+                            .buttonStyle(.plain).foregroundColor(.secondary).help("Close this terminal")
+                    }
+                }
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5).fill(on ? Color.primary.opacity(0.08) : .clear))
+                .contentShape(Rectangle())
+                .onTapGesture { ws.terminalTabs.select(i) }
+            }
+            Button { ws.newTerminal() } label: { Image(systemName: "plus").font(.system(size: 10, weight: .semibold)) }
+                .buttonStyle(.plain).foregroundColor(.secondary).help("New terminal")
+            Spacer()
+        }.padding(.horizontal, 8).padding(.vertical, 3)
+    }
+
     var body: some View {
         let s = ws.terminalSession()
         VStack(spacing: 0) {
-            TerminalModuleView(session: s)
+            tabs
+            Divider()
+            TerminalModuleView(session: s).id(ws.terminalTabs.activeSerial)
             Divider()
             HStack {
                 Spacer()

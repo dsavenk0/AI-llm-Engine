@@ -86,6 +86,20 @@ func runSelfTest(_ ws: Workspace, root: String) {
         ws.askAboutTerminal(term.buffer.text)
         check(ws.draft.contains("pty_42_ok") && ws.draft.contains("terminal"), "terminal output can be sent to the assistant")
 
+        // a second terminal is its own shell: its output does not appear in the first, and closing it keeps the first
+        ws.newTerminal()
+        let term2 = ws.terminalSession()
+        check(term2 !== term && ws.terminalTabs.count == 2 && ws.terminalTabs.active == 1, "a new terminal is another session, shown")
+        term2.start()
+        term2.send("echo second_$((5*5))_shell\r")
+        for _ in 0..<80 where !term2.buffer.text.contains("second_25_shell") { try? await Task.sleep(nanoseconds: 100_000_000) }
+        check(term2.buffer.text.contains("second_25_shell") && !term.buffer.text.contains("second_25_shell"),
+              "the second shell ran its own command; the first did not see it")
+        ws.closeTerminal(at: 1)
+        check(ws.terminalTabs.count == 1 && ws.terminalSession() === term && term.running, "closing it returns to the first, still running")
+        ws.closeTerminal(at: 0)
+        check(ws.terminalTabs.count == 1, "the last terminal cannot be closed")
+
         // attachments: in the project → by path; elsewhere → its text; a binary file or an unreadable one → refused
         let realRoot = (root as NSString).resolvingSymlinksInPath
         let outside = NSTemporaryDirectory() + "llm-selftest-outside.txt"

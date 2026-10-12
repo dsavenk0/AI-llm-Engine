@@ -144,15 +144,29 @@ final class Workspace: ObservableObject {
     @Published var bottomVisible = false
     @Published var bottomTab = "problems"
     @Published var leftTab = 0                // 0 Files, 1 Changes (the IDE layout's left column)
-    private var terminal: TerminalSession?
+    @Published var terminalTabs = TerminalTabs()
+    private var terminals: [Int: TerminalSession] = [:]      // by the tab's serial number
 
-    /// The shell is created the first time the panel asks for it (and only then started).
-    func terminalSession() -> TerminalSession {
-        if let t = terminal, t.cwd == root { return t }
-        terminal?.stop()
+    /// The shown shell, created the first time the panel asks for it (and only then started).
+    func terminalSession() -> TerminalSession { terminalSession(serial: terminalTabs.activeSerial) }
+
+    func terminalSession(serial: Int) -> TerminalSession {
+        if let t = terminals[serial], t.cwd == root { return t }
+        terminals[serial]?.stop()
         let t = TerminalSession(cwd: root)
-        terminal = t
+        terminals[serial] = t
         return t
+    }
+
+    func newTerminal() { terminalTabs.add() }
+
+    func closeTerminal(at index: Int) {
+        guard terminalTabs.serials.indices.contains(index) else { return }
+        let serial = terminalTabs.serials[index]
+        if terminalTabs.close(index) {
+            terminals[serial]?.stop()
+            terminals[serial] = nil
+        }
     }
     func showPanel(_ tab: String) { bottomTab = tab; bottomVisible = true }
     func recountProblems() {
@@ -237,7 +251,7 @@ final class Workspace: ObservableObject {
         }
     }
 
-    func shutdown() { pollTask?.cancel(); terminal?.stop(); backend.stop() }
+    func shutdown() { pollTask?.cancel(); terminals.values.forEach { $0.stop() }; backend.stop() }
 
     private func startPolling() {
         pollTask?.cancel()
