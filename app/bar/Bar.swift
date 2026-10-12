@@ -1251,14 +1251,9 @@ struct ModelsTab: View {
                 ForEach(e.models) { m in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            Button(action: { e.setFavorite(m, !m.favorite) }) {
-                                Image(systemName: m.favorite ? "star.fill" : "star").font(.system(size: 11))
-                                    .foregroundColor(m.favorite ? HUD.yellow : HUD.dim)
-                            }.buttonStyle(.plain)
-                                .help(m.favorite ? L("Remove from favourites", "Убрать из избранного") : L("Add to favourites", "Добавить в избранное"))
-                            StateDot(active: m.path == e.modelPath, color: m.path == e.modelPath ? HUD.phosphor : HUD.dim, size: 8)
+                            StateDot(active: m.path == e.modelPath, color: m.path == e.modelPath ? HUD.phosphor : HUD.dim, size: 7)
                             VStack(alignment: .leading, spacing: 1) {
-                                MarqueeText(text: m.name, font: .system(size: 12, weight: .medium), color: HUD.text,
+                                MarqueeText(text: (m.favorite ? "★ " : "") + m.name, font: .system(size: 12, weight: .medium), color: HUD.text,
                                             active: hoverRow == m.path)
                                 MarqueeText(text: "\(String(format: "%.1f", m.size)) GB · \(m.format)" + note(m),
                                             font: HUD.mono(9), color: m.supported ? HUD.dim : HUD.magenta, active: hoverRow == m.path)
@@ -1280,6 +1275,8 @@ struct ModelsTab: View {
                                 if m.supported {
                                     Button(L("Model settings…", "Настройки модели…")) { editing = editing == m.path ? nil : m.path }
                                 }
+                                Button(m.favorite ? L("Remove from favourites", "Убрать из избранного")
+                                                  : L("Add to favourites", "Добавить в избранное")) { e.setFavorite(m, !m.favorite) }
                                 Button(L("Delete from disk…", "Удалить с диска…"), role: .destructive) { confirmDelete(m) }
                                     .disabled(m.path == e.modelPath && e.running)
                             } label: { Image(systemName: "ellipsis.circle") }
