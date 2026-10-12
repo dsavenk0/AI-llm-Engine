@@ -694,10 +694,12 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return msg["content"] as? String
     }
 
-    /// Does this exchange need the internet? Returns the search text, or nil. The model is asked (with
-    /// examples — a small one answers NO to everything otherwise), and obvious freshness cues in the question
-    /// decide on their own when it stays silent: then the question itself is the query.
+    /// Does this message call for the internet? Only on a clear request ("найди в интернете…") or a clear sign that
+    /// the answer changes (today, weather, price, score…) — decided by the words, not by a small model's guess,
+    /// so a greeting never waits for a lookup. Then the model is asked for a good query (the question itself is
+    /// the fallback). Returns the search text, or nil.
     private func webQuery(_ history: [[String: Any]], question: String) async -> String? {
+        guard WebLookup.wantsSearch(question) else { return nil }
         let ask = "Today is \(Voice.today). You read the user's message and reply with exactly one line: NO if it "
             + "can be answered from general knowledge, or a short web search query (at most 8 words) if it asks for "
             + "current, recent, live or very specific facts (news, weather, prices, scores, schedules, releases, who "
@@ -712,8 +714,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         var messages: [[String: Any]] = [["role": "system", "content": ask]]
         for (q, a) in shots { messages += [["role": "user", "content": q], ["role": "assistant", "content": a]] }
         messages += Array(history.suffix(4))
-        if let reply = await complete(messages, maxTokens: 32), let q = WebLookup.query(from: reply) { return q }
-        return WebLookup.needsFresh(question) ? String(question.prefix(120)) : nil
+        // a good query when the model gives one — never one copied from the examples above
+        if let reply = await complete(messages, maxTokens: 32), let q = WebLookup.query(from: reply),
+           !shots.contains(where: { $0.1.caseInsensitiveCompare(q) == .orderedSame }) { return q }
+        return String(question.prefix(120))
     }
 
     /// Runs the search (`llm web search`) and turns what came back into text for the system prompt.

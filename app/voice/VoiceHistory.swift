@@ -135,25 +135,49 @@ enum WebLookup {
         // English
         "today", "tonight", "tomorrow", "yesterday", "right now", "currently", "current ", "latest", "newest", "recent",
         "news", "weather", "forecast", "temperature in", "price of", "prices", "stock", "exchange rate", "score",
-        "who won", "winner", "standings", "schedule", "release date", "when does", "when is the next", "this week",
+        "who won", "winner", "standings", "release date", "when does", "when is the next", "this week",
         "this month", "this year", "breaking", "trending", "live ", "who is the president", "who is the prime minister",
         "who is the ceo", "who is the mayor", "how much is", "how much does",
         // Russian
-        "сегодня", "сейчас", "завтра", "вчера", "послед", "новост", "погод", "прогноз", "курс ", "цена", "цены",
-        "стоимость", "сколько стоит", "кто выиграл", "счёт", "счет матча", "результат", "расписание", "когда выйдет",
-        "в этом году", "на этой неделе", "текущ", "актуальн", "сегодняшн", "кто президент", "кто премьер",
+        "сегодня", "сейчас", "завтра", "вчера", "последн", "новост", "погод", "прогноз", "курс ", "цена", "цены",
+        "стоимость", "сколько стоит", "кто выиграл", "какой счёт", "счет матча", "расписание рейс", "когда выйдет",
+        "в этом году", "на этой неделе", "сегодняшн", "кто президент", "кто премьер",
         // German, French, Spanish
         "heute", "aktuell", "wetter", "nachrichten", "preis", "aujourd'hui", "actuel", "météo", "actualités", "prix",
-        "hoy", "actual", "noticias", "clima", "precio", "mañana",
+        "noticias", "precio", "mañana",
+    ]
+    /// Words that ask for a lookup outright.
+    private static let explicitPhrases: [String] = [
+        "в интернете", "в интернет", "в сети", "в гугл", "загугли", "погугли", "поищи", "найди в", "найти в",
+        "посмотри в", "проверь в", "в поисковик", "search the web", "search online", "search for", "look it up",
+        "look up", "google it", "google for", "check online", "check the web", "on the internet", "browse the",
+        "im internet", "suche im", "recherche sur", "busca en internet",
     ]
 
     /// Does the question ask for something that changes (news, weather, prices, scores, "today", this or last
     /// year)? A small local model is unreliable at deciding this alone, so these signs decide too.
     static func needsFresh(_ question: String, year: Int = Calendar.current.component(.year, from: Date())) -> Bool {
         let q = " " + question.lowercased() + " "
-        if freshWords.contains(where: { q.contains($0) }) { return true }
+        // a cue counts at the start of a word ("послед" in "последние новости", not inside another word)
+        let spaced = " " + String(q.map { $0.isLetter || $0.isNumber || $0 == "'" ? $0 : " " }) + " "
+        if freshWords.contains(where: { w in
+            let t = w.trimmingCharacters(in: .whitespaces)
+            return t.contains(" ") ? q.contains(t) : spaced.contains(" " + t)
+        }) { return true }
         for y in (year - 1)...(year + 1) where q.contains(String(y)) { return true }
         return false
+    }
+
+    /// The person asked for a search in so many words ("найди в интернете…", "search the web for…").
+    static func explicitRequest(_ question: String) -> Bool {
+        let q = " " + question.lowercased() + " "
+        return explicitPhrases.contains { q.contains($0) }
+    }
+
+    /// Search only on a clear request or a clear sign that the answer changes; a greeting, a thanks, a general
+    /// question or a chat about the weather of ideas never triggers one (and costs no extra model call).
+    static func wantsSearch(_ question: String, year: Int = Calendar.current.component(.year, from: Date())) -> Bool {
+        explicitRequest(question) || needsFresh(question, year: year)
     }
 
     /// The JSON line `llm web search` prints.

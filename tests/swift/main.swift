@@ -404,6 +404,7 @@ check(fs_rs.row <= 2 && fs_rs.col <= 9, "…and the cursor stays inside it")
 let fs_tab = screen("\(ESC)[?1049ha\tb")
 eq(fs_tab.lineText(0), "a       b", "a fs_tab moves to the next stop on the grid")
 
+eq(AgentEvent.parse(line: #"data: {"type":"note","text":"Small model"}"#), .note("Small model"), "a note event")
 // when a message is about the open file
 for q in ["проверь код", "Check this code", "fix the bug", "объясни, что делает эта функция", "review Tests/GreeterTests.swift",
           "почему тест падает?", "can you refactor it", "what does `run` return"] {
@@ -412,6 +413,18 @@ for q in ["проверь код", "Check this code", "fix the bug", "объяс
 for q in ["привет", "hello", "what is the capital of France?", "расскажи анекдот", "thanks", "спасибо большое"] {
     check(!OpenFileIntent.refers(to: q), "not about it: \(q)")
 }
+
+// a lookup only on a clear request or a clear sign
+for q in ["привет", "hello", "как дела?", "спасибо", "расскажи анекдот", "что такое фотосинтез?", "write a haiku about the sea",
+          "объясни последовательность Фибоначчи", "thanks a lot", "what is a noun?", "hoyo"] {
+    check(!WebLookup.wantsSearch(q, year: 2026), "no lookup: \(q)")
+}
+for q in ["найди в интернете рецепт борща", "поищи отзывы о MacBook Air M5", "search the web for swift concurrency",
+          "look it up please", "какая погода сегодня в Лиссабоне?", "курс доллара", "who won the match yesterday",
+          "последние новости", "загугли это", "what happened in 2026"] {
+    check(WebLookup.wantsSearch(q, year: 2026), "lookup: \(q)")
+}
+check(WebLookup.explicitRequest("Search online for it") && !WebLookup.explicitRequest("it is online"), "explicit request words")
 
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)
