@@ -130,7 +130,7 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 ### Menu-bar app (optional)
 
 ```sh
-./build-app.sh && open LLMBar.app      # app with icon (~2.5 MB, engine + CLI bundled)
+./build-app.sh && open LLMBar.app      # ONE app: panel + editor + voice chat + widget (engine + CLI bundled)
 ./build-dmg.sh                         # docs/LLMBar-1.0.dmg — drag-to-Applications installer
 ```
 
@@ -259,10 +259,11 @@ Your own `~/.llm/` configs are not asked about.
 
 ### Code editor (optional, native)
 
-`./build-editor.sh` builds `LLMEditor.app` (LLMBar's `build-app.sh` bundles it too). LLMBar's `</>` button (header) and
-the *Code editor* tool open it, each time in a new window; `./llm ui [folder]` does the same from the terminal. It is a
-separate Swift app that only runs while you use it, and its parts are independent modules you can switch off
-(Files, Outline, Changes/git, Assistant, Problems, Terminal):
+The editor is a **module of the one LLMBar app** (`./build-app.sh` builds it; there is no separate editor app). LLMBar's
+`</>` button (header) and the *Code editor* tool open it, each time in a new window; `./llm ui [folder]` does the same
+from the terminal (it sends the `llmbar://editor?root=…` link). Nothing of it is created until the first window, it can be
+switched off as a whole in LLMBar's settings (*Code editor module*), and its own parts are modules too (Files, Outline,
+Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one setting for everything:
 
 - **Two layouts:** chat-first (chats, the conversation with *Explored…* activity, questions with options, approvals,
   files on the right) and a classic editor (file tree, tabs, outline, assistant). Switch with ⌘E.
@@ -306,11 +307,11 @@ the project) that the app starts and stops itself.
 
 ### LLM Voice (optional, native)
 
-A small separate app: a **quick chat that works as a voice assistant by default** — it listens when it opens, you
-speak, it answers short and aloud; or type, and attach files and pictures to a message (text files are sent with it,
-pictures go as image parts and are dropped with a note if the model has no vision). It is not part of LLMBar or the
-editor and only runs while you use it: LLMBar's tool row has a button for it, and `./build-voice.sh` builds
-`LLMVoice.app` (`build-app.sh` bundles it too). Speech goes through the system recogniser (on-device when the language
+A **module of the same LLMBar app**: a quick chat that works as a voice assistant by default — it listens when it
+opens, you speak, it answers short and aloud; or type, and attach files and pictures to a message (text files are sent
+with it, pictures go as image parts and are dropped with a note if the model has no vision). Its window exists only
+while you use it: LLMBar's header and tool row have a button for it, it can be switched off in the settings (*Voice chat
+module*), and it follows LLMBar's light / dark theme. Speech goes through the system recogniser (on-device when the language
 supports it), spoken answers use the system voice; the model is the engine's usual one — the app starts the selected
 model (or the first installed one that fits) through the same `llm` command when none is running. It is an ordinary
 window — close and minimise buttons, resizable, *Keep on top* in its menu — in LLMBar's glass style (light, dark or
@@ -321,11 +322,11 @@ there is a progress bar with the bytes the engine process holds so far, and a sl
 **Desktop widget** (macOS 14+): the app carries a WidgetKit extension in two sizes. The small one is the orb: a click
 opens the chat, the app starts the model and listens at once. The wide one shows the selected model and whether it is
 up, a large sphere (a click opens the voice chat), a power button that turns the model on or off **in the
-background** (the app starts without a window, runs `llm start` / `llm stop`, and quits), and three icons — voice
-assistant, editor, terminal CLI — each of which starts loading the model ahead of use, so it is ready when the window
-is. WidgetKit lists extensions only of apps that live in
-`/Applications`, so `./build-voice.sh --install` builds the app, copies it there and registers the widget; then
-right-click the desktop → *Edit Widgets* → *LLM Voice*. It is signed ad hoc (no developer account), so it works on
+background** (the already running app runs `llm start` / `llm stop`; no window), and three icons — voice assistant,
+editor, terminal CLI — each of which starts loading the model ahead of use, so it is ready when the window is. The
+widget's taps are `llmbar://` links into the one app. WidgetKit lists extensions only of apps that live in
+`/Applications`, so `./build-app.sh --install` builds the app, copies it there and registers the widget; then
+right-click the desktop → *Edit Widgets* → *LLMBar*. It is signed ad hoc (no developer account), so it works on
 the Mac that built it.
 
 ### Benchmarks
@@ -437,7 +438,7 @@ llm.py    CLI / menu (stdlib only) — locales/ru.json for Russian
 agent.py  terminal coding agent (stdlib only) · harness/ optional web / MCP / memory / compaction / fix-tests modules
 app/      LLMBar.swift (menu-bar app) · editor/ (LLM Editor) · voice/ (LLM Voice)
 tools/    icon / DMG background / banner generators (Swift)
-build-app.sh, build-editor.sh, build-voice.sh, build-dmg.sh
+build-app.sh (one app: panel + editor + voice + widget), build-dmg.sh
 tests/    unittest suite · perf.py + perf_baseline.json · eval.py + eval_baseline.json
 ```
 

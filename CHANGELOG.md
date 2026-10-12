@@ -5,6 +5,13 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
 ## Unreleased — 12 October
 
+### Changed — one app
+- LLMBar, the editor and the voice chat are **one app** (`LLMBar.app`, one process) split into modules: the panel,
+  the editor and the voice chat are switched on and off in the settings, create nothing until opened, and share one
+  theme (LLMBar's). `build-editor.sh` and `build-voice.sh` are gone: `./build-app.sh` builds everything, the desktop
+  widget included, and `./build-app.sh --install` puts it in /Applications. Links are `llmbar://…`.
+- LLMBar opens expanded at launch.
+
 ### Added
 - **GGUF on the engine's own MLX decoder** (llama / Qwen2 / Qwen3 families; Q4_0…Q8_0, Q4_K, Q5_K, Q6_K): weights are
   repacked into MLX quantization on load, tokenizer and chat template come from the file. Anything else still runs
