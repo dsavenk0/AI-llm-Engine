@@ -14,6 +14,8 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Widget**: the wide widget stars a favourite model, and with two or more favourites a tap on the name switches to
+  the next one (`./llm fav --next`; a running engine restarts on it).
 - **Editor: Command Palette** (⇧⌘P, View menu): type a few letters ("zi", "term", "newt") to find any command of the
   File and View menus and the Modules switches — the list is the menus themselves, with their shortcuts, so it
   never offers anything they do not.

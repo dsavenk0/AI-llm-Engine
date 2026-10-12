@@ -697,6 +697,26 @@ class TestFavouriteModels(unittest.TestCase):
     def names(self):
         return [m["name"] for m in llm.scan_models(self.cfg)]
 
+    def test_next_favourite_wraps_and_starts_with_the_first(self):
+        self.assertEqual(llm.next_favorite(["a", "b", "c"], "a"), "b")
+        self.assertEqual(llm.next_favorite(["a", "b", "c"], "c"), "a")
+        self.assertEqual(llm.next_favorite(["a", "b"], "zzz"), "a")           # the current one is not a favourite
+        self.assertIsNone(llm.next_favorite(["a"], "a"))                      # nothing to switch to
+        self.assertEqual(llm.next_favorite(["a"], "b"), "a")
+        self.assertIsNone(llm.next_favorite([], "a"))
+
+    def test_fav_next_selects_the_next_usable_favourite(self):
+        from unittest import mock
+        self.cfg["favorites"] = [self.paths["alpha"], self.paths["gamma"], self.paths["beta"]]   # gamma is unsupported
+        self.cfg["model"] = self.paths["alpha"]
+        with mock.patch.object(llm, "choose_model", return_value=True) as ch:
+            self.assertTrue(llm.fav_cmd(self.cfg, ["--next"]))
+        ch.assert_called_once_with(self.cfg, self.paths["beta"])               # gamma is skipped
+        self.cfg["favorites"] = [self.paths["alpha"]]
+        with mock.patch.object(llm, "choose_model", return_value=True) as ch:
+            self.assertFalse(llm.fav_cmd(self.cfg, ["--next"]))
+        ch.assert_not_called()
+
     def test_the_default_is_no_favourites_and_the_flag_is_false(self):
         self.assertTrue(all(m["favorite"] is False for m in llm.scan_models(self.cfg)))
         self.assertEqual(llm.DEFAULTS["favorites"], [])

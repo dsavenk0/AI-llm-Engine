@@ -249,5 +249,6 @@
   "Python installed:": "Python установлен:",
   "No internet connection — the engine libraries must be downloaded (~300 MB).": "Нет подключения к интернету — нужно скачать библиотеки движка (~300 МБ).",
   "Connect to the network (or set the proxy in Settings) and start again.": "Подключитесь к сети (или задайте прокси в настройках) и запустите снова.",
-  "No internet connection — Python (about 35 MB) must be downloaded.": "Нет подключения к интернету — нужно скачать Python (около 35 МБ)."
+  "No internet connection — Python (about 35 MB) must be downloaded.": "Нет подключения к интернету — нужно скачать Python (около 35 МБ).",
+  "No other favourite model to switch to.": "Нет другой избранной модели для переключения."
 }

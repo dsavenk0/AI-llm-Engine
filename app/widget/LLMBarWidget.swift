@@ -11,6 +11,8 @@ struct OrbEntry: TimelineEntry {
     let running: Bool            // the engine answers on its port
     let russian: Bool
     var asleep = false           // the engine runs but the weights are unloaded (idle sleep)
+    var favorite = false         // the selected model is starred
+    var cycles = false           // two or more favourites: a tap on the name switches to the next one
     var phase = 0.0              // which frame of the slow animation this entry is
     var gpu: Double = 0          // 0…1, GPU device utilisation (IOAccelerator)
     var ramUsed: Double = 0      // bytes in use: wired + active + compressed
@@ -65,6 +67,7 @@ enum Status {
         let path = c["model"] as? String ?? ""
         let name = (path as NSString).lastPathComponent
         let ru = (c["lang"] as? String) == "ru"
+        let favs = (c["favorites"] as? [String]) ?? []
         let port = c["port"] as? Int ?? 8090
         var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/health")!)
         req.timeoutInterval = 1.2
@@ -74,6 +77,7 @@ enum Status {
             let health = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             let asleep = (health?["state"] as? String) == "sleeping"
             completion(OrbEntry(date: Date(), model: name, running: up, russian: ru, asleep: asleep,
+                                favorite: favs.contains(path), cycles: favs.count >= 2,
                                 gpu: up && !asleep ? Metrics.gpu() : 0, ramUsed: Metrics.ramUsed()))
         }.resume()
     }
@@ -101,7 +105,8 @@ struct OrbProvider: TimelineProvider {
             for i in 0..<12 {
                 var f = entry
                 f = OrbEntry(date: Date().addingTimeInterval(Double(i) * 10), model: entry.model, running: true,
-                             russian: entry.russian, asleep: false, phase: Double(i) * 0.45,
+                             russian: entry.russian, asleep: false, favorite: entry.favorite, cycles: entry.cycles,
+                             phase: Double(i) * 0.45,
                              gpu: entry.gpu, ramUsed: entry.ramUsed, ramTotal: entry.ramTotal)
                 frames.append(f)
             }
@@ -216,6 +221,19 @@ struct OrbWidgetView: View {
         }
     }
 
+    /// The selected model, starred when it is a favourite; with two or more favourites a tap switches to the next.
+    @ViewBuilder private var modelName: some View {
+        let label = entry.model.isEmpty ? (entry.russian ? "МОДЕЛЬ НЕ ВЫБРАНА" : "NO MODEL SELECTED")
+                                        : (entry.favorite ? "★ " : "") + entry.model
+        if entry.cycles {
+            Link(destination: URL(string: "llmbar://model?next=favorite")!) {
+                Text(label).lineLimit(1).truncationMode(.middle)
+            }
+        } else {
+            Text(label).lineLimit(1).truncationMode(.middle)
+        }
+    }
+
     var body: some View {
         Group {
             if family == .systemMedium {
@@ -225,8 +243,7 @@ struct OrbWidgetView: View {
                             Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 1.2).opacity(entry.active ? 0 : 1)
                             Circle().fill(mint).opacity(entry.active ? 1 : 0)
                         }.frame(width: 8, height: 8)
-                        Text(entry.model.isEmpty ? (entry.russian ? "МОДЕЛЬ НЕ ВЫБРАНА" : "NO MODEL SELECTED") : entry.model)
-                            .lineLimit(1).truncationMode(.middle)
+                        modelName
                         Spacer(minLength: 4)
                         Link(destination: URL(string: "llmbar://toggle")!) {      // the model on / off, in the background
                             HStack(spacing: 4) {

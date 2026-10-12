@@ -2,6 +2,7 @@
 // icon, which main menu is showing, and where a link (the widget's, `./llm ui`) goes. The modules themselves never
 // know about each other.
 import AppKit
+import WidgetKit
 
 @MainActor
 enum AppHost {
@@ -86,6 +87,8 @@ enum AppHost {
         switch what {
         case "toggle":
             toggleModel()
+        case "model":                                              // the widget's model name: the next favourite
+            if q("next") == "favorite" { nextFavorite() }
         case "editor":
             openEditor(project: q("root"))
             preloadModel()
@@ -95,6 +98,11 @@ enum AppHost {
         default:
             openVoice()                                            // listening starts the model itself
         }
+    }
+
+    /// `llm fav --next`: the next favourite becomes the active model (a running engine restarts on it).
+    private static func nextFavorite() {
+        CLI.run(["fav", "--next"]) { _, _ in WidgetCenter.shared.reloadAllTimelines() }
     }
 
     private static func preloadModel() {

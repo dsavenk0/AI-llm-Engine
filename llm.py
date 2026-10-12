@@ -427,13 +427,30 @@ def list_models(cfg, models):
         print(f"     {m['size']:.1f} GB · {m['format']} · {m['type']}{' · ' + ', '.join(feats) if feats else ''} · {ok}")
 
 
+def next_favorite(favs, current):
+    """The favourite after `current` in the list (wrapping); the first when the current one is not a favourite;
+    None when there is nothing to switch to."""
+    if not favs or (len(favs) == 1 and favs[0] == current):
+        return None
+    if current in favs:
+        return favs[(favs.index(current) + 1) % len(favs)]
+    return favs[0]
+
+
 def fav_cmd(cfg, args):
     """`./llm fav` lists the favourites; `./llm fav <number|name|path>` toggles one; --on / --off set it explicitly
-    (what the apps send, so two quick clicks never undo each other)."""
-    flags = [a for a in args if a in ("--on", "--off", "--json")]
+    (what the apps send, so two quick clicks never undo each other); `--next` makes the next favourite the active
+    model (what the widget's model name does)."""
+    flags = [a for a in args if a in ("--on", "--off", "--json", "--next")]
     rest = [a for a in args if a not in flags]
     models = scan_models(cfg)
     favs = [f for f in cfg.get("favorites", []) if isinstance(f, str)]
+    if "--next" in flags:
+        usable = {m["path"] for m in models if m.get("supported", True)}
+        nxt = next_favorite([f for f in favs if f in usable], cfg.get("model", ""))
+        if nxt is None:
+            print(Y(T("No other favourite model to switch to."))); return False
+        return choose_model(cfg, nxt)
     if not rest:
         names = [m for m in models if m["favorite"]]
         if "--json" in flags:
