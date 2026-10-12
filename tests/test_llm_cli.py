@@ -208,6 +208,28 @@ class TestStartStop(State):
     def engine(self, delay=0.0):
         return lambda cfg, m: [sys.executable, "-B", self.script, str(cfg["port"]), str(delay)]
 
+    def test_a_second_start_waits_for_the_engine_that_is_still_loading(self):
+        """The panel, the editor, the voice chat and the widget all call `start`: while one engine is still
+        loading (alive, port not bound yet) another call must wait for it, not load a second copy."""
+        ReapingPopen.spawned.clear()
+        loader = ReapingPopen([sys.executable, "-B", self.script, str(self.cfg["port"]), "2.0"], start_new_session=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.spawned.append(loader.pid)
+        os.makedirs(os.path.dirname(llm.ENGINE_PID), exist_ok=True)
+        with open(llm.ENGINE_PID, "w") as f:
+            f.write(f"{loader.pid}\nengine.py")
+        self.assertEqual(llm.read_pid(llm.ENGINE_PID), loader.pid)
+        self.assertFalse(llm.port_busy(self.cfg["port"]))                 # still loading
+        launched = []
+        with mock.patch.object(llm, "engine_cmd", lambda *a: launched.append(1) or ["true"]), \
+                mock.patch.object(llm, "show_endpoints", lambda *a: None):
+            ok, out = quiet(llm.start, self.cfg, False)
+        self.assertTrue(ok, out)
+        self.assertIn("still loading", out)
+        self.assertEqual(launched, [])                                   # no second engine was composed or started
+        self.assertEqual(llm.read_pid(llm.ENGINE_PID), loader.pid)
+        self.assertEqual(llm.health(self.cfg)["model"], "fake")
+
     def test_a_stale_pid_file_never_makes_us_signal_someone_else(self):
         """After a crash or a reboot the pid in the file can belong to any program. stop() and a start that
         finds the port busy must leave it alone and drop the stale file."""

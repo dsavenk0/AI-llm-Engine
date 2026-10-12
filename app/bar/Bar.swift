@@ -1007,8 +1007,15 @@ struct SettingsTab: View {
         HStack {
             Text(label).font(.system(size: 12)).foregroundColor(HUD.text)
             Spacer()
-            Picker("", selection: b) { ForEach(options, id: \.0) { Text($0.1).tag($0.0) } }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 240)
+            // a segmented control has a fixed width: three short options fit, five (or Russian words) overflow the
+            // card — those become a menu
+            if options.count > 3 || options.contains(where: { $0.1.count > 9 }) {
+                Picker("", selection: b) { ForEach(options, id: \.0) { Text($0.1).tag($0.0) } }
+                    .pickerStyle(.menu).labelsHidden().frame(width: 150, alignment: .trailing)
+            } else {
+                Picker("", selection: b) { ForEach(options, id: \.0) { Text($0.1).tag($0.0) } }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 240)
+            }
         }
     }
 

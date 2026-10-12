@@ -233,5 +233,6 @@
   "Favourite models": "Избранные модели",
   "★ Added to favourites:": "★ Добавлено в избранное:",
   "Removed from favourites:": "Убрано из избранного:",
-  "The app is not built yet. Build it once with:  ./build-app.sh": "Приложение ещё не собрано. Соберите его один раз:  ./build-app.sh"
+  "The app is not built yet. Build it once with:  ./build-app.sh": "Приложение ещё не собрано. Соберите его один раз:  ./build-app.sh",
+  "The engine is still loading (PID {pid}) — waiting for it.": "Движок ещё загружается (PID {pid}) — жду его."
 }

@@ -846,10 +846,11 @@ def setup(compat=False):
         print(T("Creating .venv…"))
         os.makedirs(DATA, exist_ok=True)
         subprocess.run([find_python(), "-m", "venv", os.path.join(DATA, ".venv")], check=True)
-    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "-r", os.path.join(BASE, "requirements.txt")])
+    env = network_env(load_cfg())                        # pip follows the proxy and CA settings too
+    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "-r", os.path.join(BASE, "requirements.txt")], env=env)
     if r.returncode == 0 and compat:
         print(T("Installing mlx-lm…"))
-        r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-lm"])
+        r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-lm"], env=env)
     if r.returncode == 0:
         print(G(T("Dependencies installed.")))
     return r.returncode == 0
@@ -1023,8 +1024,27 @@ def start(cfg, interactive=True):
         print(Y(T("No model selected.")))
         if not interactive or not choose_model(cfg): return False
         m = current_model(cfg)
-    if read_pid(ENGINE_PID) and health(cfg):
+    loading = read_pid(ENGINE_PID)
+    if loading and health(cfg):
         print(Y(T("Engine is already running."))); return True
+    if loading and not port_busy(cfg["port"]):
+        # an engine of ours is alive but not listening yet: the port is bound only once the model is in memory.
+        # The panel, the editor, the voice chat and the widget all call `start`: a second call waits for the one
+        # that is loading instead of loading a second copy of the model beside it
+        print(Y(T("The engine is still loading (PID {pid}) — waiting for it.").format(pid=loading)), end="", flush=True)
+        t0 = time.time()
+        while time.time() - t0 < 600:
+            if not read_pid(ENGINE_PID):
+                print(); break                      # it exited: start a fresh one below
+            if health(cfg, 1):
+                print(G(" " + T("ready in {s:.0f} s").format(s=time.time() - t0)))
+                return True
+            print(".", end="", flush=True); time.sleep(1)
+        else:
+            kill_pid(loading)
+            try: os.remove(ENGINE_PID)
+            except OSError: pass
+            print(R("\n" + T("✗ Load timed out, process stopped."))); return False
     why = route_blocker(cfg, m, interactive)
     if why:
         print(R(why)); return False
