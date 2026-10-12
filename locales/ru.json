@@ -234,5 +234,14 @@
   "★ Added to favourites:": "★ Добавлено в избранное:",
   "Removed from favourites:": "Убрано из избранного:",
   "The app is not built yet. Build it once with:  ./build-app.sh": "Приложение ещё не собрано. Соберите его один раз:  ./build-app.sh",
-  "The engine is still loading (PID {pid}) — waiting for it.": "Движок ещё загружается (PID {pid}) — жду его."
+  "The engine is still loading (PID {pid}) — waiting for it.": "Движок ещё загружается (PID {pid}) — жду его.",
+  "(shared with the code editor)": "(общая с редактором кода)",
+  "New chat.": "Новый чат.",
+  "No saved chats yet.": "Сохранённых чатов пока нет.",
+  "No such chat. /history lists them.": "Такого чата нет. Список — /history.",
+  "Opened:": "Открыт:",
+  "Give the chat a name.": "Задайте чату название.",
+  "Renamed:": "Переименован:",
+  "Delete “{title}”? [y/N] ": "Удалить «{title}»? [y/N] ",
+  "Deleted.": "Удалено."
 }

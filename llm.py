@@ -1169,9 +1169,23 @@ def chat(cfg):
     url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
     think, effort, show = think_enabled(mc, m), mc["effort"], True
     msgs, system = [], ""
+    # the history is the code editor's: the same file per project, so a chat continues in either place
+    from harness import chats as store
+    root = os.getcwd()
+    sessions, session = store.load(root), store.new_session()
+
+    def remember(question, attached, reply, reasoning):
+        store.add_turn(session, "user", question, attached=attached)
+        store.add_turn(session, "assistant", reply, reasoning)
+        if session not in sessions: sessions.insert(0, session)
+        try: store.save(root, sessions)
+        except OSError as e: print(R(T("Error:") + f" {e}"))
+
     print(B(T("Chat with {name}.").format(name=m["name"])) +
           DIM(" /think on|off  /effort <lvl>  /show  /system <text>  /image <path> <question>"))
     print(DIM("  /clear  /save  /exit   " + T("multi-line input:") + ' """ … """'))
+    print(DIM("  /history  /open <N>  /rename <N> <title>  /delete <N>  /new   " +
+              T("(shared with the code editor)")))
     while True:
         tag = (f"think:{effort}" if think else "no-think") if m["thinking"] else "chat"
         try:
@@ -1189,7 +1203,34 @@ def chat(cfg):
         s = line.strip()
         if not s: continue
         if s in ("/exit", "/q"): return
-        if s == "/clear": msgs = []; print(DIM(T("History cleared."))); continue
+        if s in ("/clear", "/new"):
+            msgs, session = [], store.new_session()
+            print(DIM(T("History cleared.") if s == "/clear" else T("New chat."))); continue
+        if s == "/history":
+            lines = store.listing(sessions, session["id"])
+            print("\n".join(DIM(l) for l in lines) if lines else DIM(T("No saved chats yet."))); continue
+        if s.split()[0] in ("/open", "/rename", "/delete"):
+            cmd, _, rest = s.partition(" ")
+            ref, _, title = rest.strip().partition(" ")
+            target = store.find(sessions, ref) if ref else None
+            if cmd == "/rename" and not title and ref and target is None:
+                target, title = (session if session in sessions else None), rest      # rename the open chat
+            if target is None:
+                print(R(T("No such chat. /history lists them."))); continue
+            if cmd == "/open":
+                session, msgs = target, store.messages(target)
+                print(DIM(T("Opened:") + f" {target['title']} ({len(msgs)})"))
+                if msgs: print(DIM("› ") + str(msgs[-1]["content"])[-400:])
+            elif cmd == "/rename":
+                if not store.rename(target, title): print(R(T("Give the chat a name."))); continue
+                store.save(root, sessions); print(DIM(T("Renamed:") + f" {target['title']}"))
+            else:
+                if input(Y(T("Delete “{title}”? [y/N] ").format(title=target["title"]))).strip().lower() not in ("y", "yes", "д", "да"):
+                    continue
+                store.delete(sessions, target); store.save(root, sessions)
+                if target["id"] == session["id"]: msgs, session = [], store.new_session()
+                print(DIM(T("Deleted.")))
+            continue
         if s.startswith("/think"): think = not s.endswith("off"); continue
         if s.startswith("/effort"):
             v = s.split()[-1]
@@ -1203,13 +1244,14 @@ def chat(cfg):
             with open(fn, "w") as f:
                 for x in msgs: f.write(f"## {x['role']}\n\n{x['content'] if isinstance(x['content'], str) else '[image]'}\n\n")
             print(DIM(T("Saved:") + f" {fn}")); continue
-        content = s
+        content, question, attached = s, s, []
         if s.startswith("/image "):
             _, path, *q = s.split(" ", 2)
             path = os.path.expanduser(path)
             if not os.path.exists(path): print(R(T("File not found"))); continue
-            content = [{"type": "image_url", "image_url": {"url": os.path.abspath(path)}},
-                       {"type": "text", "text": q[0] if q else T("Describe the image.")}]
+            question, attached = (q[0] if q else T("Describe the image.")), [os.path.abspath(path)]
+            content = [{"type": "image_url", "image_url": {"url": attached[0]}},
+                       {"type": "text", "text": question}]
         msgs.append({"role": "user", "content": content})
         payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
                    "messages": ([{"role": "system", "content": system}] if system else []) + msgs,
@@ -1249,6 +1291,7 @@ def chat(cfg):
             print(DIM(T("— {inp} in ({cached} cached) / {out} out · {tps:.1f} tok/s · first token {ttft:.1f} s").format(
                 inp=usage.get("prompt_tokens"), cached=cached, out=ct, tps=ct / dt if dt > 0 else 0, ttft=(first or t0) - t0)))
         msgs.append({"role": "assistant", "content": "".join(answer), "reasoning_content": "".join(reasoning)})
+        if answer: remember(question, attached, "".join(answer), "".join(reasoning))
 
 
 def bench(cfg):

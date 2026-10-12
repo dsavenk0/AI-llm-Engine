@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Chat history in the terminal, shared with the editor**: `llm chat` saves every conversation per project in the
+  same file the editor uses; `/history`, `/open <N>`, `/rename <N> <title>`, `/delete <N>` and `/new` list, continue,
+  rename and delete chats, and a chat started in the editor continues in the terminal and back.
+- **LLM Voice history**: a clock-arrow button at the top left opens saved conversations — open, rename, delete.
 - **GGUF on the engine's own MLX decoder** (llama / Qwen2 / Qwen3 families; Q4_0…Q8_0, Q4_K, Q5_K, Q6_K): weights are
   repacked into MLX quantization on load, tokenizer and chat template come from the file. Anything else still runs
   on llama.cpp behind the same API.
