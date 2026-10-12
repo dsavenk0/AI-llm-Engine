@@ -181,7 +181,8 @@ private struct Toolbar: View {
             .sheet(isPresented: $showExtensions) { ExtensionsSheet(ws: ws, shown: $showExtensions) }
             .onAppear { Task { await ws.loadInstalled() } }
             Button { ws.bottomVisible.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }
-                .buttonStyle(.plain).help("Problems and terminal (⌘J)")
+                .buttonStyle(.plain).foregroundColor(Palette.accent)          // the same accent as the Modules menu beside it
+                .help("Problems and terminal (⌘J)")
             Menu {
                 ForEach(ModuleID.allCases) { m in
                     Toggle(m.title, isOn: Binding(get: { modules.isOn(m) }, set: { _ in
