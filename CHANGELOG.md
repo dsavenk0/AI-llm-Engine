@@ -12,7 +12,8 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Activation edits**: `--steer` / `--steer-alpha` and `./llm steer <repo|folder>` apply a direction edit at the
   residual writers; the base model an edit was made for is fetched with it (pinned revision).
 - **LLM Voice**, a separate native app: speak or type, attach files and pictures, hear short answers read aloud;
-  a real window with close / minimise, glass in the LLMBar style, its own icon.
+  a real window with close / minimise, glass in the LLMBar style, its own icon, and a desktop widget
+  (`./build-voice.sh --install`) that opens it already listening.
 - **Editor**: agent modes (Manual / Edit automatically / Plan / Auto) and Effort, a context ring with Compact,
   chat rename / delete, file and *Discard all* git discard with a confirmation, Open VSX colour themes and snippets
   (opt-in), web search and picture generation tools.

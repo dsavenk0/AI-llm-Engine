@@ -315,6 +315,12 @@ model (or the first installed one that fits) through the same `llm` command when
 window — close and minimise buttons, resizable, *Keep on top* in its menu — in LLMBar's glass style (light, dark or
 system, with the same transparency setting). The first run asks for the microphone and speech-recognition permissions.
 
+**Desktop widget** (macOS 14+): the app carries a WidgetKit extension — a small orb that opens the chat, already
+listening, on one click (the `llmvoice://listen` link). WidgetKit lists extensions only of apps that live in
+`/Applications`, so `./build-voice.sh --install` builds the app, copies it there and registers the widget; then
+right-click the desktop → *Edit Widgets* → *LLM Voice*. It is signed ad hoc (no developer account), so it works on
+the Mac that built it.
+
 ### Benchmarks
 
 `./llm eval` has two modes. Without arguments it runs the small built-in regression suite (math, code, sanity).

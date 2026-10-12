@@ -882,6 +882,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// `llmvoice://listen` (the desktop widget): bring the window up and start listening.
+    func application(_ app: NSApplication, open urls: [URL]) {
+        guard urls.contains(where: { $0.scheme == "llmvoice" }) else { return }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if voice.state == .idle { voice.begin() }
+    }
+
     func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window?.makeKeyAndOrderFront(nil)
         return true
