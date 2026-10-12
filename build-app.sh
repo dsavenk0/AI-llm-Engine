@@ -3,6 +3,8 @@
 # chat, with a desktop widget inside. Double-click, no terminal needed.
 #   ./build-app.sh              builds LLMBar.app in this folder (git-ignored)
 #   ./build-app.sh --install    also copies it to /Applications and registers the widget with the system
+#   ./build-app.sh --offline    also puts Python and the engine's wheels inside (+~150 MB): works with no network
+#                               at first launch; flags combine
 # The engine and CLI are bundled inside, so the app also works without this checkout: it then keeps config, logs
 # and its .venv in ~/Library/Application Support/LLMBar.
 set -euo pipefail
@@ -11,7 +13,14 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 FINAL="$ROOT/LLMBar.app"
 VERSION="${VERSION:-1.0}"
 INSTALL=0
-[[ "${1:-}" == "--install" ]] && INSTALL=1
+OFFLINE=0
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL=1 ;;
+    --offline) OFFLINE=1 ;;
+    *) echo "unknown option: $arg (use --install and/or --offline)" >&2; exit 2 ;;
+  esac
+done
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -115,6 +124,11 @@ for s in 16 32 128 256 512; do
   sips -z $((s * 2)) $((s * 2)) "$PNG" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+
+if [[ "$OFFLINE" == 1 ]]; then
+  echo "▸ Bundling Python and the engine's wheels (offline build)…"
+  python3 "$ROOT/tools/bundle-deps.py" "$APP"
+fi
 
 echo "▸ Ad-hoc signing…"
 codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" "$APP"   # ad-hoc by default; a stable identity keeps the microphone permission across rebuilds

@@ -246,5 +246,8 @@
   "Deleted.": "Удалено.",
   "Python 3.10+ was not found — downloading a private copy (about 35 MB, once).": "Python 3.10+ не найден — скачиваю собственную копию (около 35 МБ, один раз).",
   "Could not install Python:": "Не удалось установить Python:",
-  "Python installed:": "Python установлен:"
+  "Python installed:": "Python установлен:",
+  "No internet connection — the engine libraries must be downloaded (~300 MB).": "Нет подключения к интернету — нужно скачать библиотеки движка (~300 МБ).",
+  "Connect to the network (or set the proxy in Settings) and start again.": "Подключитесь к сети (или задайте прокси в настройках) и запустите снова.",
+  "No internet connection — Python (about 35 MB) must be downloaded.": "Нет подключения к интернету — нужно скачать Python (около 35 МБ)."
 }

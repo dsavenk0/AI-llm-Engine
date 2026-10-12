@@ -20,3 +20,5 @@ dist/
 docs/LLMBar-1.0.dmg
 llama.cpp/
 .venv-images/
+.build-cache/
+docs/LLMBar-*-offline.dmg

@@ -15,6 +15,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
+  ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
   ./llm eval [--save]        accuracy suite (math/code/sanity) vs tests/eval_baseline.json
@@ -827,6 +828,19 @@ def tail(path, n):
 
 
 # ─────────────────────────── engine ───────────────────────────
+# An offline build (./build-app.sh --offline) carries a Python and the engine's wheels inside the app.
+_RES = os.path.dirname(BASE) if os.path.basename(os.path.dirname(BASE)) == "Resources" else None
+BUNDLED_PY = os.path.join(_RES, "python", "bin", "python3") if _RES else None
+BUNDLED_WHEELS = os.path.join(_RES, "wheels") if _RES else None
+
+
+def bundled_wheels():
+    """The folder of wheels inside the app, or None (a normal build, or a checkout)."""
+    if BUNDLED_WHEELS and os.path.isdir(BUNDLED_WHEELS) and any(n.endswith(".whl") for n in os.listdir(BUNDLED_WHEELS)):
+        return BUNDLED_WHEELS
+    return None
+
+
 def _python_ok(p):
     """Is `p` a python >= 3.10? (/usr/bin/python3 is skipped without the Command Line Tools: running it
     would open the macOS install dialog.)"""
@@ -846,15 +860,16 @@ def find_python():
     """A python3 >= 3.10 for the engine venv (the manager itself runs on 3.9+). With none on the Mac, a
     private copy is downloaded once into the data folder — a clean laptop needs nothing installed first."""
     from engine import pyruntime
-    for p in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3", pyruntime.python_path(DATA),
-              shutil.which("python3") or "", sys.executable):
-        if _python_ok(p):
-            return p
+    found = _python_probe()
+    if found:
+        return found
     print(Y(T("Python 3.10+ was not found — downloading a private copy (about 35 MB, once).")))
     try:
         p = pyruntime.install(DATA, log=lambda s: print(DIM("  " + s)))
     except (pyruntime.PythonInstallError, OSError, urllib.error.URLError, ValueError) as e:
-        raise SystemExit(T("Could not install Python:") + f" {e}\n" +
+        offline = isinstance(e, (urllib.error.URLError, OSError)) and not isinstance(e, pyruntime.PythonInstallError)
+        raise SystemExit((T("No internet connection — Python (about 35 MB) must be downloaded.") + f" {e}\n"
+                          if offline else T("Could not install Python:") + f" {e}\n") +
                          T("Python 3.10+ is required for the engine (e.g. brew install python)."))
     if not _python_ok(p):
         raise SystemExit(T("Python 3.10+ is required for the engine (e.g. brew install python)."))
@@ -862,21 +877,102 @@ def find_python():
     return p
 
 
+def _python_probe():
+    """A usable python >= 3.10 without downloading anything (None when there is none)."""
+    from engine import pyruntime
+    for p in (BUNDLED_PY or "", "/opt/homebrew/bin/python3", "/usr/local/bin/python3", pyruntime.python_path(DATA),
+              shutil.which("python3") or "", sys.executable):
+        if _python_ok(p):
+            return p
+    return None
+
+
+def check_cmd(cfg, as_json=False):
+    """`./llm check [--json]`: is everything there to run the engine? Exit status 1 when it cannot start."""
+    from engine import preflight
+    try:
+        models = len(scan_models(cfg))
+    except Exception:
+        models = None
+    res = preflight.summary(preflight.run(DATA, VENV_PY, _python_probe, models, env_ok=lambda _p: env_ready(),
+                                              wheels_bundled=bool(bundled_wheels())))
+    if as_json:
+        print(json.dumps(res, ensure_ascii=False))
+    else:
+        for i in res["items"]:
+            mark = {"ok": G("✓"), "warn": Y("!"), "error": R("✗")}[i["level"]]
+            print(f"{mark} {i['title']}" + (DIM(f"  {i['detail']}") if i["detail"] else ""))
+    return res["ok"]
+
+
+ENV_READY = os.path.join(DATA, ".venv", ".ready")      # written once the libraries are in
+
+
+def _ready_stamp():
+    """What the "ready" mark vouches for: these requirements, this interpreter. A new app version with other
+    requirements (or a venv rebuilt on another Python) is checked again, once."""
+    import hashlib
+    try:
+        with open(os.path.join(BASE, "requirements.txt"), "rb") as f:
+            reqs = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        reqs = ""
+    return f"{reqs}\n{os.path.realpath(VENV_PY)}\n"
+
+
+def env_ready():
+    """Is the engine environment usable? A venv alone is not: it also exists after an install that failed
+    half way (no network). Checked once by importing the libraries; the result is remembered, so every later
+    launch is a file read instead of importing MLX."""
+    if not os.path.exists(VENV_PY):
+        return False
+    stamp = _ready_stamp()
+    try:
+        with open(ENV_READY) as f:
+            if f.read() == stamp:
+                return True
+    except OSError:
+        pass
+    from engine import preflight
+    if not preflight.environment_ok(VENV_PY):
+        return False
+    try:
+        with open(ENV_READY, "w") as f:
+            f.write(stamp)
+    except OSError:
+        pass
+    return True
+
+
 def setup(compat=False):
     """Create/refresh the engine environment; `compat` also installs mlx-lm (the optional backend
     for architectures the native engine lacks — Qwen2/3, GLM, Llama, Gemma, MoE…)."""
+    env = network_env(load_cfg())                        # pip follows the proxy and CA settings too
+    from engine import preflight
+    wheels = bundled_wheels()
+    if (not env_ready() and not wheels) or compat:       # something is to be downloaded: say so before touching disk
+        ok, why = preflight.reachable(preflight.HOSTS["pypi"])
+        if not ok:
+            print(R(T("No internet connection — the engine libraries must be downloaded (~300 MB).")) + f"\n  {why}\n" +
+                  T("Connect to the network (or set the proxy in Settings) and start again."))
+            return False
     if os.path.exists(VENV_PY):
         print(DIM(T("Environment already exists: .venv")))
     else:
         print(T("Creating .venv…"))
         os.makedirs(DATA, exist_ok=True)
         subprocess.run([find_python(), "-m", "venv", os.path.join(DATA, ".venv")], check=True)
-    env = network_env(load_cfg())                        # pip follows the proxy and CA settings too
-    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "-r", os.path.join(BASE, "requirements.txt")], env=env)
+    offline = ["--no-index", "--find-links", wheels] if wheels else []     # the offline build installs from the app itself
+    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", *offline, "-r", os.path.join(BASE, "requirements.txt")], env=env)
     if r.returncode == 0 and compat:
         print(T("Installing mlx-lm…"))
         r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-lm"], env=env)
     if r.returncode == 0:
+        try:
+            with open(ENV_READY, "w") as f:
+                f.write(_ready_stamp())
+        except OSError:
+            pass
         print(G(T("Dependencies installed.")))
     return r.returncode == 0
 
@@ -1038,7 +1134,7 @@ def route_blocker(cfg, m, interactive):
 
 def start(cfg, interactive=True):
     os.makedirs(STATE, exist_ok=True)
-    if not os.path.exists(VENV_PY) and not setup():
+    if not env_ready() and not setup():
         return False
     m = current_model(cfg)
     if not m and not interactive:  # e.g. LLMBar: take the first supported model that fits
@@ -2100,6 +2196,7 @@ def main():
     set_lang(cfg["lang"])
     os.environ.update(network_env(cfg))      # hub search, downloads and the agent's web tools follow the proxy
     actions = {
+        "check": lambda: check_cmd(cfg, "--json" in sys.argv),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
             setup_gguf() if "--gguf" in sys.argv else setup(compat="--compat" in sys.argv)),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),

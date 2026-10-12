@@ -14,6 +14,13 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Readiness check** (`./llm check [--json]`, run by the panel at launch): Apple Silicon and macOS version, Python,
+  engine libraries, network (only when something has to be downloaded), free disk, models. Problems appear as a
+  banner with "Check again"; a missing connection is named as such instead of a failed install. The "ready" result
+  is remembered (requirements + interpreter), so a working setup starts without re-scanning.
+- **Offline build**: `./build-app.sh --offline` (and `./build-dmg.sh --offline`) puts Python and the engine's wheels
+  inside the app (+~150 MB); the first launch then needs no network. Downloads are cached in `.build-cache`.
+- A failed or interrupted first install no longer leaves a half-made environment that looks ready.
 - **First launch on a clean Mac**: with no Python 3.10+ (or only an outdated one) the manager downloads a private
   CPython (python-build-standalone, ~35 MB, SHA-256 checked) into the data folder, then creates the engine environment.
   The panel says "FIRST LAUNCH" and shows the install progress instead of a silent wait.

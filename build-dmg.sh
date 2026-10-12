@@ -19,11 +19,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+SUFFIX=""
+OFFLINE_ARG=()
+if [[ "${1:-}" == "--offline" ]]; then SUFFIX="-offline"; OFFLINE_ARG=(--offline); fi   # Python + wheels inside
+
 echo "▸ Building the app…"
-"$ROOT/build-app.sh"
+"$ROOT/build-app.sh" ${OFFLINE_ARG[@]+"${OFFLINE_ARG[@]}"}
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-FINAL_DMG="$OUT_DIR/LLMBar-$VERSION.dmg"
+FINAL_DMG="$OUT_DIR/LLMBar-$VERSION$SUFFIX.dmg"
 mkdir -p "$STAGE/.background" "$OUT_DIR"
 
 echo "▸ Staging DMG contents…"
@@ -34,7 +38,8 @@ SetFile -a V "$STAGE/.background"
 
 echo "▸ Creating image…"
 rm -f "$FINAL_DMG" "$RW_DMG"
-hdiutil create -quiet -size 50m -fs HFS+ -volname "$VOL_NAME" -format UDRW "$RW_DMG" -srcfolder "$STAGE"
+APP_MB="$(du -sm "$APP" | cut -f1)"
+hdiutil create -quiet -size "$((APP_MB + 60))m" -fs HFS+ -volname "$VOL_NAME" -format UDRW "$RW_DMG" -srcfolder "$STAGE"
 
 echo "▸ Arranging icons in Finder…"
 DEVICE="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG" | awk '/\/dev\/disk/ {print $1; exit}')"

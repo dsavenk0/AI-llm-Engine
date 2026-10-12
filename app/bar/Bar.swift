@@ -222,6 +222,38 @@ struct Paths {
     var config: String { home + "/.llm/config.json" }
 }
 
+/// Problems found by the readiness check, with a Retry (after connecting to the network, freeing disk…).
+struct CheckBanner: View {
+    @ObservedObject var e: EngineState
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(e.checks) { c in
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: c.isError ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 11)).foregroundColor(c.isError ? HUD.magenta : HUD.amber)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(c.title).font(.system(size: 11, weight: .semibold)).foregroundColor(HUD.text)
+                        if !c.detail.isEmpty {
+                            Text(c.detail).font(.system(size: 10)).foregroundColor(HUD.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            HStack {
+                Spacer()
+                Button(action: { e.runCheck() }) {
+                    Text(L("Check again", "Проверить снова")).font(HUD.mono(10, .semibold))
+                }.buttonStyle(.plain).foregroundColor(HUD.cyan)
+            }
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 8).fill(HUD.dim.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((e.checks.contains { $0.isError } ? HUD.magenta : HUD.amber).opacity(0.5), lineWidth: 1))
+    }
+}
+
 enum CLI {
     /// `line` (main queue) gets each finished output line without colour codes — long first-run steps show progress.
     static func run(_ args: [String], line: ((String) -> Void)? = nil, done: @escaping (Int32, String) -> Void) {
@@ -292,7 +324,14 @@ struct ModelInfo: Identifiable, Hashable {
     var id: String { path }
 }
 
+/// One line of `llm check --json`: what is missing or worth knowing before the engine can start.
+struct CheckItem: Identifiable, Equatable {
+    let id: String, level: String, title: String, detail: String
+    var isError: Bool { level == "error" }
+}
+
 final class EngineState: ObservableObject {
+    @Published var checks: [CheckItem] = []     // warnings and errors only; empty = ready
     @Published var health: [String: Any]? = nil
     @Published var stats: [String: Any]? = nil
     @Published var busy: String? = nil
@@ -418,6 +457,19 @@ final class EngineState: ObservableObject {
 
     func openVoice() { MainActor.assumeIsolated { AppHost.openVoice() } }
 
+    /// The launch-time readiness check (Python, libraries, network when something must be downloaded, disk, models).
+    func runCheck() {
+        CLI.run(["check", "--json"]) { _, out in
+            guard let data = out.split(separator: "\n").last.flatMap({ String($0).data(using: .utf8) }),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let items = obj["items"] as? [[String: Any]] else { return }
+            self.checks = items.compactMap { i in
+                guard let id = i["id"] as? String, let level = i["level"] as? String, level != "ok" else { return nil }
+                return CheckItem(id: id, level: level, title: i["title"] as? String ?? id, detail: i["detail"] as? String ?? "")
+            }
+        }
+    }
+
     func command(_ args: [String], label: String, then: (() -> Void)? = nil) {
         busy = label
         message = nil
@@ -431,6 +483,7 @@ final class EngineState: ObservableObject {
             }
             self.loadConfig()
             self.poll()
+            self.runCheck()                       // the banner follows what the command changed
             then?()
         }
     }
@@ -1629,6 +1682,9 @@ struct ContentView: View {
                     }
                 }
             }.frame(height: ContentView.scrollHeight)
+            if e.busy == nil, !e.checks.isEmpty {
+                CheckBanner(e: e)
+            }
             if let msg = e.message {
                 Text(msg).font(HUD.mono(10)).foregroundColor(HUD.magenta).lineLimit(3)
             }
@@ -1656,7 +1712,7 @@ struct ContentView: View {
         .background(background)
         .environment(\.colorScheme, lightTheme ? .light : .dark)
         .tint(HUD.cyan)
-        .onAppear { e.loadModels() }
+        .onAppear { e.loadModels(); e.runCheck() }
         .background(Button("") { NSApp.keyWindow?.orderOut(nil) }.keyboardShortcut(.cancelAction).opacity(0))
     }
 
