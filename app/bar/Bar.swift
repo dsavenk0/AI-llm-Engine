@@ -321,6 +321,8 @@ struct ModelInfo: Identifiable, Hashable {
     var route = "native"            // native · ptq1 (experimental) · mlxlm (optional mlx-lm backend)
     var problems: [String] = []     // why the engine cannot run it, when supported == false
     var favorite = false            // starred: listed first
+    var engine = ""                 // what runs it: engine · engine-ptq1 · engine-gguf · mlx-lm · llama.cpp
+    var features: [String] = []     // what that route can do with it: vision, thinking, tools, ssd-cache, …
     var id: String { path }
 }
 
@@ -442,7 +444,8 @@ final class EngineState: ObservableObject {
                           thinkingDefault: $0["thinking_default"] as? Bool ?? true,
                           supported: $0["supported"] as? Bool ?? false, efforts: $0["efforts"] as? [String] ?? [],
                           route: $0["route"] as? String ?? "native", problems: $0["problems"] as? [String] ?? [],
-                          favorite: $0["favorite"] as? Bool ?? false)
+                          favorite: $0["favorite"] as? Bool ?? false,
+                          engine: $0["engine"] as? String ?? "", features: $0["features"] as? [String] ?? [])
             }
         }
     }
@@ -1355,6 +1358,9 @@ struct ModelsTab: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 MarqueeText(text: (m.favorite ? "★ " : "") + m.name, font: .system(size: 12, weight: .medium), color: HUD.text,
                                             active: hoverRow == m.path)
+                                    .help(m.engine.isEmpty ? m.name
+                                          : m.name + "\n" + L("Runs on", "Работает на") + " " + m.engine
+                                            + (m.features.isEmpty ? "" : ": " + m.features.joined(separator: ", ")))
                                 MarqueeText(text: "\(String(format: "%.1f", m.size)) GB · \(m.format)" + note(m),
                                             font: HUD.mono(9), color: m.supported ? HUD.dim : HUD.magenta, active: hoverRow == m.path)
                             }

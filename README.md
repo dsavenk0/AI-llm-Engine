@@ -454,11 +454,23 @@ subprocess so a hard crash at one size only rules out that size. `--apply` write
 | native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
 | mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
-| GGUF, own decoder | llama / Qwen2 / Qwen3 families, `Q4_0…Q8_0`, `Q4_K/Q5_K/Q6_K`, F16, byte-level BPE | the engine's own code, no llama.cpp |
-| GGUF, llama.cpp | every other GGUF (other architectures, IQ/Q2/Q3, MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
+| GGUF, own decoder | llama / Qwen2 / Qwen3 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
+| GGUF, llama.cpp | every other GGUF (other architectures, IQ1–IQ3, per-expert MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
+
+What each route can do (also printed under every model by `./llm models` and in the panel's tooltip):
+
+| Route | vision | thinking | tools | SSD prefix cache | speculation | activation edits |
+|---|---|---|---|---|---|---|
+| native | ✓ (with a vision tower) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 1.75-bit | ✓ (JANG) | ✓ | ✓ | ✓ | — (a pass of 2–16 rows costs ~6 steps) | — |
+| GGUF, own decoder | — (an image projector sends it to llama.cpp) | ✓ | when the template speaks `<tool_call>` | — | ✓ | ✓ |
+| GGUF, llama.cpp | ✓ (with a projector) | ✓ | ✓ | — | its own `ngram-mod` | — |
+| mlx-lm | — | ✓ | when the template speaks tools | — | — | — |
 
 Not supported: non-MLX, non-GGUF weights, 1-bit affine JANG. Speculative decoding with a trained drafter (DFlash,
-DSpark) is not implemented; the engine uses prompt-lookup speculation.
+DSpark) is not implemented: measured, the vendor's own numbers say it does not pay on Apple Silicon (≈1.2× at best on
+an M5 Max, slower for the 1-bit model), and the published Q4_1 drafter needs the vendor's fork to load; the engine
+uses prompt-lookup speculation.
 
 ## Changes
 

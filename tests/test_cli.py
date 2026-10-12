@@ -278,6 +278,37 @@ class TestSteerCommand(unittest.TestCase):
         self.assertEqual(llm.steer_base(self.edit)[0], None)
 
 
+class TestRouteFeatures(unittest.TestCase):
+    """What the model list says a route can do: shown, not discovered later."""
+
+    def test_native_ptq1_mlxlm_and_gguf_routes(self):
+        from unittest import mock
+        base = {"vision": False, "thinking": True, "tool_calls": False, "path": "/x", "supported": True}
+        self.assertEqual(llm.route_features({}, dict(base, route="native", vision=True)),
+                         ("engine", ["vision", "thinking", "tools", "ssd-cache", "speculation", "steering"]))
+        self.assertEqual(llm.route_features({}, dict(base, route="ptq1")),
+                         ("engine-ptq1", ["thinking", "tools", "ssd-cache"]))              # no speculation, no steering
+        self.assertEqual(llm.route_features({}, dict(base, route="mlxlm")), ("mlx-lm", ["thinking"]))
+        self.assertEqual(llm.route_features({}, dict(base, route="mlxlm", tool_calls=True)), ("mlx-lm", ["thinking", "tools"]))
+        with mock.patch.object(llm, "gguf_native", return_value=True):
+            self.assertEqual(llm.route_features({}, dict(base, route="gguf", thinking=False)),
+                             ("engine-gguf", ["speculation", "steering"]))
+            self.assertEqual(llm.route_features({}, dict(base, route="gguf", tool_calls=True)),
+                             ("engine-gguf", ["thinking", "tools", "speculation", "steering"]))
+        with mock.patch.object(llm, "gguf_native", return_value=False):
+            self.assertEqual(llm.route_features({}, dict(base, route="gguf", vision=True)),
+                             ("llama.cpp", ["vision", "thinking", "tools"]))
+
+    def test_scan_models_carries_the_route_and_its_features(self):
+        from unittest import mock
+        m = {"path": "/m/a", "name": "a", "size": 1.0, "format": "x", "type": "t", "route": "mlxlm", "vision": False,
+             "thinking": False, "supported": True, "problems": [], "efforts": [], "hadamard": False}
+        with mock.patch.object(llm, "inspect_model", return_value=m), mock.patch.object(llm, "scan_gguf", return_value=[]), \
+                mock.patch("os.walk", return_value=[("/m", [], ["config.json"])]):
+            got = llm.scan_models({"dirs": ["/m"], "favorites": []})
+        self.assertEqual((got[0]["engine"], got[0]["features"]), ("mlx-lm", []))
+
+
 class TestTranslations(unittest.TestCase):
     def test_every_ui_string_has_russian(self):
         with open(os.path.join(ROOT, "locales", "ru.json"), encoding="utf-8") as f:

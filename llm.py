@@ -262,6 +262,7 @@ def inspect_model(path):
             "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl,
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
             "efforts": efforts, "hadamard": bool(cfgj.get("hadamard") or jang.get("hadamard")),
+            "tool_calls": "<tool_call>" in tpl or "tools" in tpl,
             "supported": not problems, "problems": problems}
 
 
@@ -286,7 +287,33 @@ def scan_models(cfg):
     favs = {str(f) for f in (cfg.get("favorites") or [])}
     for m in found:
         m["favorite"] = m["path"] in favs
+        m["engine"], m["features"] = route_features(cfg, m)
     return sorted(found, key=lambda m: (not m["favorite"], not m["supported"], m["name"].lower()))
+
+
+def route_features(cfg, m):
+    """(which engine runs the model, what that route can do with it) — shown beside every model so a missing
+    feature is explained by the route, not discovered later. Engines: "engine" (native MLX), "engine-ptq1",
+    "engine-gguf" (the own GGUF decoder), "mlx-lm", "llama.cpp"."""
+    route = m.get("route", "native")
+    if route == "gguf":
+        which = "engine-gguf" if gguf_native(cfg, m) else "llama.cpp"
+    else:
+        which = {"native": "engine", "ptq1": "engine-ptq1", "mlxlm": "mlx-lm"}.get(route, route)
+    f = []
+    if m.get("vision") and which in ("engine", "engine-ptq1", "llama.cpp"):
+        f.append("vision")
+    if m.get("thinking"):
+        f.append("thinking")
+    # tool calls: the native engine and llama.cpp parse every convention they know; mlx-lm and the own GGUF
+    # decoder follow what the chat template speaks
+    if which in ("engine", "engine-ptq1", "llama.cpp") or m.get("tool_calls"):
+        f.append("tools")
+    if which in ("engine", "engine-ptq1"):
+        f.append("ssd-cache")
+    if which in ("engine", "engine-gguf"):
+        f += ["speculation", "steering"]
+    return which, f
 
 
 _GGUF_CACHE = {}
@@ -319,6 +346,7 @@ def inspect_gguf(path, name=None):
             "thinking": "<think>" in tpl or "enable_thinking" in tpl,
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
             "efforts": [], "hadamard": False, "supported": True, "problems": [],
+            "tool_calls": "<tool_call>" in tpl,
             "context_length": h.get("context_length")}
 
 
@@ -426,6 +454,8 @@ def list_models(cfg, models):
         star = Y("★ ") if m.get("favorite") else "  "
         print(f" {i:>2}) {star}{B(m['name'])}{cur}")
         print(f"     {m['size']:.1f} GB · {m['format']} · {m['type']}{' · ' + ', '.join(feats) if feats else ''} · {ok}")
+        if m.get("supported") and m.get("engine"):
+            print(DIM(f"     {T('runs on')} {m['engine']}" + (": " + ", ".join(m["features"]) if m.get("features") else "")))
 
 
 def next_favorite(favs, current):
