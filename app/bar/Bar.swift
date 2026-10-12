@@ -1541,13 +1541,12 @@ struct AboutView: View {
                 Text("AI-llm-Engine · LLMBar").font(.system(size: 17, weight: .semibold)).foregroundColor(HUD.text)
                 Text(L("Version", "Версия") + " \(version)").font(HUD.mono(11)).foregroundColor(HUD.dim)
             }
-            Text(L("A lightweight local inference engine for MLX models on Apple silicon, with an OpenAI-compatible API, and this menu-bar app to run it.",
-                   "Лёгкий локальный движок инференса MLX-моделей для Apple silicon с OpenAI-совместимым API и это приложение в строке меню для управления им."))
+            Text(L("A lightweight local model hub for the Mac: the inference engine, a code editor and a voice chat in one app.",
+                   "Лёгкий локальный хаб моделей для Mac: движок инференса, редактор кода и голосовой чат в одном приложении."))
                 .font(.system(size: 12)).foregroundColor(HUD.text).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             Divider().opacity(0.3)
             VStack(alignment: .leading, spacing: 6) {
-                row("API", e.apiURL)
                 row(L("Runs on", "Работает на"), "macOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion) · \(ramGB) GB")
                 row(L("Author", "Автор"), "Denis Savenko")
                 row(L("License", "Лицензия"), "Apache-2.0")
