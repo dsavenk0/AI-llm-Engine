@@ -358,10 +358,11 @@ class Engine:
         # vision tower is loaded on the first image request (saves ~0.5 GB for text/code work)
         self.model, self.config, self.model_bytes = load(self.path, vision=False, log=self.log,
                                                          ptq1=self.ptq1_enabled, steer=self.steer)
-        if getattr(self.model, "ptq1", False) and self.speculative:
-            # verifying 2-16 rows would dequantize whole matrices for a few rows of work
+        if getattr(self.model, "ptq1", False) and self.speculative and os.environ.get("LLM_PTQ1_SPECULATIVE") != "1":
+            # a verification pass of 2-16 rows is still several one-row steps of work on a ternary model
+            # (the fused kernel is compute-bound: ~6 steps for 16 rows); LLM_PTQ1_SPECULATIVE=1 to measure
             self.speculative = False
-            self.log("PTQ1 model: speculative decoding turned off (a multi-row pass costs a full dequantization)")
+            self.log("PTQ1 model: speculative decoding turned off (a multi-row pass costs several decode steps)")
         # Keep the weights resident: without a wired limit macOS may compress or
         # page them out under pressure and decode speed collapses.
         need = self.model_bytes + 0.5 * GiB

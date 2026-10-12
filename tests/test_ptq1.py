@@ -18,8 +18,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import mlx.core as mx  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from engine import ptq1 as P  # noqa: E402
 from engine.ptq1 import (TILE, dequantize, dequantize_ref, from_packed26, from_tq1, is_packed26,  # noqa: E402
-                         linear, pack, ptq1_matvec)
+                         linear, pack, ptq1_matmul_small, ptq1_matvec)
 
 
 def make_weights(n, k, seed=0):
@@ -249,6 +252,83 @@ class TestTQ1Kernels(unittest.TestCase):
                 from_tq1(mx.array(c), mx.array(scales))
         with self.assertRaises(ValueError):                # wrong slot count (a PTQ1_0 `qs` array)
             from_tq1(mx.array(np.zeros((1, 1, 24, 8), np.uint8)), mx.array(scales))
+
+
+class TestSmallMatmul(unittest.TestCase):
+    """2..32 rows (speculative verification, short prompts): the fused decode + simdgroup_matrix kernel."""
+
+    def close(self, got, ref, msg=""):
+        tol = 2e-3 * np.abs(ref) + 2e-3 * np.abs(ref).mean() + 1e-4
+        bad = np.abs(got - ref) > tol
+        self.assertFalse(bad.any(), f"{msg}: {int(bad.sum())} off, worst {float(np.abs(got - ref).max()):.3g}")
+
+    def run_case(self, scheme, n, k, rows, seed=0):
+        if scheme == "ptq1":
+            w = make_weights(n, k, seed)
+            truth = dequantize_ref(w, "ptq1")
+        else:
+            w, digits = tq1_blocks(n, k, seed)
+            truth = tq1_truth(w, digits).reshape(n, k)
+        X = mx.random.normal((rows, k)).astype(mx.float16)
+        Y = ptq1_matmul_small(X, pack(mx.array(w)), n, scheme)
+        mx.eval(Y)
+        self.assertEqual(Y.shape, (rows, n))
+        self.assertEqual(Y.dtype, mx.float16)
+        self.close(np.asarray(Y.astype(mx.float32)), np.asarray(X.astype(mx.float32)) @ truth.T,
+                   f"{scheme} {n}x{k} rows={rows}")
+
+    def test_row_counts_either_side_of_the_8_and_16_row_fragments(self):
+        for scheme in ("ptq1", "tq1"):
+            for rows in (2, 3, 7, 8, 9, 15, 16, 17, 31, 32):
+                self.run_case(scheme, 300, 384, rows, seed=rows)
+
+    def test_row_counts_not_a_multiple_of_8_and_tile_edges(self):
+        for scheme in ("ptq1", "tq1"):
+            for n, k in ((1, 128), (9, 256), (33, 128), (1025, 256), (1300, 640)):
+                self.run_case(scheme, n, k, 5, seed=n)
+
+    def test_a_deep_k_and_a_leading_batch_dimension(self):
+        for scheme in ("ptq1", "tq1"):
+            self.run_case(scheme, 64, 128 * 41, 16, seed=3)
+        w = make_weights(40, 256, 1)
+        wt = pack(mx.array(w))
+        X = mx.random.normal((2, 3, 256)).astype(mx.float16)
+        Y = linear(X, wt, 40)
+        self.assertEqual(Y.shape, (2, 3, 40))
+        ref = np.asarray(X.astype(mx.float32)).reshape(6, 256) @ dequantize_ref(w, "ptq1").T
+        self.close(np.asarray(Y.astype(mx.float32)).reshape(6, 40), ref)
+
+    def test_every_byte_value_in_every_payload_position(self):
+        """Each of the 26 payload bytes takes every legal value: the lane-to-byte mapping of every
+        k-step, in both formats (TQ1 stays below 243, its tail byte below 27)."""
+        for scheme, top, tail in (("ptq1", 256, 256), ("tq1", 243, 27)):
+            for slot in (0, 5, 8, 15, 16, 23, 24, 25):
+                if scheme == "ptq1":
+                    w = make_weights(1, 128, slot).reshape(1, 28)
+                    w = np.tile(w, (top, 1))
+                else:
+                    base = np.random.default_rng(slot).integers(0, 3, size=(1, 1, 128))
+                    w = np.tile(tq1_blocks(1, 128, digits=base)[0], (top, 1))
+                w[:, slot] = (np.arange(top) % (tail if slot == 25 else top)).astype(np.uint8)
+                truth = dequantize_ref(w, scheme)
+                X = mx.random.normal((12, 128)).astype(mx.float16)
+                Y = ptq1_matmul_small(X, pack(mx.array(w)), top, scheme)
+                mx.eval(Y)
+                self.close(np.asarray(Y.astype(mx.float32)), np.asarray(X.astype(mx.float32)) @ truth.T,
+                           f"{scheme} slot {slot}")
+
+    def test_routing_by_row_count(self):
+        w = pack(mx.array(make_weights(16, 128)))
+        x = lambda r: mx.zeros((r, 128), mx.float16)             # noqa: E731
+        with mock.patch.object(P, "ptq1_matvec", wraps=P.ptq1_matvec) as mv, \
+                mock.patch.object(P, "ptq1_matmul_small", wraps=P.ptq1_matmul_small) as sm, \
+                mock.patch.object(P, "ptq1_matmul", wraps=P.ptq1_matmul) as big:
+            for rows, want in ((1, mv), (2, sm), (P.SMALL_MAX, sm), (P.SMALL_MAX + 1, big)):
+                for m in (mv, sm, big):
+                    m.reset_mock()
+                P.linear(x(rows), w, 16)
+                self.assertEqual([m.call_count for m in (mv, sm, big)],
+                                 [int(m is want) for m in (mv, sm, big)], rows)
 
 
 class TestJangPacked(unittest.TestCase):

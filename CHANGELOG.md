@@ -14,6 +14,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **A few rows on 1.75-bit models** (2–32: speculative verification, short prompts): a fused decode + 8×8 matrix
+  multiply kernel replaces dequantize-then-matmul — 16 rows of a 34816×5120 matrix take 2.3 ms instead of 8.4 ms
+  (PTQ1_0 and TQ1_G128). It is compute-bound (about 6 one-row steps for 16 rows), so speculation on these models
+  stays off by default; `LLM_PTQ1_SPECULATIVE=1` turns it on for measurements.
+- **LLM Voice**: the model menu is always there (with a chevron), also when no model is selected.
 - **Readiness check** (`./llm check [--json]`, run by the panel at launch): Apple Silicon and macOS version, Python,
   engine libraries, network (only when something has to be downloaded), free disk, models. Problems appear as a
   banner with "Check again"; a missing connection is named as such instead of a failed install. The "ready" result

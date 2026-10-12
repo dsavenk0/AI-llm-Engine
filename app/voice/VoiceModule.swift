@@ -1054,9 +1054,7 @@ struct VoiceView: View {
         VStack(spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "cpu").font(.system(size: 9)).foregroundColor(VHUD.dim)
-                if voice.model.name.isEmpty {
-                    Text("NO MODEL SELECTED · OPEN LLMBAR").foregroundColor(VHUD.magenta)
-                } else {
+                Group {
                     Menu {
                         let favs = voice.installed.filter(\.favorite)
                         if !favs.isEmpty {
@@ -1084,13 +1082,20 @@ struct VoiceView: View {
                         let starred = voice.installed.first { $0.path == voice.model.path }?.favorite == true
                         HStack(spacing: 4) {
                             if starred { Image(systemName: "star.fill").font(.system(size: 9)).foregroundColor(VHUD.yellow) }
-                            Text(voice.model.name).font(VHUD.mono(9.5, .semibold)).tracking(0.6)
-                                .foregroundColor(VHUD.text).lineLimit(1).truncationMode(.middle)
+                            Text(voice.model.name.isEmpty ? "CHOOSE A MODEL" : voice.model.name)
+                                .font(VHUD.mono(9.5, .semibold)).tracking(0.6)
+                                .foregroundColor(voice.model.name.isEmpty ? VHUD.magenta : VHUD.text)
+                                .lineLimit(1).truncationMode(.middle)
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 7, weight: .bold))
+                                .foregroundColor(VHUD.dim)          // it is a menu: models, favourites
                         }
                         .frame(maxWidth: 230)
                     }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                     .help("Choose another model, or star this one")
+                    if voice.model.name.isEmpty {
+                        EmptyView()
+                    } else
                     if voice.modelLoading {
                         Text(voice.model.running ? "· WAKING" : "· LOADING").foregroundColor(VHUD.yellow)
                     } else if voice.model.running {

@@ -312,11 +312,160 @@ def ptq1_matmul(x, wt, n, scheme="ptq1"):
     return y.reshape(*x.shape[:-1], n).astype(x.dtype)
 
 
+# --- a few rows (speculative verification, short prompts): fused decode + simdgroup_matrix ---------------
+#
+# 2..SMALL_MAX rows used to pay for dequantizing the whole matrix to fp16 (2 bytes per weight written and read
+# back) for what is a handful of dot products per weight. Here the weights never leave registers: for an 8x8
+# simdgroup_matrix a lane holds two neighbouring columns (fn, fn+1) of one row fm, so each lane decodes just
+# those weights of its row straight from the 28-byte block into the A fragment, and the activations of the
+# tokens come from threadgroup memory as the B fragment. Weight order inside a block does not matter for a dot
+# product as long as the activations are staged in the same order, so the k-steps are chosen to make each lane's
+# bytes fixed (8 bytes per row and block) and the activations are permuted while they are staged.
+# Measured on an M5 (34816 x 5120, 16 rows, weights from DRAM): dequantize+matmul 8.4 ms, this 2.3 ms, the
+# one-row lookup-table kernel 0.35 ms. The multiply-accumulates are what it costs now; decode is almost free.
+SMALL_MAX = 32          # more rows than this: dequantize + matmul amortizes better
+_MM_SG = 4              # simdgroups per threadgroup; each owns 32 rows (4 fragments of 8)
+_MM_HEADER = "#include <metal_simdgroup_matrix>\nusing namespace metal;\n"
+
+_MM_SRC = """
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint tid = thread_position_in_threadgroup.x;
+    constexpr int NB = K / 128;
+    constexpr int THREADS = SG * 32;
+    constexpr int tile_rows = TG * RPT;
+    constexpr int tg_per_tile = tile_rows / (SG * 32);
+    const int tile = int(threadgroup_position_in_grid.x) / tg_per_tile;
+    const int sg_row0 = (int(threadgroup_position_in_grid.x) % tg_per_tile) * (SG * 32) + int(sg) * 32;
+    const uint q = lane / 4;
+    const uint fm = (q & 4u) + ((lane / 2u) % 4u);              // row of this lane's two elements
+    const uint fn = (q & 2u) * 2u + (lane % 2u) * 2u;           // their first column
+
+    threadgroup half xs[MT * 8 * 128];
+    simdgroup_matrix<float, 8, 8> acc[4][MT];
+    for (int r = 0; r < 4; ++r) for (int t = 0; t < MT; ++t) acc[r][t] = simdgroup_matrix<float, 8, 8>(0.0f);
+    const uint P3[5] = {1u, 3u, 9u, 27u, 81u};
+
+    for (int b = 0; b < NB; ++b) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = int(tid); i < MT * 8 * 128; i += THREADS) {
+            const int tok = i / 128, kk = i % 128;
+            STAGE
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint by[4][8];                  // the payload bytes this lane's columns live in, per row fragment
+        half dh[4];
+        for (int r = 0; r < 4; ++r) {
+            const device uchar* pp = w + ((long(tile) * NB + b) * tile_rows + sg_row0 + r * 8 + int(fm)) * 28;
+            by[r][0] = pp[fn];      by[r][1] = pp[fn + 1];
+            by[r][2] = pp[8 + fn];  by[r][3] = pp[9 + fn];
+            by[r][4] = pp[16 + fn]; by[r][5] = pp[17 + fn];
+            by[r][6] = pp[24];      by[r][7] = pp[25];
+            dh[r] = as_type<half>(ushort(uint(pp[26]) | (uint(pp[27]) << 8)));
+        }
+        #pragma unroll
+        for (int s = 0; s < 16; ++s) {
+            simdgroup_matrix<half, 8, 8> bm[MT];
+            for (int t = 0; t < MT; ++t)
+                simdgroup_load(bm[t], xs + t * 8 * 128 + s * 8, 128, ulong2(0, 0), true);
+            #pragma unroll
+            for (int r = 0; r < 4; ++r) {
+                half w0, w1;
+                STEP
+                simdgroup_matrix<half, 8, 8> am;
+                am.thread_elements()[0] = w0;
+                am.thread_elements()[1] = w1;
+                for (int t = 0; t < MT; ++t)
+                    simdgroup_multiply_accumulate(acc[r][t], am, bm[t], acc[r][t]);
+            }
+        }
+    }
+    const int yrow0 = tile * tile_rows + sg_row0;
+    if (yrow0 < NP) {
+        for (int r = 0; r < 4; ++r)
+            for (int t = 0; t < MT; ++t) {
+                const int rr = yrow0 + r * 8;
+                if (rr < NP)
+                    simdgroup_store(acc[r][t], y + (t * 8) * NP + rr, NP, ulong2(0, 0), true);
+            }
+    }
+"""
+_MM_PARTS = {
+    # PTQ1_0: k-step s is one trit position over 8 consecutive payload bytes (steps 0-9: qs[0..15], 10-14: qs[16..23],
+    # 15: the qh pair) — contiguous in natural order, so the activations are staged unchanged
+    "ptq1": ("xs[i] = x[tok * K + b * 128 + kk];", """
+                uint b0v, b1v; int n;
+                if (s < 10)      { n = s >> 1;  b0v = by[r][(s & 1) * 2]; b1v = by[r][(s & 1) * 2 + 1]; }
+                else if (s < 15) { n = s - 10;  b0v = by[r][4];           b1v = by[r][5]; }
+                else             { n = int(fn >> 1); b0v = by[r][6];      b1v = by[r][7]; }
+                const uint p = (s == 15) ? P3[min(n, 4)] : P3[n];
+                w0 = (half(((b0v * p) & 0xFFu) * 3u >> 8) - 1.0h) * dh[r];
+                w1 = (half(((b1v * p) & 0xFFu) * 3u >> 8) - 1.0h) * dh[r];
+"""),
+    # TQ1_G128: byte j holds weights 5j..5j+4 (plain base 3). Step s = 5g + n (g = byte group of 8, n = digit)
+    # takes column c from byte 8g + c, digit n: weight 5(8g + c) + n; step 15 is the last two bytes (24: five
+    # digits, 25: three) = weights 120..127 in order. The activations are staged in that order.
+    "tq1": ("const int e = (kk < 120) ? 5 * (8 * (kk / 40) + (kk % 8)) + ((kk / 8) % 5) : kk;\n"
+            "            xs[i] = x[tok * K + b * 128 + e];", """
+                half d0, d1;
+                if (s < 15) {
+                    const uint pw = P3[s % 5];
+                    d0 = half((by[r][(s / 5) * 2] / pw) % 3u);
+                    d1 = half((by[r][(s / 5) * 2 + 1] / pw) % 3u);
+                } else {
+                    const uint c0 = fn, c1 = fn + 1;
+                    const uint ba = c0 < 5 ? by[r][6] : by[r][7], bb2 = c1 < 5 ? by[r][6] : by[r][7];
+                    d0 = half((ba / P3[c0 < 5 ? c0 : c0 - 5]) % 3u);
+                    d1 = half((bb2 / P3[c1 < 5 ? c1 : c1 - 5]) % 3u);
+                }
+                w0 = (d0 - 1.0h) * dh[r];
+                w1 = (d1 - 1.0h) * dh[r];
+"""),
+}
+_mm_kernels = {}
+
+
+def _mm_kernel(scheme):
+    if scheme not in _mm_kernels:
+        stage, step = _MM_PARTS[scheme]
+        src = _MM_SRC.replace("STAGE", stage).replace("STEP", step)
+        _mm_kernels[scheme] = mx.fast.metal_kernel(name=f"engine_{scheme}_mm_small", input_names=["x", "w"],
+                                                   output_names=["y"], source=src, header=_MM_HEADER)
+    return _mm_kernels[scheme]
+
+
+def ptq1_matmul_small(x, wt, n, scheme="ptq1"):
+    """x: [..., K] with 2..SMALL_MAX rows. Fused decode + 8x8 matrix multiply, 16 rows at a time."""
+    K = wt.shape[1] * 128
+    flat = x.reshape(-1, K).astype(mx.float16)
+    npad = (n + 7) // 8 * 8
+    n_tile = wt.shape[0]
+    outs = []
+    for r0 in range(0, flat.shape[0], 16):
+        part = flat[r0:r0 + 16]
+        rows = part.shape[0]
+        mt = 1 if rows <= 8 else 2
+        if rows < mt * 8:
+            part = mx.pad(part, [(0, mt * 8 - rows), (0, 0)])
+        (y,) = _mm_kernel(scheme)(
+            inputs=[part, wt],
+            template=[("K", K), ("NP", npad), ("MT", mt), ("SG", _MM_SG), ("TG", TG), ("RPT", RPT)],
+            grid=(n_tile * (TILE // (_MM_SG * 32)) * _MM_SG * 32, 1, 1), threadgroup=(_MM_SG * 32, 1, 1),
+            output_shapes=[(mt * 8, npad)], output_dtypes=[mx.float32])
+        outs.append(y[:rows, :n])
+    y = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=0)
+    return y.reshape(*x.shape[:-1], n).astype(x.dtype)
+
+
 def linear(x, wt, n, scheme="ptq1"):
     """y = x @ W.T for packed weights `wt` and `n` output rows: the lookup-table kernel for a
-    single row, dequantize + matmul for more."""
-    if x.size // x.shape[-1] == 1:
+    single row, a fused decode + matrix-multiply kernel for a few (speculative verification), dequantize
+    + matmul for many."""
+    rows = x.size // x.shape[-1]
+    if rows == 1:
         return ptq1_matvec(x, wt, n, scheme).reshape(*x.shape[:-1], n)
+    if rows <= SMALL_MAX:
+        return ptq1_matmul_small(x, wt, n, scheme)
     return ptq1_matmul(x, wt, n, scheme)
 
 
