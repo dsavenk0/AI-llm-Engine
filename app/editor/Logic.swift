@@ -13,6 +13,7 @@ enum AgentEvent: Equatable {
     case question(id: String, question: String, options: [String])
     case toolResult(id: String, name: String, ok: Bool, summary: String)
     case image(path: String, prompt: String)          // a picture the assistant generated, saved in the project
+    case note(String)                                 // a remark for the person (not part of the conversation)
     case done
     case error(String)
 
@@ -43,6 +44,7 @@ enum AgentEvent: Equatable {
             return .toolResult(id: s("id") ?? "", name: s("name") ?? "", ok: obj["ok"] as? Bool ?? true,
                                summary: s("summary") ?? "")
         case "image": return s("path").map { .image(path: $0, prompt: s("prompt") ?? "") }
+        case "note": return s("text").map { .note($0) }
         case "done": return .done
         case "error": return .error(s("message") ?? "error")
         default: return nil

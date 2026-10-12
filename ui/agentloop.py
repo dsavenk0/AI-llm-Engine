@@ -182,6 +182,25 @@ def system_prompt(project_name, extra="", web=False, mode="manual"):
     return base + (PLAN_NOTE if mode == "plan" else "") + (WEB_NOTE if web else "") + extra
 
 
+LITE_PROMPT = ("You are a helpful assistant inside a code editor. Answer in the language of the user's message, "
+               "briefly and to the point. Files the user attached are quoted in their message.")
+LITE_BYTES = 1.0 * 2**30          # a model whose weights are smaller than this cannot drive the tool loop
+
+
+def is_tiny(endpoint, timeout=2):
+    """True when the model behind a local engine is too small for the agent's tools (weights under ~1 GB:
+    a 0.5–1B model at 4 bits). Unknown (remote, no answer) is False — then nothing changes."""
+    ep = as_endpoint(endpoint)
+    if ep.remote:
+        return False
+    try:
+        with urllib.request.urlopen(urllib.request.Request(ep.health_url, headers=ep.headers()), timeout=timeout) as r:
+            gb = (json.load(r).get("memory_gb") or {}).get("model")
+        return isinstance(gb, (int, float)) and 0 < gb * 2**30 < LITE_BYTES
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
 def active_note(project, active):
     """What the person is looking at, for the system prompt: "check this code" means the file that is open. `active`
     is {"file": relative path, "line": n} from the editor; anything that is not an existing project file is
@@ -424,8 +443,11 @@ def _stream_chat(engine_port, messages, think, run, tools=None, effort=None):
     """Yield ("content"|"reasoning", text) and finally ("calls", [tool calls]). Raises RuntimeError.
     `engine_port` is a local port number or an Endpoint."""
     ep = as_endpoint(engine_port)
-    req = urllib.request.Request(ep.chat_url, data=json.dumps(ep.payload(messages, think, tools=tools or TOOLS,
-                                                       **({"reasoning_effort": effort} if effort and think else {}))).encode(),
+    tool_list = TOOLS if tools is None else tools           # an empty list means no tools at all (lite mode)
+    extra = {"reasoning_effort": effort} if effort and think else {}
+    if tool_list:
+        extra["tools"] = tool_list
+    req = urllib.request.Request(ep.chat_url, data=json.dumps(ep.payload(messages, think, **extra)).encode(),
                                  headers=ep.headers())
     try:
         r = urllib.request.urlopen(req, timeout=3600)
@@ -501,23 +523,79 @@ def _images_endpoint(engine_port):
         return None
 
 
+def _previous_answer(messages):
+    """The text of the assistant turn just before the user's newest message ("" when there is none)."""
+    for m in reversed(messages[:-1]):
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"].strip():
+            return m["content"].strip()
+        if m.get("role") == "user":
+            break
+    return ""
+
+
+def _echo_nudge(messages, previous):
+    """The newest user message with a note that the previous reply must not be repeated — small models often
+    copy the last assistant turn back (an identical greeting to every message)."""
+    out = [dict(m) for m in messages]
+    last = out[-1]
+    if isinstance(last.get("content"), str):
+        last["content"] += (f"\n\n(Reply to this message itself. Your previous reply was “{_short(previous, 120)}” — "
+                            f"do not repeat it.)")
+    return out
+
+
 def run_agent(project, engine_port, messages, emit, run, think=False, auto_edit=False, system_extra="", web=False,
-              mode=None, effort=None):
-    """True when the model finished; False when the loop ended on an error event (already emitted)."""
+              mode=None, effort=None, lite=False):
+    """True when the model finished; False when the loop ended on an error event (already emitted).
+    `lite`: a tiny model — a short prompt and no tools, a plain chat that answers about what is attached."""
     tools = Tools(project, run, emit, auto_edit, web, images=_images_endpoint(engine_port), mode=mode)
-    convo = [{"role": "system",
-              "content": system_prompt(os.path.basename(project.root), system_extra, web, tools.mode)}] + messages
+    if lite:
+        emit({"type": "note", "text": "Small model: answering as a plain chat, without project tools — attach files "
+                                      "or pick a larger model for work across the project."})
+        system = {"role": "system", "content": LITE_PROMPT + system_extra}
+    else:
+        system = {"role": "system",
+                  "content": system_prompt(os.path.basename(project.root), system_extra, web, tools.mode)}
+    convo = [system] + messages
+    previous = _previous_answer(messages)
+    check_echo, retries = bool(previous), 0            # only the first reply to a new message can be an echo
     for step in range(MAX_STEPS):
-        content, calls = [], []
-        for kind, value in _stream_chat(engine_port, convo, think, run, tools.schemas(), effort):
+        content, calls, held = [], [], []
+        guard = check_echo and retries < 2
+        for kind, value in _stream_chat(engine_port, convo, think, run, [] if lite else tools.schemas(), effort):
             if kind == "calls":
                 calls = value
-            else:
-                if kind == "content":
-                    content.append(value)
-                emit({"type": "delta" if kind == "content" else "reasoning", "text": value})
+                continue
+            if kind == "content":
+                content.append(value)
+                if guard:
+                    # hold the text back while it is still a prefix of the previous answer: an echo is never shown
+                    text = "".join(content).strip()
+                    if previous.startswith(text) and len(text) < len(previous) + 1:
+                        held.append(value)
+                        continue
+                    guard = False
+                    for h in held:
+                        emit({"type": "delta", "text": h})
+                    held = []
+                    emit({"type": "delta", "text": value})
+                    continue
+            emit({"type": "delta" if kind == "content" else "reasoning", "text": value})
         if run.cancelled:
             return True
+        if guard and held:
+            text = "".join(content).strip()
+            if text == previous and not calls and retries < 2:
+                # an exact echo: ask again, first with a note, then without the conversation that was copied
+                retries += 1
+                if retries == 1:
+                    convo = [system] + _echo_nudge(messages, previous)
+                else:
+                    convo = [system] + _echo_nudge(messages[-1:], previous)
+                continue
+            for h in held:                              # not an echo after all (or retries are used up): show it
+                emit({"type": "delta", "text": h})
+        check_echo = False
         msg = {"role": "assistant", "content": "".join(content)}
         if not calls:
             convo.append(msg)

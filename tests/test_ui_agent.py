@@ -36,6 +36,21 @@ class ScriptedEngine(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    health = None                                   # a dict: what GET /health answers (None: 404)
+
+    def do_GET(self):
+        if self.path == "/health" and ScriptedEngine.health is not None:
+            body = json.dumps(ScriptedEngine.health).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
     def do_POST(self):
         ScriptedEngine.seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
         events = ScriptedEngine.script.pop(0) if ScriptedEngine.script else [text("(nothing scripted)")]
@@ -59,7 +74,7 @@ class Base(unittest.TestCase):
         cls.engine.server_close()
 
     def setUp(self):
-        ScriptedEngine.script, ScriptedEngine.seen = [], []
+        ScriptedEngine.script, ScriptedEngine.seen, ScriptedEngine.health = [], [], None
         self.root = os.path.realpath(tempfile.mkdtemp())
         os.makedirs(os.path.join(self.root, "src"))
         with open(os.path.join(self.root, "src", "app.py"), "w") as f:
@@ -333,6 +348,106 @@ class TestActiveFile(Base):
         ScriptedEngine.script = [[text("ok")]]
         self.agent("hi")
         self.assertNotIn("open in the editor", self.system_of_last_request())
+
+
+class TestEchoGuard(Base):
+    """A small model copies the previous assistant turn back; the copy is never shown, the question is asked again."""
+
+    HISTORY = [{"role": "user", "content": "привет"}, {"role": "assistant", "content": "Привет! Как можно помочь?"}]
+
+    def run_with(self, script, last="проверь код"):
+        ScriptedEngine.script = script
+        body = {"messages": self.HISTORY + [{"role": "user", "content": last}]}
+        req = urllib.request.Request(self.base + "/api/agent", method="POST", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "X-UI-Token": "t"})
+        shown = []
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for raw in r:
+                line = raw.strip()
+                if line.startswith(b"data:"):
+                    ev = json.loads(line[5:])
+                    if ev["type"] == "delta":
+                        shown.append(ev["text"])
+        return "".join(shown)
+
+    def test_an_exact_echo_is_replaced_by_a_second_attempt_with_a_note(self):
+        shown = self.run_with([[text("Привет! "), text("Как можно помочь?")], [text("Код в порядке.")]])
+        self.assertEqual(shown, "Код в порядке.")
+        self.assertEqual(len(ScriptedEngine.seen), 2)
+        retry_last = ScriptedEngine.seen[1]["messages"][-1]["content"]
+        self.assertIn("проверь код", retry_last)
+        self.assertIn("do not repeat it", retry_last)
+        self.assertEqual(len(ScriptedEngine.seen[1]["messages"]), 4)            # the conversation is still there
+
+    def test_a_second_echo_is_asked_again_without_the_copied_conversation(self):
+        shown = self.run_with([[text("Привет! Как можно помочь?")], [text("Привет! Как можно помочь?")], [text("Готово.")]])
+        self.assertEqual(shown, "Готово.")
+        self.assertEqual(len(ScriptedEngine.seen), 3)
+        self.assertEqual([m["role"] for m in ScriptedEngine.seen[2]["messages"]], ["system", "user"])
+
+    def test_three_echoes_are_finally_shown_rather_than_looping(self):
+        shown = self.run_with([[text("Привет! Как можно помочь?")]] * 3)
+        self.assertEqual(shown, "Привет! Как можно помочь?")
+        self.assertEqual(len(ScriptedEngine.seen), 3)
+
+    def test_a_reply_that_only_starts_like_the_previous_one_is_not_held_back(self):
+        shown = self.run_with([[text("Привет! "), text("Вот что я нашёл в коде: всё верно.")]])
+        self.assertEqual(shown, "Привет! Вот что я нашёл в коде: всё верно.")
+        self.assertEqual(len(ScriptedEngine.seen), 1)
+
+    def test_no_previous_answer_no_guard_and_tool_calls_pass_through(self):
+        ScriptedEngine.script = [[text("Привет!")]]
+        events = self.agent("привет")
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "delta"), "Привет!")
+        ScriptedEngine.script = [[call(1, "list_dir", {"path": "."})], [text("Тут src и README.")]]
+        shown = self.run_with(ScriptedEngine.script, last="что в папке?")
+        self.assertEqual(shown, "Тут src и README.")
+
+
+class TestTinyModels(Base):
+    """A model under ~1 GB cannot drive the tool loop: it gets a short prompt, no tools, and a note."""
+
+    def events(self, prompt="проверь код"):
+        return self.agent(prompt)
+
+    def test_is_tiny_reads_the_engine_health(self):
+        port = self.engine.server_address[1]
+        ScriptedEngine.health = {"memory_gb": {"model": 0.39}}
+        self.assertTrue(agentloop.is_tiny(port))
+        ScriptedEngine.health = {"memory_gb": {"model": 7.6}}
+        self.assertFalse(agentloop.is_tiny(port))
+        ScriptedEngine.health = {"memory_gb": {}}
+        self.assertFalse(agentloop.is_tiny(port))
+        ScriptedEngine.health = None                                  # no answer: nothing changes
+        self.assertFalse(agentloop.is_tiny(port))
+        self.assertFalse(agentloop.is_tiny(agentloop.Endpoint("https://api.example.com/v1")))   # remote: never
+
+    def test_a_tiny_model_gets_the_short_prompt_no_tools_and_a_note(self):
+        ScriptedEngine.health = {"memory_gb": {"model": 0.39}}
+        ScriptedEngine.script = [[text("Всё хорошо.")]]
+        events = self.events()
+        req = ScriptedEngine.seen[0]
+        self.assertNotIn("tools", req)
+        self.assertEqual(req["messages"][0]["content"], agentloop.LITE_PROMPT)
+        notes = [e for e in events if e["type"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("plain chat", notes[0]["text"])
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "delta"), "Всё хорошо.")
+
+    def test_the_open_file_note_still_reaches_a_tiny_model(self):
+        ScriptedEngine.health = {"memory_gb": {"model": 0.39}}
+        ScriptedEngine.script = [[text("ok")]]
+        self.agent("проверь код", active={"file": "src/app.py", "line": 1})
+        self.assertIn("`src/app.py` open in the editor", ScriptedEngine.seen[0]["messages"][0]["content"])
+
+    def test_a_big_model_keeps_the_tools_and_the_full_prompt(self):
+        ScriptedEngine.health = {"memory_gb": {"model": 7.6}}
+        ScriptedEngine.script = [[text("ok")]]
+        events = self.events()
+        req = ScriptedEngine.seen[0]
+        self.assertIn("tools", req)
+        self.assertIn("autonomous coding agent", req["messages"][0]["content"])
+        self.assertEqual([e for e in events if e["type"] == "note"], [])
 
 
 class TestSearchEndpoint(Base):

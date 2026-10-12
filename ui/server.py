@@ -752,7 +752,8 @@ class Handler(BaseHTTPRequestHandler):
             finished = agentloop.run_agent(P, self.server.endpoint, msgs, emit, run, think=bool(body.get("think")),
                                            auto_edit=bool(body.get("auto_edit")), system_extra=extra,
                                            web=bool(body.get("web")), mode=body.get("mode"),
-                                           effort=effort if re.fullmatch(r"[a-z]{2,10}", str(effort or "")) else None)
+                                           effort=effort if re.fullmatch(r"[a-z]{2,10}", str(effort or "")) else None,
+                                           lite=agentloop.is_tiny(self.server.endpoint))
             if finished:
                 emit({"type": "done"})
         except RuntimeError as e:
@@ -809,7 +810,7 @@ class Handler(BaseHTTPRequestHandler):
         if not query:
             raise ValueError("a search text is required")
         try:
-            return self._json(200, {"results": extensions.search(query)})
+            return self._json(200, {"results": extensions.search(query, category=q.get("category") or None)})
         except extensions.ExtensionError as e:
             return self._error(502, str(e))
 
@@ -826,6 +827,25 @@ class Handler(BaseHTTPRequestHandler):
         except extensions.ExtensionError as e:
             return self._error(502 if "open-vsx.org" in str(e) else 400, str(e))
         return self._json(200, {"ok": True, "extension": m})
+
+    def api_extensions_enable(self, P, q, body):
+        from ui import extensions
+        try:
+            on = extensions.set_enabled(body.get("id"), bool(body.get("enabled")))
+        except extensions.ExtensionError as e:
+            return self._error(400, str(e))
+        return self._json(200, {"ok": True, "enabled": on})
+
+    def api_extensions_detail(self, P, q, body):
+        from ui import extensions
+        try:
+            return self._json(200, extensions.detail(q.get("id", "")))
+        except extensions.ExtensionError as e:
+            return self._error(404, str(e))
+
+    def api_extensions_updates(self, P, q, body):
+        from ui import extensions
+        return self._json(200, {"updates": extensions.updates()})
 
     def api_extensions_remove(self, P, q, body):
         from ui import extensions

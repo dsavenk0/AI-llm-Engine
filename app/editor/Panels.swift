@@ -404,10 +404,14 @@ struct ExtensionsSheet: View {
     @Binding var shown: Bool
     @ObservedObject private var theme = ThemeSettings.shared
     @State private var query = ""
+    @State private var category = ""                       // "", Themes, Snippets, Programming Languages
     @State private var hits: [ExtensionHit] = []
     @State private var installed: [InstalledExtension] = []
     @State private var busy: String?
     @State private var note: String?
+    @State private var updates: [String: String] = [:]     // id -> the newer version on Open VSX
+    @State private var open: Set<String> = []              // installed extensions whose details are shown
+    @State private var details: [String: ExtensionDetail] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -419,18 +423,35 @@ struct ExtensionsSheet: View {
                 }
                 Button("Close") { shown = false }.keyboardShortcut(.cancelAction)
             }
-            Text("Colour themes and snippets are used (type a snippet's prefix and press Tab). An extension's own code is never run here.")
-                .font(.caption).foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Here an extension gives its colour themes and snippets (type a snippet's prefix and press Tab) — its own code is never run.")
+                    .font(.caption).foregroundColor(.secondary)
+                Text("Extensions that bring their own code (agents, debuggers) cannot run here — the assistant of this "
+                     + "editor does that job; what an extension adds as themes and snippets works.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
             HStack {
                 TextField("Search open-vsx.org (a theme name, a language…)", text: $query)
                     .textFieldStyle(.roundedBorder).onSubmit(search)
+                Picker("", selection: $category) {
+                    Text("All").tag("")
+                    Text("Themes").tag("Themes")
+                    Text("Snippets").tag("Snippets")
+                    Text("Languages").tag("Programming Languages")
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 270)
                 Button("Search", action: search).disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
             }
             if let n = note { Text(n).font(.caption).foregroundColor(Palette.yellow) }
             List {
                 if !installed.isEmpty {
-                    Section("Installed") {
+                    Section {
                         ForEach(installed) { e in installedRow(e) }
+                    } header: {
+                        HStack {
+                            Text("Installed")
+                            Spacer()
+                            Button("Check for updates", action: checkUpdates).buttonStyle(.borderless).disabled(busy != nil)
+                        }
                     }
                 }
                 if !hits.isEmpty {
@@ -441,7 +462,7 @@ struct ExtensionsSheet: View {
             }.listStyle(.inset)
             if let b = busy { HStack { ProgressView().controlSize(.small); Text(b).font(.caption) } }
         }
-        .padding(16).frame(minWidth: 640, minHeight: 480)
+        .padding(16).frame(minWidth: 700, minHeight: 520)
         .onAppear { Task { await reload() } }
     }
 
@@ -466,19 +487,29 @@ struct ExtensionsSheet: View {
     }
 
     private func installedRow(_ e: InstalledExtension) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(e.displayName).bold()
+                Toggle("", isOn: Binding(get: { e.isEnabled }, set: { setEnabled(e, $0) }))
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    .help(e.isEnabled ? "On: its themes and snippets are available" : "Off: kept installed, not used")
+                Text(e.displayName).bold().foregroundColor(e.isEnabled ? .primary : .secondary)
                 Text(e.id + " " + e.version).font(.caption).foregroundColor(.secondary)
                 Spacer()
+                if let latest = updates[e.id] {
+                    Button("Update to \(latest)") { update(e) }.buttonStyle(.bordered).controlSize(.small).disabled(busy != nil)
+                }
+                Button(open.contains(e.id) ? "Hide" : "Details") { toggleDetails(e) }.buttonStyle(.borderless)
                 Button("Remove") { remove(e) }.buttonStyle(.borderless).disabled(busy != nil)
             }
             Text(e.detail).font(.caption).foregroundColor(.secondary)
-            if e.has_code || !e.skipped.isEmpty {
+            if e.usable == false {
+                Text("Nothing here this editor can use — it is made of its own code" + (e.has_code ? "" : " or UI") +
+                     ". Remove it, or use it in VS Code.").font(.caption2).foregroundColor(Palette.yellow)
+            } else if e.has_code || !e.skipped.isEmpty {
                 let what = ([e.has_code ? "its code" : nil] + e.skipped.map { Optional($0) }).compactMap { $0 }
                 Text("Not used: " + what.joined(separator: ", ")).font(.caption2).foregroundColor(.secondary)
             }
-            if !e.themes.isEmpty {
+            if e.isEnabled, !e.themes.isEmpty {
                 HStack {
                     ForEach(e.themes, id: \.self) { t in
                         Button(t.label) { ws.applyExtensionTheme(id: e.id, label: t.label); shown = false }
@@ -486,11 +517,94 @@ struct ExtensionsSheet: View {
                     }
                 }
             }
+            if open.contains(e.id) { detailView(e) }
         }.padding(.vertical, 2)
+    }
+
+    private func detailView(_ e: InstalledExtension) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let d = details[e.id] {
+                if !d.themes.isEmpty { Text("Themes: " + d.themes.joined(separator: ", ")).font(.caption) }
+                if !d.languages.isEmpty { Text("Languages: " + d.languages.joined(separator: ", ")).font(.caption) }
+                if d.snippets.isEmpty { Text("No snippets").font(.caption).foregroundColor(.secondary) }
+                else {
+                    Text("Snippets — type the prefix, press Tab (\(d.snippet_total)):").font(.caption)
+                    ForEach(Array(d.snippets.prefix(25).enumerated()), id: \.offset) { _, sn in
+                        HStack(spacing: 6) {
+                            Text(sn.prefix).font(.system(size: 11, design: .monospaced)).foregroundColor(Palette.accent)
+                            Text(sn.language).font(.caption2).foregroundColor(.secondary)
+                            Text(sn.description).font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                        }
+                    }
+                    if d.snippet_total > 25 { Text("… and \(d.snippet_total - 25) more").font(.caption2).foregroundColor(.secondary) }
+                }
+                HStack(spacing: 12) {
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: d.folder)])
+                    }.buttonStyle(.borderless).font(.caption)
+                    if let h = d.homepage, let url = URL(string: h) {
+                        Button("Open its page") { NSWorkspace.shared.open(url) }.buttonStyle(.borderless).font(.caption)
+                    }
+                }
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(.leading, 40).padding(.top, 2)
     }
 
     private func reload() async {
         if let r: InstalledExtensionsResponse = try? await ws.backend.get("/api/extensions/installed") { installed = r.extensions }
+    }
+
+    private func toggleDetails(_ e: InstalledExtension) {
+        if open.contains(e.id) { open.remove(e.id); return }
+        open.insert(e.id)
+        Task {
+            if let d: ExtensionDetail = try? await ws.backend.get("/api/extensions/detail?id=\(ws.backend.encoded(e.id))") {
+                details[e.id] = d
+            }
+        }
+    }
+
+    private func setEnabled(_ e: InstalledExtension, _ on: Bool) {
+        Task {
+            try? await ws.backend.post("/api/extensions/enable", body: ["id": e.id, "enabled": on])
+            if !on, theme.custom?.id == e.id { theme.custom = nil }          // its theme goes with it
+            ws.resetSnippets()
+            await reload()
+        }
+    }
+
+    private func checkUpdates() {
+        busy = "Asking open-vsx.org for newer versions…"; note = nil
+        Task {
+            defer { busy = nil }
+            do {
+                let r: ExtensionUpdatesResponse = try await ws.backend.get("/api/extensions/updates")
+                updates = Dictionary(uniqueKeysWithValues: r.updates.map { ($0.id, $0.latest) })
+                note = r.updates.isEmpty ? "Everything is up to date" : nil
+            } catch { note = error.localizedDescription }
+        }
+    }
+
+    private func update(_ e: InstalledExtension) {
+        let parts = e.id.split(separator: ".", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let latest = updates[e.id] else { return }
+        busy = "Updating \(e.displayName)…"; note = nil
+        Task {
+            defer { busy = nil }
+            do {
+                try await ws.backend.post("/api/extensions/install",
+                                          body: ["namespace": parts[0], "name": parts[1], "version": latest, "confirm": true])
+                updates[e.id] = nil
+                details[e.id] = nil
+                await reload()
+                ws.resetSnippets()
+                if theme.custom?.id == e.id { theme.custom = nil }
+                note = "\(e.displayName) is now \(latest)"
+            } catch { note = error.localizedDescription }
+        }
     }
 
     private func search() {
@@ -500,9 +614,10 @@ struct ExtensionsSheet: View {
         Task {
             defer { busy = nil }
             do {
-                let r: ExtensionSearchResponse = try await ws.backend.get("/api/extensions/search?q=\(ws.backend.encoded(q))")
+                let cat = category.isEmpty ? "" : "&category=\(ws.backend.encoded(category))"
+                let r: ExtensionSearchResponse = try await ws.backend.get("/api/extensions/search?q=\(ws.backend.encoded(q))\(cat)")
                 hits = r.results
-                if r.results.isEmpty { note = "Nothing found" }
+                if r.results.isEmpty { note = "Nothing found" + (category.isEmpty ? "" : " in this category") }
             } catch { note = error.localizedDescription }
         }
     }
@@ -526,6 +641,7 @@ struct ExtensionsSheet: View {
         Task {
             try? await ws.backend.post("/api/extensions/remove", body: ["id": e.id])
             if theme.custom?.id == e.id { theme.custom = nil }
+            open.remove(e.id); details[e.id] = nil; updates[e.id] = nil
             ws.resetSnippets()
             await reload()
         }

@@ -268,3 +268,85 @@ class TestExtensionsMore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdministration(unittest.TestCase):
+    """Switch off / on, what an extension gives, updates, search by category — what the sheet's admin needs."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.vsix = make_vsix({"themes/night.json": THEME, "snippets/py.json": SNIPPETS},
+                              {"name": "night", "publisher": "acme", "version": "1.2.0", "displayName": "Night",
+                               "homepage": "https://example.org/night",
+                               "contributes": {"themes": [{"label": "Night", "uiTheme": "vs-dark", "path": "./themes/night.json"}],
+                                               "snippets": [{"language": "python", "path": "./snippets/py.json"}]}})
+        X.install_vsix(self.vsix, dest_root=self.base)
+
+    def test_installed_says_enabled_and_usable(self):
+        m = X.installed(self.base)[0]
+        self.assertEqual((m["enabled"], m["usable"], m["homepage"]), (True, True, "https://example.org/night"))
+        code_only = make_vsix({}, {"name": "agent", "publisher": "acme", "version": "1.0.0",
+                                    "contributes": {"commands": [{"command": "x"}]}, "main": "./out/extension.js"})
+        X.install_vsix(code_only, dest_root=self.base)
+        by_id = {x["id"]: x for x in X.installed(self.base)}
+        self.assertFalse(by_id["acme.agent"]["usable"])
+        self.assertTrue(by_id["acme.agent"]["has_code"])
+
+    def test_switching_off_hides_the_theme_and_the_snippets_but_keeps_the_files(self):
+        self.assertEqual(X.set_enabled("acme.night", False, self.base), False)
+        self.assertFalse(X.installed(self.base)[0]["enabled"])
+        self.assertEqual(X.snippets("python", base=self.base), [])
+        with self.assertRaisesRegex(X.ExtensionError, "switched off"):
+            X.theme("acme.night", "Night", base=self.base)
+        self.assertEqual(len(X.installed(self.base)), 1)                       # still installed
+        self.assertEqual(X.set_enabled("acme.night", True, self.base), True)
+        self.assertEqual(len(X.snippets("python", base=self.base)), 2)
+        self.assertEqual(X.theme("acme.night", "Night", base=self.base)["background"], "#112233")
+
+    def test_enabling_what_is_not_installed_or_a_bad_id_is_refused(self):
+        with self.assertRaisesRegex(X.ExtensionError, "not installed"):
+            X.set_enabled("acme.ghost", False, self.base)
+        with self.assertRaisesRegex(X.ExtensionError, "invalid"):
+            X.set_enabled("../x", False, self.base)
+
+    def test_removing_clears_the_switch_so_a_reinstall_starts_on(self):
+        X.set_enabled("acme.night", False, self.base)
+        X.remove("acme.night", base=self.base)
+        X.install_vsix(self.vsix, dest_root=self.base)
+        self.assertTrue(X.installed(self.base)[0]["enabled"])
+
+    def test_detail_lists_themes_and_every_snippet_prefix(self):
+        d = X.detail("acme.night", base=self.base)
+        self.assertEqual(d["themes"], ["Night"])
+        self.assertEqual(sorted((s["language"], s["prefix"]) for s in d["snippets"]), [("python", "pr"), ("python", "print")])
+        self.assertEqual((d["snippet_total"], d["enabled"], d["usable"]), (2, True, True))
+        self.assertTrue(os.path.isdir(d["folder"]))
+        with self.assertRaises(X.ExtensionError):
+            X.detail("acme.ghost", base=self.base)
+
+    def test_updates_compare_versions_numerically_and_skip_silent_answers(self):
+        def get(url, **kw):
+            if url.endswith("/acme/night"):
+                return json.dumps({"version": "1.10.0"}).encode()
+            raise X.ExtensionError("open-vsx.org answered 404")
+        self.assertEqual(X.updates(self.base, get=get), [{"id": "acme.night", "installed": "1.2.0", "latest": "1.10.0"}])
+        older = lambda url, **kw: json.dumps({"version": "1.1.9"}).encode()      # noqa: E731
+        self.assertEqual(X.updates(self.base, get=older), [])
+        same = lambda url, **kw: json.dumps({"version": "1.2.0"}).encode()       # noqa: E731
+        self.assertEqual(X.updates(self.base, get=same), [])
+
+    def test_search_can_ask_for_a_category_and_ignores_an_unknown_one(self):
+        seen = []
+
+        def get(url, **kw):
+            seen.append(url)
+            return b'{"extensions": []}'
+        X.search("night", get=get, category="Themes")
+        X.search("night", get=get, category="Everything")
+        self.assertIn("category=Themes", seen[0])
+        self.assertNotIn("category", seen[1])
+
+    def test_homepage_is_only_ever_an_http_address(self):
+        for given, want in (("https://x.org/a", "https://x.org/a"), ("git+https://github.com/a/b.git", "https://github.com/a/b"),
+                            ("javascript:alert(1)", None), ("git@github.com:a/b.git", None), (5, None), ("", None)):
+            self.assertEqual(X._url(given), want, given)

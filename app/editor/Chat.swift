@@ -251,6 +251,7 @@ final class ChatStore: ObservableObject {
                 s.items.append(ChatItem(kind: .question, question: QuestionInfo(id: id, question: q, options: options)))
             case .toolResult(_, _, let ok, let summary):
                 if !ok, !lastIs(.error) { s.items.append(ChatItem(kind: .error, text: summary)) }
+            case .note(let t): ws.say(t)
             case .done: break
             case .error(let m): s.items.append(ChatItem(kind: .error, text: m))
             }

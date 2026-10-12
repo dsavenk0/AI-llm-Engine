@@ -254,6 +254,33 @@ class TestReviewFixes(Base):
             code, r = self.call("GET", "/api/extensions/snippets?language=python")
         self.assertEqual((code, r["snippets"]), (200, []))
 
+    def test_extension_admin_endpoints_switch_describe_and_refuse(self):
+        import io
+        import tempfile
+        import zipfile
+        from unittest import mock
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("extension/package.json", json.dumps({
+                "name": "night", "publisher": "acme", "version": "1.0.0",
+                "contributes": {"snippets": [{"language": "python", "path": "./s.json"}]}}))
+            z.writestr("extension/s.json", '{"P": {"prefix": "pp", "body": ["print($1)"], "description": "print"}}')
+        store = tempfile.mkdtemp()
+        from ui import extensions
+        extensions.install_vsix(buf.getvalue(), dest_root=store)
+        with mock.patch.dict(os.environ, {"LLM_EXTENSIONS_DIR": store}):
+            code, r = self.call("GET", "/api/extensions/installed")
+            self.assertEqual((code, r["extensions"][0]["enabled"], r["extensions"][0]["usable"]), (200, True, True))
+            code, r = self.call("GET", "/api/extensions/detail?id=acme.night")
+            self.assertEqual((code, [s["prefix"] for s in r["snippets"]]), (200, ["pp"]))
+            self.assertEqual(self.call("GET", "/api/extensions/detail?id=acme.ghost")[0], 404)
+            self.assertEqual(self.call("POST", "/api/extensions/enable", {"id": "acme.night", "enabled": False})[1]["enabled"], False)
+            self.assertEqual(self.call("GET", "/api/extensions/snippets?language=python")[1]["snippets"], [])
+            self.assertEqual(self.call("POST", "/api/extensions/enable", {"id": "../x", "enabled": True})[0], 400)
+            self.assertEqual(self.call("POST", "/api/extensions/enable", {"id": "acme.ghost", "enabled": True})[0], 400)
+            self.assertEqual(self.call("POST", "/api/extensions/enable", {"id": "acme.night", "enabled": True})[1]["enabled"], True)
+            self.assertEqual(len(self.call("GET", "/api/extensions/snippets?language=python")[1]["snippets"]), 1)
+
     def test_modes_plan_is_read_only_auto_runs_only_safe_commands_and_manual_asks(self):
         from ui import agentloop
         P = Project(self.root)

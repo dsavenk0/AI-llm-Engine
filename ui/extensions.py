@@ -71,8 +71,16 @@ def fetch(url, limit=2 * 1024 * 1024, timeout=30):
     return data
 
 
-def search(query, size=20, get=fetch):
-    q = urllib.parse.urlencode({"query": query, "size": max(1, min(int(size), 50)), "sortBy": "relevance"})
+CATEGORIES = ("Themes", "Snippets", "Programming Languages")      # what this editor can use of an extension
+
+
+def search(query, size=20, get=fetch, category=None):
+    """`category`: only extensions Open VSX files under it (Themes / Snippets / Programming Languages) — most of
+    the others are code-only (agents, debuggers) and give this editor nothing to use."""
+    params = {"query": query, "size": max(1, min(int(size), 50)), "sortBy": "relevance"}
+    if category in CATEGORIES:
+        params["category"] = category
+    q = urllib.parse.urlencode(params)
     try:
         data = json.loads(get(f"{API}/-/search?{q}"))
         listing = data.get("extensions") or []
@@ -146,6 +154,18 @@ def _root(z):
     raise ExtensionError("not an extension: package.json is missing")
 
 
+def _url(v):
+    """An http(s) address from a package.json field, or None (git+https://… and git@… are tidied or dropped)."""
+    if not isinstance(v, str):
+        return None
+    v = v.strip()
+    if v.startswith("git+"):
+        v = v[4:]
+    if v.endswith(".git"):
+        v = v[:-4]
+    return v if re.match(r"^https?://[^\s]+$", v) and len(v) < 300 else None
+
+
 def _inspect(z, root):
     """The manifest dict and the files to keep, from a .vsix opened as `z`."""
     rel = lambda p: _safe_member((root + "/" if root else "") + p.lstrip("./"))
@@ -196,6 +216,8 @@ def _inspect(z, root):
         "displayName": str(pkg.get("displayName") or pkg["name"]), "version": str(pkg.get("version") or "0"),
         "description": str(pkg.get("description") or ""), "themes": themes, "snippets": snippets,
         "languages": languages, "skipped": skipped, "has_code": code,
+        "homepage": _url(pkg.get("homepage")) or _url((pkg.get("repository") or {}).get("url")
+                                                      if isinstance(pkg.get("repository"), dict) else pkg.get("repository")),
     }
     return manifest, sorted(keep)
 
@@ -287,8 +309,40 @@ def _folders(base, ext_id):
     return found
 
 
+def _disabled_path(base):
+    return os.path.join(base, "disabled.json")
+
+
+def disabled_ids(base=None):
+    """Ids the person switched off (kept installed, their themes and snippets ignored)."""
+    base = base or store_dir()
+    try:
+        with open(_disabled_path(base), encoding="utf-8") as f:
+            data = json.load(f)
+        return {x for x in data if isinstance(x, str)} if isinstance(data, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def set_enabled(ext_id, enabled, base=None):
+    base = base or store_dir()
+    if not isinstance(ext_id, str) or not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", ext_id):
+        raise ExtensionError("invalid extension id")
+    if not _folders(base, ext_id):
+        raise ExtensionError("that extension is not installed")
+    off = disabled_ids(base)
+    (off.discard if enabled else off.add)(ext_id)
+    os.makedirs(base, exist_ok=True)
+    tmp = _disabled_path(base) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sorted(off), f)
+    os.replace(tmp, _disabled_path(base))
+    return not (ext_id in off)
+
+
 def installed(base=None):
     base = base or store_dir()
+    off = disabled_ids(base)
     out = []
     if os.path.isdir(base):
         for d in sorted(os.listdir(base)):
@@ -299,6 +353,8 @@ def installed(base=None):
                 if not isinstance(m, dict):
                     continue
                 m["folder"] = d
+                m["enabled"] = m.get("id") not in off
+                m["usable"] = bool(m.get("themes") or m.get("snippets"))
                 out.append(m)
             except (OSError, ValueError):
                 continue
@@ -312,7 +368,68 @@ def remove(ext_id, base=None):
     found = _folders(base, ext_id)
     for folder in found:
         shutil.rmtree(folder, ignore_errors=True)
+    if found and ext_id in disabled_ids(base):          # a later install starts switched on
+        set_enabled_raw(base, disabled_ids(base) - {ext_id})
     return len(found)
+
+
+def set_enabled_raw(base, ids):
+    os.makedirs(base, exist_ok=True)
+    tmp = _disabled_path(base) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sorted(ids), f)
+    os.replace(tmp, _disabled_path(base))
+
+
+def detail(ext_id, base=None, limit=300):
+    """What one installed extension gives this editor: its themes, its snippets (language, prefix, description)
+    and what it carries that is not used — the "what can I do with it" page of the extensions sheet."""
+    base = base or store_dir()
+    for m in installed(base):
+        if m.get("id") == ext_id:
+            snips = []
+            for s in m.get("snippets", []):
+                try:
+                    with open(os.path.join(base, m["folder"], s["file"]), encoding="utf-8", errors="replace") as f:
+                        data = jsonc(f.read())
+                except (OSError, ValueError):
+                    continue
+                for title, snip in (data.items() if isinstance(data, dict) else []):
+                    if not isinstance(snip, dict):
+                        continue
+                    p = snip.get("prefix")
+                    for prefix in ([p] if isinstance(p, str) else [x for x in p or [] if isinstance(x, str)]):
+                        snips.append({"language": s["language"], "prefix": prefix,
+                                      "description": str(snip.get("description") or title)})
+            return {"id": ext_id, "enabled": m["enabled"], "usable": m["usable"], "version": m.get("version"),
+                    "homepage": m.get("homepage"), "themes": [t["label"] for t in m.get("themes", [])],
+                    "languages": [lang["id"] for lang in m.get("languages", [])],
+                    "snippets": snips[:limit], "snippet_total": len(snips), "skipped": m.get("skipped", []),
+                    "has_code": bool(m.get("has_code")), "folder": os.path.join(base, m["folder"])}
+    raise ExtensionError("that extension is not installed")
+
+
+def _version_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+]", str(v)))
+
+
+def updates(base=None, get=fetch):
+    """[{id, installed, latest}] for installed extensions whose newest Open VSX version is higher (one request
+    each, so it is asked for on demand; an extension Open VSX does not answer for is skipped)."""
+    base = base or store_dir()
+    out = []
+    for m in installed(base):
+        ns, _, name = str(m.get("id", "")).partition(".")
+        if not NAME_RE.match(ns) or not NAME_RE.match(name):
+            continue
+        try:
+            meta = json.loads(get(f"{API}/{urllib.parse.quote(ns)}/{urllib.parse.quote(name)}"))
+            latest = str(meta.get("version") or "")
+        except (ExtensionError, ValueError, AttributeError):
+            continue
+        if VERSION_RE.match(latest) and _version_key(latest) > _version_key(m.get("version", "0")):
+            out.append({"id": m["id"], "installed": m.get("version"), "latest": latest})
+    return out
 
 
 # ───────────────────────────── themes ─────────────────────────────
@@ -375,6 +492,8 @@ def theme(ext_id, label, base=None):
     """A theme from an installed extension, converted to what the editor uses:
     {"label", "dark", "background", "foreground", "kinds": {kind: "#rrggbb"}}."""
     base = base or store_dir()
+    if ext_id in disabled_ids(base):
+        raise ExtensionError("that extension is switched off")
     for folder in _folders(base, ext_id):
         with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
             manifest = json.load(f)
@@ -424,6 +543,8 @@ def snippets(language, base=None):
     base = base or store_dir()
     out = []
     for m in installed(base):
+        if not m.get("enabled", True):
+            continue
         for s in m.get("snippets", []):
             if s.get("language") != language:
                 continue

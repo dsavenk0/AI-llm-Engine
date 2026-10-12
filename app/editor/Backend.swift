@@ -96,11 +96,26 @@ struct ExtensionHit: Decodable, Identifiable, Hashable {
 struct ExtensionSearchResponse: Decodable { let results: [ExtensionHit] }
 struct ExtensionTheme: Decodable, Hashable { let label: String, uiTheme: String }
 struct ExtensionSnippetFile: Decodable, Hashable { let language: String }
+struct ExtensionSnippetItem: Decodable, Hashable { let language: String, prefix: String, description: String }
+struct ExtensionDetail: Decodable {
+    let themes: [String], languages: [String]
+    let snippets: [ExtensionSnippetItem]
+    let snippet_total: Int
+    let homepage: String?
+    let folder: String
+}
+struct ExtensionUpdate: Decodable, Hashable { let id: String, installed: String, latest: String }
+struct ExtensionUpdatesResponse: Decodable { let updates: [ExtensionUpdate] }
+
 struct InstalledExtension: Decodable, Identifiable, Hashable {
     let id: String, name: String, displayName: String, version: String, description: String
     let themes: [ExtensionTheme], snippets: [ExtensionSnippetFile]
     let skipped: [String]
     let has_code: Bool
+    var enabled: Bool? = nil
+    var usable: Bool? = nil
+    var homepage: String? = nil
+    var isEnabled: Bool { enabled ?? true }
     var detail: String {
         var parts: [String] = []
         if !themes.isEmpty { parts.append("\(themes.count) theme\(themes.count == 1 ? "" : "s")") }
