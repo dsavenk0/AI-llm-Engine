@@ -78,7 +78,7 @@ class TestBuiltIn(unittest.TestCase):
                 self.assertIsInstance(D.diagnose(junk, lang), list)
 
     def test_our_own_sources_are_clean(self):
-        for rel in ("llm.py", "agent.py", "ui/server.py", "ui/codeinfo.py", "app/LLMBar.swift", "app/editor/Chat.swift"):
+        for rel in ("llm.py", "agent.py", "ui/server.py", "ui/codeinfo.py", "app/bar/Bar.swift", "app/editor/Chat.swift"):
             text = open(os.path.join(ROOT, rel), encoding="utf-8").read()
             lang = "swift" if rel.endswith(".swift") else "python"
             self.assertEqual(D.diagnose(text, lang), [], rel)

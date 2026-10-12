@@ -322,7 +322,7 @@ class TestOnTheRepository(unittest.TestCase):
         llm = [s["name"] for s in outline_of("llm.py")]
         for fn in ("load_cfg", "inspect_model", "hf_pull", "main"):
             self.assertIn(fn, llm)
-        swift = outline_of("app/LLMBar.swift")
+        swift = outline_of("app/bar/Bar.swift")
         top = {s["name"]: s for s in swift}
         for t in ("ContentView", "EngineState", "AppDelegate", "SettingsTab", "ModelsTab", "AboutView"):
             self.assertIn(t, top, f"{t} missing from Swift top level: {sorted(top)[:25]}")

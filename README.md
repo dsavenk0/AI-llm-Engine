@@ -321,7 +321,10 @@ there is a progress bar with the bytes the engine process holds so far, and a sl
 
 **Desktop widget** (macOS 14+): the app carries a WidgetKit extension in two sizes. The small one is the orb: a click
 opens the chat, the app starts the model and listens at once. The wide one shows the selected model and whether it is
-up, a large sphere (a click opens the voice chat), a power button that turns the model on or off **in the
+up, a large sphere (a click opens the voice chat) with **GPU load on one side and RAM use on the other while the model
+is on** (a snapshot refreshed every couple of minutes, as often as the system's widget budget allows). While the model is on
+the sphere moves at a very low frame rate (a frame every ten seconds, prepared in advance — a widget cannot run a
+continuous animation); when the model sleeps or is off it stands still and the dot is an empty ring, a power button that turns the model on or off **in the
 background** (the already running app runs `llm start` / `llm stop`; no window), and three icons — voice assistant,
 editor, terminal CLI — each of which starts loading the model ahead of use, so it is ready when the window is. The
 widget's taps are `llmbar://` links into the one app. WidgetKit lists extensions only of apps that live in
