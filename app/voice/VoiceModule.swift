@@ -1015,19 +1015,18 @@ struct VoiceView: View {
 
     private var header: some View {
         let (_, stateColor) = label
-        return HStack(spacing: 7) {
-            // filled while the model answers (running), an empty ring while it is off
-            ZStack {
-                Circle().strokeBorder(stateColor.opacity(0.8), lineWidth: 1.3).opacity(voice.model.running ? 0 : 1)
-                Circle().fill(stateColor).shadow(color: stateColor.opacity(0.7), radius: 3).opacity(voice.model.running ? 1 : 0)
-            }.frame(width: 8, height: 8)
-            Text("LLM VOICE").font(VHUD.mono(10, .semibold)).tracking(1.6).foregroundColor(VHUD.dim)
-            Spacer()
+        return HStack(spacing: 9) {
             Button { showHistory.toggle() } label: {
                 Image(systemName: "clock.arrow.circlepath").foregroundColor(VHUD.dim)
             }
             .buttonStyle(.plain).help("Chat history — open, rename, delete")
             .popover(isPresented: $showHistory, arrowEdge: .bottom) { HistoryList(voice: voice) { showHistory = false } }
+            // filled while the model answers (running), an empty ring while it is off
+            ZStack {
+                Circle().strokeBorder(stateColor.opacity(0.8), lineWidth: 1.3).opacity(voice.model.running ? 0 : 1)
+                Circle().fill(stateColor).shadow(color: stateColor.opacity(0.7), radius: 3).opacity(voice.model.running ? 1 : 0)
+            }.frame(width: 8, height: 8)
+            Spacer()
             Menu {
                 Toggle("Read voice answers aloud", isOn: $voice.speakReplies)
                 Toggle("Listen when opened", isOn: $voice.autoListen)
