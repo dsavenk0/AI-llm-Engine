@@ -83,6 +83,7 @@ DEFAULTS = {
     "proxy_https": "",
     "no_proxy": "",              # comma-separated hosts/CIDRs that bypass the proxy
     "ca_bundle": "",             # PEM file with extra root certificates (TLS-inspecting proxies)
+    "favorites": [],             # model paths marked with a star: listed first, and the ones the apps offer to switch to
     "models": {},
 }
 LOG_LEVELS = ("error", "warning", "info", "debug", "trace")
@@ -279,7 +280,10 @@ def scan_models(cfg):
                         found.append(info)
                     dirnames[:] = []
     found += scan_gguf(cfg)
-    return sorted(found, key=lambda m: (not m["supported"], m["name"].lower()))
+    favs = {str(f) for f in (cfg.get("favorites") or [])}
+    for m in found:
+        m["favorite"] = m["path"] in favs
+    return sorted(found, key=lambda m: (not m["favorite"], not m["supported"], m["name"].lower()))
 
 
 _GGUF_CACHE = {}
@@ -416,8 +420,48 @@ def list_models(cfg, models):
         cur = G(" ◀ " + T("selected")) if m["path"] == cfg["model"] else ""
         feats = [f for f, on in (("vision", m["vision"]), ("thinking", m["thinking"]), ("hadamard", m["hadamard"])) if on]
         ok = fit(m) if m["supported"] else R(T("✗ unsupported:") + " " + ", ".join(m["problems"]))
-        print(f" {i:>2}) {B(m['name'])}{cur}")
+        star = Y("★ ") if m.get("favorite") else "  "
+        print(f" {i:>2}) {star}{B(m['name'])}{cur}")
         print(f"     {m['size']:.1f} GB · {m['format']} · {m['type']}{' · ' + ', '.join(feats) if feats else ''} · {ok}")
+
+
+def fav_cmd(cfg, args):
+    """`./llm fav` lists the favourites; `./llm fav <number|name|path>` toggles one; --on / --off set it explicitly
+    (what the apps send, so two quick clicks never undo each other)."""
+    flags = [a for a in args if a in ("--on", "--off", "--json")]
+    rest = [a for a in args if a not in flags]
+    models = scan_models(cfg)
+    favs = [f for f in cfg.get("favorites", []) if isinstance(f, str)]
+    if not rest:
+        names = [m for m in models if m["favorite"]]
+        if "--json" in flags:
+            print(json.dumps([m["path"] for m in names], ensure_ascii=False))
+        elif not names:
+            print(Y(T("No favourite models yet — ./llm fav <number|name> adds one.")))
+        else:
+            print(B("\n── " + T("Favourite models") + " ──"))
+            for m in names:
+                print(f"  {Y('★')} {B(m['name'])}  {m['size']:.1f} GB")
+        return True
+    key = rest[0]
+    pick = next((m for m in models if m["path"] == key), None)
+    if pick is None and key.isdigit() and 1 <= int(key) <= len(models):
+        pick = models[int(key) - 1]
+    if pick is None:
+        hits = [m for m in models if key.lower() in m["name"].lower()]
+        if len(hits) > 1:
+            print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
+        pick = hits[0] if len(hits) == 1 else None
+    if pick is None:
+        print(R(T("Model not found."))); return False
+    want = ("--on" in flags) or ("--off" not in flags and pick["path"] not in favs)
+    favs = [f for f in favs if f != pick["path"]]
+    if want:
+        favs.append(pick["path"])
+    cfg["favorites"] = favs
+    save_cfg(cfg)
+    print(G((T("★ Added to favourites:") if want else T("Removed from favourites:")) + f" {pick['name']}"))
+    return True
 
 
 def choose_model(cfg, arg=None):
@@ -427,7 +471,10 @@ def choose_model(cfg, arg=None):
         if not models: return False
         arg = input(T("Model number (Enter to cancel)") + " › ").strip()
         if not arg: return False
-    if arg.isdigit() and 1 <= int(arg) <= len(models):
+    exact = next((m for m in models if m["path"] == arg), None)
+    if exact:
+        pick = exact
+    elif arg.isdigit() and 1 <= int(arg) <= len(models):
         pick = models[int(arg) - 1]
     else:
         hits = [m for m in models if arg.lower() in m["name"].lower()]
@@ -1962,6 +2009,7 @@ def main():
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),
         "models": lambda: print(json.dumps(scan_models(cfg), ensure_ascii=False)) if arg == "--json"
         else list_models(cfg, scan_models(cfg)), "use": lambda: choose_model(cfg, arg or None),
+        "fav": lambda: fav_cmd(cfg, sys.argv[2:]),
         "chat": lambda: chat(cfg), "bench": lambda: bench(cfg), "logs": logs,
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,
         "rm": lambda: remove_cmd(cfg, sys.argv[2:]),

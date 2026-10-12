@@ -229,5 +229,9 @@
   "No memory hogs found.": "Лишних процессов не найдено.",
   "⚠ Using memory:": "⚠ Занимают память:",
   "The built-in decoder could not load this file; trying llama.cpp.": "Встроенный декодер не смог загрузить этот файл; пробую llama.cpp.",
-  "not a repository id (org/name)": "это не идентификатор репозитория (org/name)"
+  "not a repository id (org/name)": "это не идентификатор репозитория (org/name)",
+  "No favourite models yet — ./llm fav <number|name> adds one.": "Избранных моделей пока нет — ./llm fav <номер|имя> добавляет.",
+  "Favourite models": "Избранные модели",
+  "★ Added to favourites:": "★ Добавлено в избранное:",
+  "Removed from favourites:": "Убрано из избранного:"
 }

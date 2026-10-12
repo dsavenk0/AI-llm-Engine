@@ -17,6 +17,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Editor**: agent modes (Manual / Edit automatically / Plan / Auto) and Effort, a context ring with Compact,
   chat rename / delete, file and *Discard all* git discard with a confirmation, Open VSX colour themes and snippets
   (opt-in), web search and picture generation tools.
+- **Favourite models**: a star in LLMBar's model list, `./llm fav <number|name>`, favourites first everywhere; the
+  editor's and Voice's model menus lead with them. A power button on the wide widget turns the model on / off in the
+  background, and its voice / editor / terminal icons load the model ahead of use.
 - Prompt-lookup speculative decoding for the mlx-lm and GGUF routes (the cache is trimmed back on rejected drafts).
 - Tests: mutation tester (`tests/mutate.py`), reference-based tests for every GGUF block format, prefix-store rules,
   MCP / parser / image edge cases. Full suite: 700+ tests.

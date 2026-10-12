@@ -521,7 +521,9 @@ final class Workspace: ObservableObject {
         let name: String
         let size: Double?
         let supported: Bool?
-        var id: String { name }
+        let path: String?
+        let favorite: Bool?
+        var id: String { path ?? name }
     }
 
     /// Runs `llm <args>` and returns (success, standard output). Never blocks the main thread.
@@ -550,10 +552,20 @@ final class Workspace: ObservableObject {
         installed = list.filter { $0.supported != false }
     }
 
+    /// A star on a model (`./llm fav`): starred ones lead the model menu and are offered by the other apps.
+    func setFavorite(_ m: InstalledModel, _ on: Bool) {
+        guard let p = m.path else { return }
+        Task {
+            _ = await runCLI(["fav", p, on ? "--on" : "--off"])
+            await loadInstalled()
+        }
+    }
+
     /// Starts the model — `name` selects another installed one first (which also restarts a running engine).
     func startModel(_ name: String? = nil) {
         guard engineBusy == nil, remoteURL == nil else { return }
-        engineBusy = name.map { "Loading \($0)…" } ?? "Starting the model…"
+        let shown = name.map { n in installed.first { $0.path == n }?.name ?? n }
+        engineBusy = shown.map { "Loading \($0)…" } ?? "Starting the model…"
         Task {
             var ok = true
             if let n = name {

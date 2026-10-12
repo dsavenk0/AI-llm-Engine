@@ -99,6 +99,11 @@ struct OrbWidgetView: View {
     private let mint = Color(red: 0.3, green: 0.95, blue: 0.76)
     private let pink = Color(red: 1, green: 0.18, blue: 0.53)
 
+    private var toggleLabel: String {
+        if entry.russian { return entry.running ? "Выключить" : "Включить" }
+        return entry.running ? "Turn off" : "Turn on"
+    }
+
     private func launcher(_ symbol: String, _ en: String, _ ru: String, _ target: String) -> some View {
         Link(destination: URL(string: "llmvoice://launch?target=\(target)")!) {
             VStack(spacing: 2) {
@@ -122,10 +127,14 @@ struct OrbWidgetView: View {
                             .lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)
                         Link(destination: URL(string: "llmvoice://toggle")!) {      // the model on / off, in the background
-                            Image(systemName: "power").font(.system(size: 11, weight: .bold))
-                                .foregroundColor(entry.running ? pink : cyan)
-                                .frame(width: 24, height: 20)
-                                .background(Capsule().strokeBorder((entry.running ? pink : cyan).opacity(0.7), lineWidth: 1))
+                            HStack(spacing: 4) {
+                                Image(systemName: "power").font(.system(size: 10, weight: .bold))
+                                Text(toggleLabel.uppercased())
+                                    .font(.system(size: 9, weight: .semibold, design: .monospaced)).tracking(0.8)
+                            }
+                            .foregroundColor(entry.running ? pink : cyan)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Capsule().strokeBorder((entry.running ? pink : cyan).opacity(0.75), lineWidth: 1))
                         }
                     }
                     .font(.system(size: 10.5, weight: .semibold, design: .monospaced)).tracking(0.4)

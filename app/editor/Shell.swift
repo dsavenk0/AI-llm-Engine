@@ -128,16 +128,32 @@ private struct Toolbar: View {
                     } else {
                         Button("Stop the model") { ws.stopModel() }.disabled(ws.engineBusy != nil)
                     }
+                    let favourites = ws.installed.filter { $0.favorite == true }
+                    if !favourites.isEmpty {
+                        Section("Favourites") {
+                            ForEach(favourites) { m in
+                                Button { ws.startModel(m.path ?? m.name) } label: {
+                                    Label(m.name, systemImage: m.name == ws.engine?.model ? "checkmark" : "star.fill")
+                                }
+                            }
+                        }.disabled(ws.engineBusy != nil)
+                    }
                     Menu("Choose a model") {
                         if ws.installed.isEmpty { Text("No models found") }
                         ForEach(ws.installed) { m in
-                            Button { ws.startModel(m.name) } label: {
+                            Button { ws.startModel(m.path ?? m.name) } label: {
                                 let size = m.size.map { String(format: "  ·  %.1f GB", $0) } ?? ""
-                                if m.name == ws.engine?.model { Label(m.name + size, systemImage: "checkmark") }
-                                else { Text(m.name + size) }
+                                let star = m.favorite == true ? "★ " : ""
+                                if m.name == ws.engine?.model { Label(star + m.name + size, systemImage: "checkmark") }
+                                else { Text(star + m.name + size) }
                             }
                         }
                     }.disabled(ws.engineBusy != nil)
+                    Menu("Favourites…") {
+                        ForEach(ws.installed) { m in
+                            Toggle(m.name, isOn: Binding(get: { m.favorite == true }, set: { ws.setFavorite(m, $0) }))
+                        }
+                    }
                     Divider()
                 }
                 Button("This Mac's engine") { ws.useLocalEngine() }.disabled(ws.remoteURL == nil)

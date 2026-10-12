@@ -321,6 +321,7 @@ struct ModelInfo: Identifiable, Hashable {
     let efforts: [String]
     var route = "native"            // native · ptq1 (experimental) · mlxlm (optional mlx-lm backend)
     var problems: [String] = []     // why the engine cannot run it, when supported == false
+    var favorite = false            // starred: listed first
     var id: String { path }
 }
 
@@ -419,13 +420,20 @@ final class EngineState: ObservableObject {
                           vision: $0["vision"] as? Bool ?? false, thinking: $0["thinking"] as? Bool ?? false,
                           thinkingDefault: $0["thinking_default"] as? Bool ?? true,
                           supported: $0["supported"] as? Bool ?? false, efforts: $0["efforts"] as? [String] ?? [],
-                          route: $0["route"] as? String ?? "native", problems: $0["problems"] as? [String] ?? [])
+                          route: $0["route"] as? String ?? "native", problems: $0["problems"] as? [String] ?? [],
+                          favorite: $0["favorite"] as? Bool ?? false)
             }
         }
     }
 
     func openEditor() {
         EditorLauncher.open(enginePort: port) { err in if let err { self.message = err } }
+    }
+
+    /// A star on a model (`./llm fav`): the list shows starred ones first, the other apps offer them for switching.
+    func setFavorite(_ m: ModelInfo, _ on: Bool) {
+        if let i = models.firstIndex(where: { $0.path == m.path }) { models[i].favorite = on }     // at once
+        CLI.run(["fav", m.path, on ? "--on" : "--off"]) { _, _ in self.loadModels() }
     }
 
     func openVoice() {
@@ -849,7 +857,7 @@ struct SettingsTab: View {
                 Caption(text: L("Model", "Модель"))
                 Picker("", selection: Binding(get: { e.modelPath }, set: { e.setG("model", $0) })) {
                     ForEach(e.models) { m in
-                        Text("\(m.name) · \(String(format: "%.1f", m.size)) GB" + (m.supported ? "" : L(" — unsupported", " — не поддерживается"))).tag(m.path)
+                        Text((m.favorite ? "★ " : "") + "\(m.name) · \(String(format: "%.1f", m.size)) GB" + (m.supported ? "" : L(" — unsupported", " — не поддерживается"))).tag(m.path)
                     }
                 }.labelsHidden()
                 Hint(text: L("Found in ~/.cache/huggingface/hub", "Найдены в ~/.cache/huggingface/hub"))
@@ -1290,6 +1298,11 @@ struct ModelsTab: View {
                 ForEach(e.models) { m in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
+                            Button(action: { e.setFavorite(m, !m.favorite) }) {
+                                Image(systemName: m.favorite ? "star.fill" : "star").font(.system(size: 11))
+                                    .foregroundColor(m.favorite ? HUD.yellow : HUD.dim)
+                            }.buttonStyle(.plain)
+                                .help(m.favorite ? L("Remove from favourites", "Убрать из избранного") : L("Add to favourites", "Добавить в избранное"))
                             Circle().fill(m.path == e.modelPath ? HUD.phosphor : HUD.track).frame(width: 7, height: 7)
                                 .shadow(color: HUD.phosphor.opacity(m.path == e.modelPath ? HUD.glow : 0), radius: 3)
                             VStack(alignment: .leading, spacing: 1) {

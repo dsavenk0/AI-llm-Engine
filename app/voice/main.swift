@@ -140,6 +140,15 @@ struct ModelInfo: Equatable {
     var asleep = false                        // it answers but the weights are unloaded (idle sleep)
 }
 
+/// An installed model the engine can run, for the favourites menu.
+struct InstalledModel: Identifiable, Equatable {
+    let path: String
+    let name: String
+    let size: Double                          // GB
+    var favorite: Bool
+    var id: String { path }
+}
+
 /// One line of the conversation.
 struct Turn: Identifiable, Equatable {
     let id = UUID()
@@ -201,6 +210,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var heard = ""                 // what is being recognised right now
     @Published var modelLoading = false       // the engine is being started (listening goes on meanwhile)
     @Published var model = ModelInfo()
+    @Published var installed: [InstalledModel] = []   // for the star and the switch menu
     @Published var loadFraction: Double?      // 0…1 while the weights are being read into memory
     @Published var loadDetail = ""
     @Published var turns: [Turn] = []
@@ -274,6 +284,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         heard = ""
         Task { await startListening() }
         Task { await refreshModel() }                              // the model's name is on screen at once
+        Task { await refreshInstalled() }
         Task { _ = await ensureModel() }
     }
 
@@ -399,6 +410,64 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         info.bytes = path.isEmpty ? 0 : await Task.detached { Voice.weightBytes(path) }.value
         if info.name != model.name { WidgetCenter.shared.reloadAllTimelines() }      // the desktop widget names the model
         model = info
+    }
+
+    /// `llm <args>`, output returned; never on the main thread.
+    nonisolated private static func runLLM(_ args: [String], root: String) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: root + "/llm")
+        p.arguments = args
+        p.currentDirectoryURL = URL(fileURLWithPath: root)
+        p.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    func refreshInstalled() async {
+        let root = Setup.llmRoot
+        let out = await Task.detached { Voice.runLLM(["models", "--json"], root: root) }.value
+        guard let line = out.split(separator: "\n").last(where: { $0.hasPrefix("[") }),
+              let arr = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [[String: Any]] else { return }
+        installed = arr.compactMap { m in
+            guard (m["supported"] as? Bool) != false, let path = m["path"] as? String else { return nil }
+            return InstalledModel(path: path, name: m["name"] as? String ?? (path as NSString).lastPathComponent,
+                                  size: m["size"] as? Double ?? 0, favorite: m["favorite"] as? Bool ?? false)
+        }
+    }
+
+    func setFavorite(_ m: InstalledModel, _ on: Bool) {
+        if let i = installed.firstIndex(where: { $0.path == m.path }) { installed[i].favorite = on }
+        let root = Setup.llmRoot
+        Task {
+            _ = await Task.detached { Voice.runLLM(["fav", m.path, on ? "--on" : "--off"], root: root) }.value
+            await refreshInstalled()
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
+    /// Selects another model (`llm use`, which restarts a running engine) and waits until it answers.
+    func switchTo(_ m: InstalledModel) {
+        guard !modelLoading else { return }
+        let root = Setup.llmRoot
+        Task {
+            modelLoading = true
+            model = ModelInfo(name: m.name, path: m.path, bytes: model.bytes, running: false, asleep: false)
+            let watcher = Task { await watchLoading() }
+            _ = await Task.detached { Voice.runLLM(["use", m.path], root: root) }.value
+            for _ in 0..<60 {
+                if await engineAnswers() { break }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            modelLoading = false
+            watcher.cancel()
+            await refreshModel()
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
 
     /// While the model is read into memory: how many bytes of it the engine process holds so far.
@@ -835,7 +904,38 @@ struct VoiceView: View {
                 if voice.model.name.isEmpty {
                     Text("NO MODEL SELECTED · OPEN LLMBAR").foregroundColor(HUD.magenta)
                 } else {
-                    Text(voice.model.name).foregroundColor(HUD.text).lineLimit(1).truncationMode(.middle)
+                    Menu {
+                        let favs = voice.installed.filter(\.favorite)
+                        if !favs.isEmpty {
+                            Section("Favourites") {
+                                ForEach(favs) { m in
+                                    Button { voice.switchTo(m) } label: {
+                                        Label(m.name, systemImage: m.path == voice.model.path ? "checkmark" : "star.fill")
+                                    }
+                                }
+                            }
+                        }
+                        Menu("Choose a model") {
+                            ForEach(voice.installed) { m in
+                                Button { voice.switchTo(m) } label: {
+                                    Text((m.favorite ? "★ " : "") + m.name + String(format: "  ·  %.1f GB", m.size))
+                                }
+                            }
+                        }
+                        Menu("Favourites…") {
+                            ForEach(voice.installed) { m in
+                                Toggle(m.name, isOn: Binding(get: { m.favorite }, set: { voice.setFavorite(m, $0) }))
+                            }
+                        }
+                    } label: {
+                        let starred = voice.installed.first { $0.path == voice.model.path }?.favorite == true
+                        HStack(spacing: 4) {
+                            if starred { Image(systemName: "star.fill").font(.system(size: 9)).foregroundColor(HUD.yellow) }
+                            Text(voice.model.name).foregroundColor(HUD.text).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help("Choose another model, or star this one")
                     if voice.modelLoading {
                         Text(voice.model.running ? "· WAKING" : "· LOADING").foregroundColor(HUD.yellow)
                     } else if voice.model.running {

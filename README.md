@@ -79,6 +79,7 @@ thing you need already on the Mac is Python 3.10+.
 ./llm search qwen3.5            # MLX models on Hugging Face: size, downloads, "engine ✓", fits RAM
 ./llm pull mlx-community/Qwen3.5-4B-MLX-4bit   # resumable download into ~/.cache/huggingface/hub
 ./llm use 2                      # switch the active model (restarts the engine if it runs)
+./llm fav 2                      # star a model (again: unstar) — favourites lead every list and model menu; ./llm fav lists them
 ```
 
 Downloads resume if interrupted, check free disk space first and skip weights the engine does not use. Set

@@ -663,3 +663,79 @@ class TestPullValidation(unittest.TestCase):
                 self.assertFalse(llm.hf_pull(bad))
                 hf.assert_not_called()
                 ms.assert_not_called()
+
+
+class TestFavouriteModels(unittest.TestCase):
+    """`./llm fav`: a star on a model, kept in the config, listed first, never undone by a double click."""
+
+    def setUp(self):
+        from unittest import mock
+        self.home = os.path.realpath(tempfile.mkdtemp())
+        self.paths = {}
+        for n in ("alpha", "beta", "gamma"):
+            d = os.path.join(self.home, n)
+            os.makedirs(d)
+            with open(os.path.join(d, "config.json"), "w") as f:
+                f.write("{}")
+            self.paths[n] = d
+        self.cfg = cfg()
+        self.cfg.update(dirs=[self.home], model="", models={}, favorites=[])
+        self.saved = []
+
+        def fake_inspect(path):
+            name = os.path.basename(path)
+            return {"path": path, "name": name, "size": 1.0, "format": "x", "type": "t", "vision": False,
+                    "thinking": False, "hadamard": False, "supported": name != "gamma", "problems": [], "efforts": []}
+        for name, val in (("inspect_model", fake_inspect), ("scan_gguf", lambda c: []),
+                          ("save_cfg", lambda c: self.saved.append(list(c["favorites"])))):
+            p = mock.patch.object(llm, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def names(self):
+        return [m["name"] for m in llm.scan_models(self.cfg)]
+
+    def test_the_default_is_no_favourites_and_the_flag_is_false(self):
+        self.assertTrue(all(m["favorite"] is False for m in llm.scan_models(self.cfg)))
+        self.assertEqual(llm.DEFAULTS["favorites"], [])
+
+    def test_a_favourite_comes_first_even_before_a_supported_model(self):
+        self.assertEqual(self.names(), ["alpha", "beta", "gamma"])               # unsupported last
+        self.cfg["favorites"] = [self.paths["gamma"]]
+        self.assertEqual(self.names(), ["gamma", "alpha", "beta"])
+        m = llm.scan_models(self.cfg)[0]
+        self.assertTrue(m["favorite"])
+
+    def test_toggle_by_name_number_and_path_and_explicit_on_off(self):
+        self.assertTrue(llm.fav_cmd(self.cfg, ["beta"]))
+        self.assertEqual(self.cfg["favorites"], [self.paths["beta"]])
+        self.assertTrue(llm.fav_cmd(self.cfg, ["beta"]))                       # a second toggle removes it
+        self.assertEqual(self.cfg["favorites"], [])
+        llm.fav_cmd(self.cfg, [self.paths["alpha"], "--on"])
+        llm.fav_cmd(self.cfg, [self.paths["alpha"], "--on"])                   # explicit: twice is still on, once
+        self.assertEqual(self.cfg["favorites"], [self.paths["alpha"]])
+        llm.fav_cmd(self.cfg, [self.paths["alpha"], "--off"])
+        llm.fav_cmd(self.cfg, [self.paths["alpha"], "--off"])
+        self.assertEqual(self.cfg["favorites"], [])
+        self.assertTrue(llm.fav_cmd(self.cfg, ["1"]))                          # number in the list order
+        self.assertEqual(self.cfg["favorites"], [self.paths["alpha"]])
+        self.assertTrue(self.saved)                                            # every change was written
+
+    def test_unknown_and_ambiguous_names_change_nothing(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertFalse(llm.fav_cmd(self.cfg, ["nope"]))
+            self.assertFalse(llm.fav_cmd(self.cfg, ["a"]))                     # alpha, beta and gamma all contain "a"
+        self.assertEqual(self.cfg["favorites"], [])
+
+    def test_listing_json_and_a_removed_model_is_not_listed(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+        self.cfg["favorites"] = [self.paths["beta"], "/gone/model"]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            llm.fav_cmd(self.cfg, ["--json"])
+        self.assertEqual(json.loads(buf.getvalue()), [self.paths["beta"]])     # only what exists on disk
