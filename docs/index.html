@@ -1144,6 +1144,33 @@ Streaming: Enabled</code></pre>
               </p>
             </div>
           </details>
+
+          <details class="apple-faq-item">
+            <summary class="faq-summary" data-i18n="faq_q5">Do I need Python or an internet connection to start?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a5">
+                Neither is required in advance. If the Mac has no Python 3.10+, LLMBar downloads a private copy (about 35 MB, checksum-verified) on the first Start and then the engine libraries, showing the progress; if there is no connection it says so instead of failing silently. A one-second readiness check (Apple Silicon, macOS, Python, libraries, network, disk, models) runs at launch. For a Mac that will never be online there is an offline build with Python and the libraries inside the app (+~150 MB).
+              </p>
+            </div>
+          </details>
+
+          <details class="apple-faq-item">
+            <summary class="faq-summary" data-i18n="faq_q6">What can LLM Voice do besides answering aloud?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a6">
+                It keeps the whole conversation in mind, so follow-ups work; in dialog mode the microphone reopens by itself after each answer, so you never press a button between questions; for news, weather, prices or scores it looks things up on the web and answers from what it found (only the search query leaves your Mac); and every conversation is saved to a history you can reopen, rename or delete.
+              </p>
+            </div>
+          </details>
+
+          <details class="apple-faq-item">
+            <summary class="faq-summary" data-i18n="faq_q7">Which GGUF models run without llama.cpp?</summary>
+            <div class="faq-content">
+              <p data-i18n="faq_a7">
+                The engine's own MLX decoder runs llama, Qwen2/3, Gemma 3, Granite, MiniCPM and mixture-of-experts files (Mixtral-style, Qwen3-MoE, Granite-MoE) in Q2_K through Q8_0, IQ4_NL and IQ4_XS, with BPE or SentencePiece vocabularies. Anything else falls back to llama.cpp behind the same API, downloaded only when needed.
+              </p>
+            </div>
+          </details>
         </div>
       </div>
     </section>
