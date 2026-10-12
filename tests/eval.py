@@ -186,7 +186,7 @@ def ask(eng, prompt, max_tokens, thinking):
 def measure_one(path):
     from engine.generate import Engine
 
-    eng = Engine(path, vision=False, max_context=4096, max_tokens=MAX_REPLY, log=lambda *a: None)
+    eng = Engine(path, vision=False, max_context=4096, max_tokens=MAX_REPLY, ptq1=True, log=lambda *a: None)
     think = THINK  # None = the model's own default (what a client that says nothing gets)
     res = {"math_correct": 0, "math_total": len(MATH_PROBLEMS),
            "code_correct": 0, "code_total": len(CODE_PROBLEMS),
@@ -258,7 +258,7 @@ def run_benchmarks(args):
     for path in model_paths(args):
         key = model_key(path)
         print(f"\n=== {key} · {', '.join(names)} · limit {args.limit or 'full'} · seed {args.seed} ===")
-        eng = Engine(path, vision=False, max_context=4096, max_tokens=2048, log=lambda *a: None)
+        eng = Engine(path, vision=False, max_context=4096, max_tokens=2048, ptq1=True, log=lambda *a: None)
         out[key] = {}
         for name in names:
             res = B.run_suite(eng, name, ask, limit=args.limit, seed=args.seed, think=think, allow_code=args.allow_code)

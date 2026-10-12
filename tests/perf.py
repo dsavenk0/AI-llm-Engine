@@ -110,7 +110,7 @@ def measure_one(path):
 
     t0 = time.time()
     eng = Engine(path, vision=False, max_context=max(8192, PREFILL_SIZES[-1][1] * 2), max_tokens=512,
-                log=lambda *a: None)
+                ptq1=True, log=lambda *a: None)
     res = {"load_s": round(time.time() - t0, 2)}
     model = eng.model
 
