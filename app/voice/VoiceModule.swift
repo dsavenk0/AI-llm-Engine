@@ -199,6 +199,18 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var speakReplies: Bool {
         didSet { UserDefaults.standard.set(speakReplies, forKey: "speakReplies") }
     }
+    /// Dialog mode: after each answer the microphone opens again by itself, so a conversation needs no
+    /// button presses. It ends on a long silence, a click on the sphere while nothing is said, or a typed message.
+    @Published var dialogMode: Bool {
+        didSet { UserDefaults.standard.set(dialogMode, forKey: "dialogMode") }
+    }
+    @Published private(set) var dialogActive = false      // a spoken exchange is in progress and may continue
+    /// Web lookups: when a question needs fresh facts the model asks for a search (only the query leaves this Mac,
+    /// to DuckDuckGo) and answers from the results.
+    @Published var webMode: Bool {
+        didSet { UserDefaults.standard.set(webMode, forKey: "webMode") }
+    }
+    @Published private(set) var webNote: String?           // the query being looked up, while it is
     @Published var localeID: String {
         didSet { UserDefaults.standard.set(localeID, forKey: "voiceLocale") }
     }
@@ -219,6 +231,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     override init() {
         speakReplies = UserDefaults.standard.object(forKey: "speakReplies") as? Bool ?? true
         autoListen = UserDefaults.standard.object(forKey: "autoListen") as? Bool ?? true
+        dialogMode = UserDefaults.standard.object(forKey: "dialogMode") as? Bool ?? true
+        webMode = UserDefaults.standard.object(forKey: "webMode") as? Bool ?? true
         history = VoiceHistory.load(from: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/LLMBar/voice-chats.json"))
         keepOnTop = UserDefaults.standard.object(forKey: "keepOnTop") as? Bool ?? false
@@ -363,6 +377,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func stopEverything() {
+        dialogActive = false
         silenceTimer?.invalidate()
         ask?.cancel()
         synth.stopSpeaking(at: .immediate)
@@ -608,7 +623,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 guard let self, self.state == .listening else { return }
                 let quiet = Date().timeIntervalSince(self.lastChange)
                 if !self.heard.isEmpty, quiet > 1.4 { self.finishListening() }
-                else if self.heard.isEmpty, quiet > 25 { self.stopCapture(); self.state = .idle }
+                else if self.heard.isEmpty, quiet > 25 { self.stopCapture(); self.dialogActive = false; self.state = .idle }
             }
         }
     }
@@ -627,7 +642,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         guard state == .listening else { return }
         stopCapture()
         let text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { state = .idle; return }
+        guard !text.isEmpty else { dialogActive = false; state = .idle; return }   // nothing said: the dialog ends
+        dialogActive = true
         turns.append(Turn(role: "user", text: text, spoken: true))
         saveCurrent()
         heard = ""
@@ -637,10 +653,12 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // ---- the answer
 
+    private static let continuing = " This is one continuing conversation: the earlier messages are above, so "
+        + "follow-up questions (\"and there?\", \"why?\", \"what about it\") refer to what was just said."
     private static let spokenPrompt = "You are a voice assistant. Answer in the language the user spoke, in one to "
-        + "three short sentences, plain spoken text: no markdown, no lists, no emoji, no code blocks."
+        + "three short sentences, plain spoken text: no markdown, no lists, no emoji, no code blocks." + continuing
     private static let chatPrompt = "You are a helpful assistant in a small quick-chat window. Answer in the "
-        + "language of the question, concisely; files the user attaches are included in their message."
+        + "language of the question, concisely; files the user attaches are included in their message." + continuing
 
     /// One turn as the API takes it: the text and any files, and pictures as image parts.
     private func apiMessage(_ t: Turn) -> [String: Any] {
@@ -652,17 +670,82 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return ["role": "user", "content": parts]
     }
 
+    private static var today: String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEEE, d MMMM yyyy"
+        return f.string(from: Date())
+    }
+
+    /// One short non-streamed completion (the "is a lookup needed?" decision).
+    private func complete(_ messages: [[String: Any]], maxTokens: Int) async -> String? {
+        let body: [String: Any] = ["model": "local", "stream": false, "max_tokens": maxTokens, "temperature": 0,
+                                   "chat_template_kwargs": ["enable_thinking": false], "messages": messages]
+        var req = URLRequest(url: Setup.base.appendingPathComponent("v1/chat/completions"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !Setup.apiKey.isEmpty { req.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        req.timeoutInterval = 30
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let msg = ((obj["choices"] as? [[String: Any]])?.first?["message"]) as? [String: Any] else { return nil }
+        return msg["content"] as? String
+    }
+
+    /// Does this exchange need the internet? Returns the search text, or nil. The model is asked (with
+    /// examples — a small one answers NO to everything otherwise), and obvious freshness cues in the question
+    /// decide on their own when it stays silent: then the question itself is the query.
+    private func webQuery(_ history: [[String: Any]], question: String) async -> String? {
+        let ask = "Today is \(Voice.today). You read the user's message and reply with exactly one line: NO if it "
+            + "can be answered from general knowledge, or a short web search query (at most 8 words) if it asks for "
+            + "current, recent, live or very specific facts (news, weather, prices, scores, schedules, releases, who "
+            + "holds an office now, anything that changes)."
+        let shots: [(String, String)] = [
+            ("What's the weather in Paris?", "weather Paris today"), ("What is 12 times 12?", "NO"),
+            ("Who won the Champions League final?", "Champions League final winner"),
+            ("Write me a poem about autumn.", "NO"), ("Курс доллара сегодня?", "курс доллара сегодня"),
+            ("Why is the sky blue?", "NO"), ("Latest iPhone release date", "latest iPhone release date"),
+            ("What does the word 'ephemeral' mean?", "NO"),
+        ]
+        var messages: [[String: Any]] = [["role": "system", "content": ask]]
+        for (q, a) in shots { messages += [["role": "user", "content": q], ["role": "assistant", "content": a]] }
+        messages += Array(history.suffix(4))
+        if let reply = await complete(messages, maxTokens: 32), let q = WebLookup.query(from: reply) { return q }
+        return WebLookup.needsFresh(question) ? String(question.prefix(120)) : nil
+    }
+
+    /// Runs the search (`llm web search`) and turns what came back into text for the system prompt.
+    private func webContext(_ query: String) async -> String {
+        let root = Setup.llmRoot
+        let out = await Task.detached { Voice.runLLM(["web", "search", query, "--n", "4", "--read", "2"], root: root) }.value
+        return WebLookup.context(query: query, found: WebLookup.parse(out))
+    }
+
     private func respond(spoken: Bool) async {
         state = .thinking
         guard await ensureModel() else { return }                       // still loading: the question waits for it
-        let system = spoken ? Voice.spokenPrompt : Voice.chatPrompt
+        var system = (spoken ? Voice.spokenPrompt : Voice.chatPrompt) + " Today is \(Voice.today)."
         let reply = Turn(role: "assistant", text: "", spoken: spoken)
-        let history = turns.suffix(12).map { apiMessage($0) }
+        // the whole conversation so far (newest last), with each turn's files and pictures
+        let kept = VoiceContext.window(turns.map { (role: $0.role, text: $0.text + $0.fileText) })
+        let history: [[String: Any]] = kept.map { k in
+            if let t = turns.last(where: { $0.role == k.role && ($0.text + $0.fileText) == k.text }) { return apiMessage(t) }
+            return ["role": k.role, "content": k.text]            // joined turns: text only
+        }
+        let lastQuestion = turns.last(where: { $0.role == "user" })?.text ?? ""
+        if webMode, let query = await webQuery(history, question: lastQuestion), !Task.isCancelled {
+            webNote = query
+            system += "\n\n" + (await webContext(query))
+            webNote = nil
+        }
+        if Task.isCancelled { return }
         turns.append(reply)
         speakCurrent = spoken
         state = .thinking
         let body: [String: Any] = [
-            "model": "local", "stream": true, "max_tokens": spoken ? 400 : 1200, "temperature": 0.6,
+            "model": "local", "stream": true, "max_tokens": spoken ? 400 : 1200, "temperature": 0.5,
             "chat_template_kwargs": ["enable_thinking": false],
             "messages": [["role": "system", "content": system]] + history,
         ]
@@ -705,7 +788,23 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         streamDone = true
         if full.isEmpty { turns.removeAll { $0.id == reply.id } }
         saveCurrent()
-        if pendingUtterances == 0, state != .speaking { state = .idle }
+        if pendingUtterances == 0, state != .speaking {
+            state = .idle
+            resumeDialog()
+        }
+    }
+
+    /// Dialog mode: the answer is finished (and read out), so listen for the next question without a click.
+    private func resumeDialog() {
+        var failed = false
+        if case .failed = state { failed = true }
+        guard DialogPolicy.shouldResume(dialogMode: dialogMode, dialogActive: dialogActive, failed: failed) else { return }
+        Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)       // the speaker's tail must not be heard as a question
+            guard DialogPolicy.shouldResume(dialogMode: dialogMode, dialogActive: dialogActive, failed: false),
+                  state == .idle, !modelLoading else { return }
+            await startListening()
+        }
     }
 
     private func say(_ sentence: String) {
@@ -731,7 +830,11 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
         Task { @MainActor in
             self.pendingUtterances = max(0, self.pendingUtterances - 1)
-            if self.pendingUtterances == 0, self.streamDone { self.state = .idle; self.levelTarget = 0 }
+            if self.pendingUtterances == 0, self.streamDone {
+                self.state = .idle
+                self.levelTarget = 0
+                self.resumeDialog()
+            }
         }
     }
 }
@@ -982,8 +1085,8 @@ struct VoiceView: View {
         switch voice.state {
         case .idle: return (voice.turns.isEmpty ? "SPEAK OR TYPE · CLICK THE SPHERE" : "READY", VHUD.dim)
         case .starting: return ("STARTING…", VHUD.yellow)
-        case .listening: return ("LISTENING", VHUD.cyan)
-        case .thinking: return ("THINKING", VHUD.yellow)
+        case .listening: return (voice.dialogMode && voice.dialogActive ? "LISTENING · DIALOG" : "LISTENING", VHUD.cyan)
+        case .thinking: return (voice.webNote != nil ? "SEARCHING THE WEB" : "THINKING", VHUD.yellow)
         case .speaking: return ("SPEAKING", VHUD.phosphor)
         case .failed: return ("PROBLEM", VHUD.magenta)
         }
@@ -1029,6 +1132,8 @@ struct VoiceView: View {
             Spacer()
             Menu {
                 Toggle("Read voice answers aloud", isOn: $voice.speakReplies)
+                Toggle("Dialog mode — keep listening after each answer", isOn: $voice.dialogMode)
+                Toggle("Look things up on the web when needed", isOn: $voice.webMode)
                 Toggle("Listen when opened", isOn: $voice.autoListen)
                 Toggle("Keep on top", isOn: $voice.keepOnTop)
                 Picker("Recognition language", selection: $voice.localeID) {

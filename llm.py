@@ -15,6 +15,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
+  ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
   ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
@@ -885,6 +886,49 @@ def _python_probe():
         if _python_ok(p):
             return p
     return None
+
+
+def web_cmd(args):
+    """`./llm web search "<query>" [--n 4] [--read 2]`: one JSON line {"query", "results": [{title, url, snippet}],
+    "pages": [{url, text}]} — what the voice chat adds to a question that needs fresh facts. Failures come
+    back as {"error": ...}, never as a traceback: the caller is an app."""
+    from concurrent.futures import ThreadPoolExecutor
+    from harness import web
+    words, opts, i = [], {}, 0
+    while i < len(args):
+        if args[i] in ("--n", "--read") and i + 1 < len(args):
+            opts[args[i][2:]] = args[i + 1]
+            i += 2
+        else:
+            words.append(args[i])
+            i += 1
+    if not words or words[0] != "search" or len(words) < 2:
+        print(json.dumps({"error": 'usage: llm web search "<query>" [--n 4] [--read 2]'}))
+        return False
+    query = " ".join(words[1:]).strip()[:300]
+    try:
+        n = max(1, min(8, int(opts.get("n", 4))))
+        read = max(0, min(3, int(opts.get("read", 2))))
+    except ValueError:
+        n, read = 4, 2
+    out = {"query": query, "results": [], "pages": []}
+    try:
+        out["results"] = web.search(query, n=n, timeout=12)
+    except Exception as e:                                  # offline, blocked, parser change…
+        out["error"] = str(e)[:200]
+        print(json.dumps(out, ensure_ascii=False))
+        return False
+
+    def page(hit):
+        try:
+            return {"url": hit["url"], "text": web.fetch(hit["url"], max_chars=2500, timeout=8)}
+        except Exception:
+            return None
+    if read and out["results"]:
+        with ThreadPoolExecutor(max_workers=read) as pool:
+            out["pages"] = [p for p in pool.map(page, out["results"][:read]) if p]
+    print(json.dumps(out, ensure_ascii=False))
+    return True
 
 
 def check_cmd(cfg, as_json=False):
@@ -2197,6 +2241,7 @@ def main():
     os.environ.update(network_env(cfg))      # hub search, downloads and the agent's web tools follow the proxy
     actions = {
         "check": lambda: check_cmd(cfg, "--json" in sys.argv),
+        "web": lambda: web_cmd(sys.argv[2:]),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
             setup_gguf() if "--gguf" in sys.argv else setup(compat="--compat" in sys.argv)),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),

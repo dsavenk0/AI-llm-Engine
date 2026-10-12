@@ -261,5 +261,59 @@ eq(VoiceHistory.load(from: file.deletingLastPathComponent().appendingPathCompone
 try? "{broken".write(to: file, atomically: true, encoding: .utf8)
 eq(VoiceHistory.load(from: file), VoiceHistory(), "a damaged file is an empty history, not a crash")
 
+// what the model is sent
+func ctx(_ pairs: [(String, String)], turns: Int = 24, chars: Int = 16000) -> [String] {
+    VoiceContext.window(pairs.map { (role: $0.0, text: $0.1) }, maxTurns: turns, maxChars: chars).map { "\($0.role):\($0.text)" }
+}
+eq(ctx([("user", "capital of France?"), ("assistant", "Paris."), ("user", "and its population?")]),
+   ["user:capital of France?", "assistant:Paris.", "user:and its population?"], "the whole exchange goes along, newest last")
+eq(ctx([("user", "a"), ("assistant", ""), ("user", "b")]), ["user:a\nb"], "an answer that never came: the two questions are one turn")
+eq(ctx([("user", "  "), ("user", "hi"), ("assistant", "hello")]), ["user:hi", "assistant:hello"], "empty turns are skipped")
+eq(ctx([("assistant", "stray"), ("user", "q")]), ["user:q"], "the window starts on a user turn")
+let manyTurns = (0..<30).flatMap { [("user", "q\($0)"), ("assistant", "a\($0)")] }
+let kept = ctx(manyTurns, turns: 6)
+eq(kept.count, 6, "the newest turns are kept")
+eq(kept.first, "user:q27", "…starting on a question")
+eq(kept.last, "assistant:a29", "…and ending with the latest answer")
+let long = ctx([("user", String(repeating: "x", count: 100)), ("assistant", String(repeating: "y", count: 100)), ("user", "now?")], chars: 150)
+eq(long, ["user:now?"], "over the budget the oldest go first, the newest question always stays")
+check(DialogPolicy.shouldResume(dialogMode: true, dialogActive: true, failed: false), "a running dialog goes on")
+check(!DialogPolicy.shouldResume(dialogMode: false, dialogActive: true, failed: false), "dialog mode off: one question at a time")
+check(!DialogPolicy.shouldResume(dialogMode: true, dialogActive: false, failed: false), "the person stopped it")
+check(!DialogPolicy.shouldResume(dialogMode: true, dialogActive: true, failed: true), "never from a failure")
+
+// web lookups
+eq(WebLookup.query(from: "NO"), nil, "no lookup")
+eq(WebLookup.query(from: "No."), nil, "no lookup, with a full stop")
+eq(WebLookup.query(from: "no search needed"), nil, "no lookup, in words")
+eq(WebLookup.query(from: "Нет"), nil, "no lookup, Russian")
+eq(WebLookup.query(from: "weather Lisbon today"), "weather Lisbon today", "a query")
+eq(WebLookup.query(from: "\"Search: Benfica score tonight\"\nbecause the user asks about a match"), "Benfica score tonight", "quotes, a prefix and a second line are dropped")
+eq(WebLookup.query(from: "курс евро к доллару сегодня"), "курс евро к доллару сегодня", "a Russian query")
+eq(WebLookup.query(from: String(repeating: "word ", count: 40)), nil, "an answer instead of a query is not searched")
+eq(WebLookup.query(from: "   \n  "), nil, "an empty reply")
+eq(WebLookup.query(from: "North Korea news"), "North Korea news", "a query that starts with 'no' letters is still a query")
+let json = #"{"query":"q","results":[{"title":"T1","url":"https://a.example/x","snippet":"S1"},{"url":"https://b.example/y"},{"title":"bad"}],"pages":[{"url":"https://a.example/x","text":"page text"}]}"#
+let found = WebLookup.parse("noise\n" + json)
+eq(found?.hits.map(\.url), ["https://a.example/x", "https://b.example/y"], "hits without a url are dropped")
+eq(found?.pages.first?.text, "page text", "pages")
+eq(WebLookup.parse(#"{"query":"q","results":[],"pages":[],"error":"offline"}"#)?.error, "offline", "an error is carried")
+eq(WebLookup.parse("not json"), nil, "garbage is not a result")
+let ctxText = WebLookup.context(query: "q", found: found)
+check(ctxText.contains("1. T1 — S1 [https://a.example/x]") && ctxText.contains("Page https://a.example/x:"), "results and pages are in the text")
+check(WebLookup.context(query: "q", found: WebLookup.Found(hits: [], pages: [], error: "offline")).contains("could not check the internet"), "a failed lookup is said honestly")
+check(WebLookup.context(query: "q", found: nil).contains("could not check the internet"), "no answer at all, the same")
+check(WebLookup.context(query: "q", found: found, maxChars: 80).count <= 84, "the text is capped")
+
+for q in ["What's the weather in Lisbon right now?", "What is the current price of bitcoin?", "Какая сегодня погода в Москве?",
+          "Кто выиграл вчера матч Реал Мадрид?", "Who is the prime minister of the UK?", "Wetter in Berlin",
+          "What happened in 2026 in space exploration?", "курс евро"] {
+    check(WebLookup.needsFresh(q, year: 2026), "needs the web: \(q)")
+}
+for q in ["What is two plus two?", "Tell me a joke.", "Explain how photosynthesis works.", "How tall is Mount Everest?",
+          "Write a haiku about the sea", "Why is the sky blue?", "Что такое фотосинтез?"] {
+    check(!WebLookup.needsFresh(q, year: 2026), "general knowledge: \(q)")
+}
+
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

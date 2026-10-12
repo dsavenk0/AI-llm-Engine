@@ -14,6 +14,14 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **LLM Voice: dialog mode, the whole conversation, the web.** After an answer the microphone opens again by itself
+  (menu: "Dialog mode"; it ends on a long silence, a click on the sphere while nothing is said, or a typed
+  message). Each question is sent with the whole exchange so far (newest turns kept within a budget, never a dangling
+  answer), and the prompt says follow-ups refer to it. Questions about news, weather, prices, scores or "today"
+  are looked up on the web: the model proposes a query (with a keyword fallback in five languages when a small model
+  stays silent), `llm web search` fetches DuckDuckGo results and the top pages, and the answer is built from them;
+  a failed lookup is said honestly, not guessed. Menu: "Look things up on the web when needed" (only the query
+  leaves the Mac).
 - **More GGUF on the engine's own decoder**: Q2_K, Q3_K, IQ4_NL and IQ4_XS (decoded exactly — checked tensor by
   tensor against llama.cpp's own dequantization — then re-quantized per 32 weights to 4 / 5 / 6 / 6 bits, so they
   take more memory than in the file), SentencePiece vocabularies with the dummy space prefix (Llama 2 / Mistral /

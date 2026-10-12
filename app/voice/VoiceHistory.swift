@@ -72,3 +72,121 @@ struct VoiceHistory: Codable, Equatable {
         if let data = try? JSONEncoder().encode(self) { try? data.write(to: url, options: .atomic) }
     }
 }
+
+// MARK: - what the model is sent, and when the microphone opens again (pure, tested)
+
+/// The conversation as the API takes it. The whole spoken or typed exchange so far goes along, not just the
+/// last question: oldest turns are dropped first (never the newest), the window starts on a user turn, empty
+/// turns are skipped, and two turns of the same role in a row (a question asked while the answer was cut off)
+/// are joined — chat templates reject or mangle those.
+enum VoiceContext {
+    static func window(_ turns: [(role: String, text: String)], maxTurns: Int = 24, maxChars: Int = 16000)
+        -> [(role: String, text: String)] {
+        var out: [(role: String, text: String)] = []
+        for t in turns where !t.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let last = out.last, last.role == t.role {
+                out[out.count - 1].text += "\n" + t.text
+            } else {
+                out.append(t)
+            }
+        }
+        while out.count > maxTurns { out.removeFirst() }
+        while out.count > 1, out.reduce(0, { $0 + $1.text.count }) > maxChars { out.removeFirst() }
+        while let first = out.first, first.role != "user", out.count > 1 { out.removeFirst() }
+        return out
+    }
+}
+
+enum DialogPolicy {
+    /// Opens the microphone again after an answer: only in a running dialog, when the person did not stop it,
+    /// and never from a failure.
+    static func shouldResume(dialogMode: Bool, dialogActive: Bool, failed: Bool) -> Bool {
+        dialogMode && dialogActive && !failed
+    }
+}
+
+// MARK: - looking things up on the web (pure, tested)
+
+enum WebLookup {
+    struct Hit: Equatable { var title: String, url: String, snippet: String }
+    struct Page: Equatable { var url: String, text: String }
+    struct Found: Equatable { var hits: [Hit], pages: [Page], error: String? }
+
+    /// What the model answered when asked whether a lookup is needed: the search query, or nil for "no".
+    static func query(from reply: String) -> String? {
+        guard var line = reply.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) })
+            .first(where: { !$0.isEmpty }) else { return nil }
+        let junk = CharacterSet(charactersIn: "\"'`«»“”*").union(.whitespaces)
+        line = line.trimmingCharacters(in: junk)
+        for prefix in ["search query:", "search:", "query:", "поиск:", "запрос:"] where line.lowercased().hasPrefix(prefix) {
+            line = String(line.dropFirst(prefix.count))
+            break
+        }
+        line = line.trimmingCharacters(in: junk)
+        let lower = line.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".!"))
+        let words = lower.split(separator: " ")
+        if lower.isEmpty || ["no", "none", "n/a", "нет", "не нужно", "no search", "no search needed"].contains(lower) { return nil }
+        if words.first == "no" && words.count <= 3 { return nil }
+        if line.count > 120 { return nil }                  // it started answering instead of searching
+        return line
+    }
+
+    private static let freshWords: [String] = [
+        // English
+        "today", "tonight", "tomorrow", "yesterday", "right now", "currently", "current ", "latest", "newest", "recent",
+        "news", "weather", "forecast", "temperature in", "price of", "prices", "stock", "exchange rate", "score",
+        "who won", "winner", "standings", "schedule", "release date", "when does", "when is the next", "this week",
+        "this month", "this year", "breaking", "trending", "live ", "who is the president", "who is the prime minister",
+        "who is the ceo", "who is the mayor", "how much is", "how much does",
+        // Russian
+        "сегодня", "сейчас", "завтра", "вчера", "послед", "новост", "погод", "прогноз", "курс ", "цена", "цены",
+        "стоимость", "сколько стоит", "кто выиграл", "счёт", "счет матча", "результат", "расписание", "когда выйдет",
+        "в этом году", "на этой неделе", "текущ", "актуальн", "сегодняшн", "кто президент", "кто премьер",
+        // German, French, Spanish
+        "heute", "aktuell", "wetter", "nachrichten", "preis", "aujourd'hui", "actuel", "météo", "actualités", "prix",
+        "hoy", "actual", "noticias", "clima", "precio", "mañana",
+    ]
+
+    /// Does the question ask for something that changes (news, weather, prices, scores, "today", this or last
+    /// year)? A small local model is unreliable at deciding this alone, so these signs decide too.
+    static func needsFresh(_ question: String, year: Int = Calendar.current.component(.year, from: Date())) -> Bool {
+        let q = " " + question.lowercased() + " "
+        if freshWords.contains(where: { q.contains($0) }) { return true }
+        for y in (year - 1)...(year + 1) where q.contains(String(y)) { return true }
+        return false
+    }
+
+    /// The JSON line `llm web search` prints.
+    static func parse(_ json: String) -> Found? {
+        guard let line = json.split(separator: "\n").last(where: { $0.hasPrefix("{") }),
+              let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] else { return nil }
+        let hits = (obj["results"] as? [[String: Any]] ?? []).compactMap { r -> Hit? in
+            guard let url = r["url"] as? String else { return nil }
+            return Hit(title: r["title"] as? String ?? "", url: url, snippet: r["snippet"] as? String ?? "")
+        }
+        let pages = (obj["pages"] as? [[String: Any]] ?? []).compactMap { p -> Page? in
+            guard let url = p["url"] as? String, let text = p["text"] as? String else { return nil }
+            return Page(url: url, text: text)
+        }
+        return Found(hits: hits, pages: pages, error: obj["error"] as? String)
+    }
+
+    /// Text appended to the system prompt: the results, or an honest note that the lookup failed.
+    static func context(query: String, found: Found?, maxChars: Int = 5000) -> String {
+        guard let f = found, f.error == nil, !f.hits.isEmpty else {
+            let why = found?.error.map { " (\($0))" } ?? ""
+            return "A web search for \"\(query)\" was tried but gave nothing\(why). Say briefly that you could not "
+                + "check the internet; answer from memory only if you are sure, and say that it may be out of date."
+        }
+        var out = "Web search results for \"\(query)\", fetched just now. They are more current than your memory: use "
+            + "them to answer. Name the source in a few words when you rely on one. If they do not contain the "
+            + "answer, say so.\n"
+        for (i, h) in f.hits.enumerated() {
+            out += "\n\(i + 1). \(h.title) — \(h.snippet) [\(h.url)]"
+        }
+        for p in f.pages {
+            out += "\n\nPage \(p.url):\n\(p.text)"
+        }
+        return out.count > maxChars ? String(out.prefix(maxChars)) + " …" : out
+    }
+}
