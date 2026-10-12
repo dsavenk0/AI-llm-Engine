@@ -267,6 +267,13 @@ separate Swift app that only runs while you use it, and its parts are independen
   files on the right) and a classic editor (file tree, tabs, outline, assistant). Switch with ⌘E.
 - **Assistant:** an agent that searches and reads the project, asks you when something is ambiguous, and edits or runs
   commands only after your approval (a diff or the command is shown first). Attach files to a message with 📎.
+- **Modes** (the button left of the message box, Shift+Tab cycles): *Manual* asks before every edit and command;
+  *Edit automatically* applies file edits right away and still asks for commands; *Plan* explores the project and
+  presents a plan without changing anything; *Auto* also runs commands that pass a safety check (no chaining, no
+  paths outside the project, no destructive git forms) and pauses for anything else. **Effort** is the model's
+  reasoning level (off, then the levels its template offers).
+- **Context:** a ring shows how much of the model's window the conversation fills; **Compact** folds older turns into
+  a short note (the same two-stage compaction as the terminal agent). Chats are renamed and deleted from the ⋯ menu.
 - **Editor:** syntax colours and an outline for ~25 languages, line numbers, problems underlined as you type
   (built-in checks, plus `swiftc -parse`, `node --check`, `bash -n` … when installed), unsaved-changes protection.
 - **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click.
@@ -295,6 +302,18 @@ separate Swift app that only runs while you use it, and its parts are independen
 
 The editor talks to a small local backend (`ui/server.py`, stdlib only, localhost + a random token, paths confined to
 the project) that the app starts and stops itself.
+
+### LLM Voice (optional, native)
+
+A small separate app: a **quick chat that works as a voice assistant by default** — it listens when it opens, you
+speak, it answers short and aloud; or type, and attach files and pictures to a message (text files are sent with it,
+pictures go as image parts and are dropped with a note if the model has no vision). It is not part of LLMBar or the
+editor and only runs while you use it: LLMBar's tool row has a button for it, and `./build-voice.sh` builds
+`LLMVoice.app` (`build-app.sh` bundles it too). Speech goes through the system recogniser (on-device when the language
+supports it), spoken answers use the system voice; the model is the engine's usual one — the app starts the selected
+model (or the first installed one that fits) through the same `llm` command when none is running. It is an ordinary
+window — close and minimise buttons, resizable, *Keep on top* in its menu — in LLMBar's glass style (light, dark or
+system, with the same transparency setting). The first run asks for the microphone and speech-recognition permissions.
 
 ### Benchmarks
 
@@ -390,6 +409,10 @@ subprocess so a hard crash at one size only rules out that size. `--apply` write
 Not supported: non-MLX, non-GGUF weights, 1-bit affine JANG. Speculative decoding with a trained drafter (DFlash,
 DSpark) is not implemented; the engine uses prompt-lookup speculation.
 
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md) ([по-русски](CHANGELOG.ru.md)).
+
 ## Layout
 
 ```
@@ -399,9 +422,9 @@ engine/   model.py (layers, Hadamard, fused ops) · loader.py · vision.py · ga
           gguf_server.py (llama.cpp behind the same API)
 llm.py    CLI / menu (stdlib only) — locales/ru.json for Russian
 agent.py  terminal coding agent (stdlib only) · harness/ optional web / MCP / memory / compaction / fix-tests modules
-app/      LLMBar.swift (menu-bar app)
+app/      LLMBar.swift (menu-bar app) · editor/ (LLM Editor) · voice/ (LLM Voice)
 tools/    icon / DMG background / banner generators (Swift)
-build-app.sh, build-dmg.sh
+build-app.sh, build-editor.sh, build-voice.sh, build-dmg.sh
 tests/    unittest suite · perf.py + perf_baseline.json · eval.py + eval_baseline.json
 ```
 
