@@ -226,7 +226,8 @@ final class Backend: @unchecked Sendable {
     /// which the backend notices (and abandons any pending approval).
     func agent(messages: [[String: String]], attachments: [String], inline: [[String: String]] = [],
                images: [[String: String]] = [], think: Bool, autoEdit: Bool,
-               web: Bool = false, mode: String? = nil, effort: String? = nil) -> AsyncThrowingStream<AgentEvent, Error> {
+               web: Bool = false, mode: String? = nil, effort: String? = nil,
+               active: [String: Any]? = nil) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { cont in
             let task = Task {
                 do {
@@ -234,7 +235,7 @@ final class Backend: @unchecked Sendable {
                                                                   "inline": inline, "images": images,
                                                                   "think": think, "auto_edit": autoEdit, "web": web,
                                                                   "mode": mode ?? (autoEdit ? "edit" : "manual"),
-                                                                  "effort": effort ?? ""])
+                                                                  "effort": effort ?? "", "active": active ?? [:]])
                     r.timeoutInterval = 3600
                     let (bytes, resp) = try await URLSession.shared.bytes(for: r)
                     if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {

@@ -404,5 +404,14 @@ check(fs_rs.row <= 2 && fs_rs.col <= 9, "…and the cursor stays inside it")
 let fs_tab = screen("\(ESC)[?1049ha\tb")
 eq(fs_tab.lineText(0), "a       b", "a fs_tab moves to the next stop on the grid")
 
+// when a message is about the open file
+for q in ["проверь код", "Check this code", "fix the bug", "объясни, что делает эта функция", "review Tests/GreeterTests.swift",
+          "почему тест падает?", "can you refactor it", "what does `run` return"] {
+    check(OpenFileIntent.refers(to: q), "about the open file: \(q)")
+}
+for q in ["привет", "hello", "what is the capital of France?", "расскажи анекдот", "thanks", "спасибо большое"] {
+    check(!OpenFileIntent.refers(to: q), "not about it: \(q)")
+}
+
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

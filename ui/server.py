@@ -748,6 +748,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             effort = body.get("effort")
+            extra += agentloop.active_note(P, body.get("active"))
             finished = agentloop.run_agent(P, self.server.endpoint, msgs, emit, run, think=bool(body.get("think")),
                                            auto_edit=bool(body.get("auto_edit")), system_extra=extra,
                                            web=bool(body.get("web")), mode=body.get("mode"),

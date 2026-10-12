@@ -183,8 +183,14 @@ final class ChatStore: ObservableObject {
     func send(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !busy else { return }
-        let attached = ws.attachments
+        var attached = ws.attachments
         let inline = ws.inline, pictures = ws.pictures
+        // "check this code" with nothing attached: the open file goes along (a small, writable one, only to the
+        // local model), shown as the usual attachment chip so it is plain what was sent
+        if attached.isEmpty, inline.isEmpty, pictures.isEmpty, ws.remoteURL == nil, OpenFileIntent.refers(to: prompt),
+           let f = ws.active, f.readOnlyNote == nil, f.text.utf8.count <= 40_000 {
+            attached = [f.path]
+        }
         if let f = ws.active, f.dirty, attached.contains(f.path) { ws.save() }
         ws.attachments = []; ws.inline = []; ws.pictures = []
         let names = attached + inline.map(\.name) + pictures.map { "🖼 " + $0.name }
@@ -193,18 +199,21 @@ final class ChatStore: ObservableObject {
             s.items.append(ChatItem(kind: .user, text: prompt, attached: names))
         }
         let history = plainHistory()
+        // what the person is looking at: "check this code" means the open file (and where the cursor is)
+        let active: [String: Any]? = ws.active.map { ["file": $0.path, "line": ws.cursor.0] }
         busy = true
-        task = Task { await self.run(history: history, attached: attached, inline: inline, pictures: pictures) }
+        task = Task { await self.run(history: history, attached: attached, inline: inline, pictures: pictures, active: active) }
     }
 
-    private func run(history: [[String: String]], attached: [String], inline: [InlineFile], pictures: [Picture]) async {
+    private func run(history: [[String: String]], attached: [String], inline: [InlineFile], pictures: [Picture],
+                     active: [String: Any]? = nil) async {
         defer { busy = false; runID = nil; save() }
         do {
             let stream = ws.backend.agent(messages: history, attachments: attached,
                                           inline: inline.map { ["name": $0.name, "text": $0.text] },
                                           images: pictures.map { ["name": $0.name, "data": $0.dataURL] },
                                           think: think, autoEdit: autoEdit, web: web,
-                                          mode: mode.rawValue, effort: think ? effort : nil)
+                                          mode: mode.rawValue, effort: think ? effort : nil, active: active)
             for try await ev in stream {
                 apply(ev)
             }

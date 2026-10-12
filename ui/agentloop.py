@@ -182,6 +182,28 @@ def system_prompt(project_name, extra="", web=False, mode="manual"):
     return base + (PLAN_NOTE if mode == "plan" else "") + (WEB_NOTE if web else "") + extra
 
 
+def active_note(project, active):
+    """What the person is looking at, for the system prompt: "check this code" means the file that is open. `active`
+    is {"file": relative path, "line": n} from the editor; anything that is not an existing project file is
+    ignored (the note never names a path outside the project)."""
+    if not isinstance(active, dict):
+        return ""
+    rel = active.get("file")
+    if not isinstance(rel, str) or not rel or len(rel) > 400:
+        return ""
+    try:
+        full = project.resolve(rel)
+    except Exception:
+        return ""
+    if not os.path.isfile(full):
+        return ""
+    line = active.get("line")
+    at = f", the cursor on line {line}" if isinstance(line, int) and 0 < line < 10_000_000 else ""
+    return (f"\n\nThe user has `{project.rel(full)}` open in the editor{at}. When they say \"this code\", \"the file\" "
+            f"or ask you to check, review or fix something without naming a file, they mean this one: read it with "
+            f"read_file first, then answer about what is really in it.")
+
+
 def _short(text, n=300):
     return text if len(text) <= n else text[:n] + "…"
 

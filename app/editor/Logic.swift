@@ -963,3 +963,24 @@ enum PaletteMatch {
         return scored.sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0 < $1.0 }.map { $0.0 }
     }
 }
+
+// MARK: - "check this code": when a message is about the file that is open
+
+enum OpenFileIntent {
+    private static let words = [
+        "this code", "the code", "this file", "the file", "this function", "this class", "this method", "this test",
+        "review", "check", "fix", "bug", "error", "refactor", "explain", "what does", "what is wrong", "why does",
+        "optimi", "improve", "document", "add test", "write test", "typo", "lint", "cleanup", "clean up",
+        "код", "файл", "проверь", "проверить", "исправ", "ошибк", "баг", "тест", "объясни", "рефактор", "что делает",
+        "почему", "оптимиз", "улучш", "документ", "перепиши", "доработ", "найди", "посмотри", "глянь",
+    ]
+
+    /// Does the message talk about the open file without naming one? Then the file goes along with it (the way
+    /// editors with an assistant do); a plain "hello" or a general question does not drag a file in.
+    static func refers(to message: String) -> Bool {
+        let m = " " + message.lowercased() + " "
+        if m.contains("`") || m.contains(".swift") || m.contains(".py") || m.contains(".js") || m.contains(".ts") ||
+            m.contains(".rs") || m.contains(".go") || m.contains(".md") { return true }
+        return words.contains { m.contains($0) }
+    }
+}

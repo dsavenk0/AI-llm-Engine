@@ -302,6 +302,39 @@ class TestRunLifecycle(Base):
         self.assertEqual(self.post("/api/agent", {"messages": []})[0], 400)
 
 
+class TestActiveFile(Base):
+    """"check this code": the open file reaches the agent's system prompt (and only a real project file does)."""
+
+    def system_of_last_request(self):
+        return ScriptedEngine.seen[-1]["messages"][0]["content"]
+
+    def test_the_open_file_and_line_are_named_in_the_system_prompt(self):
+        ScriptedEngine.script = [[text("ok")]]
+        self.agent("проверь код", active={"file": "src/app.py", "line": 2})
+        sys_prompt = self.system_of_last_request()
+        self.assertIn("`src/app.py` open in the editor, the cursor on line 2", sys_prompt)
+        self.assertIn("read it with read_file first", sys_prompt)
+
+    def test_nothing_is_added_for_a_missing_or_foreign_file(self):
+        for active in ({"file": "nope.py"}, {"file": "../../etc/passwd"}, {"file": "/etc/passwd"}, {"file": "src"},
+                       {"file": 5}, {"line": 3}, "src/app.py", {}):
+            ScriptedEngine.script = [[text("ok")]]
+            self.agent("hi", active=active)
+            self.assertNotIn("open in the editor", self.system_of_last_request(), active)
+
+    def test_an_absurd_line_number_is_left_out_but_the_file_is_kept(self):
+        ScriptedEngine.script = [[text("ok")]]
+        self.agent("hi", active={"file": "README.md", "line": -4})
+        sys_prompt = self.system_of_last_request()
+        self.assertIn("`README.md` open in the editor.", sys_prompt)
+        self.assertNotIn("cursor", sys_prompt)
+
+    def test_without_it_the_prompt_is_unchanged(self):
+        ScriptedEngine.script = [[text("ok")]]
+        self.agent("hi")
+        self.assertNotIn("open in the editor", self.system_of_last_request())
+
+
 class TestSearchEndpoint(Base):
     def get(self, path):
         req = urllib.request.Request(self.base + path, headers={"X-UI-Token": "t"})

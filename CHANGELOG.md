@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Editor assistant knows what is open**: the system prompt names the file that is open and the cursor line, and a
+  message about "this code" / "check", "fix", "explain"… (EN/RU) with nothing attached sends that file along as the
+  usual attachment chip (a small writable file, local model only) — so "проверь код" is about the code on screen
+  instead of a greeting.
 - **Routes say what they can do**: `./llm models` prints under every model which engine runs it (engine,
   engine-ptq1, engine-gguf, mlx-lm, llama.cpp) and its features (vision, thinking, tools, ssd-cache, speculation,
   steering); `models --json` carries `engine` and `features`, and the panel shows them in the model's tooltip.
