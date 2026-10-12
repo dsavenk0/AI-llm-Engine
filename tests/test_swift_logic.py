@@ -16,6 +16,7 @@ class TestSwiftLogic(unittest.TestCase):
     def test_logic_checks_pass(self):
         out = os.path.join(tempfile.mkdtemp(), "logic_tests")
         build = subprocess.run(["swiftc", "-O", os.path.join(ROOT, "app/editor/Logic.swift"),
+                                os.path.join(ROOT, "app/voice/VoiceHistory.swift"),
                                 os.path.join(ROOT, "tests/swift/main.swift"), "-o", out],
                                capture_output=True, text=True, timeout=300)
         self.assertEqual(build.returncode, 0, build.stderr[-2000:])

@@ -182,6 +182,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var loadFraction: Double?      // 0…1 while the weights are being read into memory
     @Published var loadDetail = ""
     @Published var themeEpoch = 0              // bumped when the app theme changes, so the views re-read the palette
+    @Published var history = VoiceHistory()    // saved conversations (the clock button)
+    @Published var currentChat = UUID()        // the conversation on screen; saved once it has a message
+    private let historyFile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/LLMBar/voice-chats.json")
     @Published var turns: [Turn] = []
     @Published var draft = ""
     @Published var attachments: [VoiceAttachment] = []
@@ -215,6 +219,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     override init() {
         speakReplies = UserDefaults.standard.object(forKey: "speakReplies") as? Bool ?? true
         autoListen = UserDefaults.standard.object(forKey: "autoListen") as? Bool ?? true
+        history = VoiceHistory.load(from: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/LLMBar/voice-chats.json"))
         keepOnTop = UserDefaults.standard.object(forKey: "keepOnTop") as? Bool ?? false
         localeID = UserDefaults.standard.string(forKey: "voiceLocale") ?? ""
         super.init()
@@ -257,11 +263,51 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         Task { _ = await ensureModel() }
     }
 
-    /// Forget the conversation (what the model sees as history, and what is on the screen).
+    /// Starts an empty conversation; the one that was on screen stays in the history.
     func newConversation() {
         stopEverything()
+        saveCurrent()
+        currentChat = UUID()
         turns = []; heard = ""; draft = ""; attachments = []; attachNote = nil
         state = .idle
+    }
+
+    private func stored() -> [StoredTurn] {
+        turns.filter { !$0.text.isEmpty }.map {
+            StoredTurn(role: $0.role, text: $0.text, files: $0.files, fileText: $0.fileText, spoken: $0.spoken)
+        }
+    }
+
+    /// Writes the conversation on screen into the history file (called whenever it changes).
+    func saveCurrent() {
+        history.upsert(id: currentChat, turns: stored())
+        history.save(to: historyFile)
+    }
+
+    /// Opens a saved conversation in place of the one on screen.
+    func open(_ id: UUID) {
+        guard let c = history.chat(id) else { return }
+        stopEverything()
+        saveCurrent()
+        currentChat = id
+        turns = c.turns.map { Turn(role: $0.role, text: $0.text, files: $0.files, fileText: $0.fileText, images: [], spoken: $0.spoken) }
+        heard = ""; draft = ""; attachments = []; attachNote = nil
+        state = .idle
+    }
+
+    func rename(_ id: UUID, to title: String) {
+        history.rename(id, to: title)
+        history.save(to: historyFile)
+    }
+
+    func delete(_ id: UUID) {
+        history.delete(id)
+        history.save(to: historyFile)
+        if id == currentChat {                          // the open one: an empty conversation takes its place
+            stopEverything()
+            currentChat = UUID()
+            turns = []; heard = ""; state = .idle
+        }
     }
 
     func pick(_ urls: [URL]) {
@@ -283,6 +329,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         t.fileText = Files.block(attachments)
         t.images = attachments.filter { $0.kind == .image }.map(\.payload)
         turns.append(t)
+        saveCurrent()
         draft = ""; attachments = []; attachNote = nil; heard = ""
         state = .thinking
         ask = Task {
@@ -582,6 +629,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { state = .idle; return }
         turns.append(Turn(role: "user", text: text, spoken: true))
+        saveCurrent()
         heard = ""
         state = .thinking
         ask = Task { await respond(spoken: true) }
@@ -656,6 +704,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
         streamDone = true
         if full.isEmpty { turns.removeAll { $0.id == reply.id } }
+        saveCurrent()
         if pendingUtterances == 0, state != .speaking { state = .idle }
     }
 
@@ -843,9 +892,91 @@ struct Orb: View {
 
 // MARK: - the panel
 
+/// The saved conversations: open, rename, delete (the clock button's popover).
+struct HistoryList: View {
+    @ObservedObject var voice: Voice
+    var close: () -> Void
+
+    private func subtitle(_ c: VoiceChat) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        let n = c.turns.count
+        return f.localizedString(for: c.updated, relativeTo: Date()) + " · \(n) message" + (n == 1 ? "" : "s")
+    }
+
+    private func rename(_ c: VoiceChat) {
+        let a = NSAlert()
+        a.messageText = "Rename chat"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = c.title
+        a.accessoryView = field
+        a.addButton(withTitle: "Rename")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        if a.runModal() == .alertFirstButtonReturn { voice.rename(c.id, to: field.stringValue) }
+    }
+
+    /// Deleting cannot be undone, so it asks.
+    private func confirmDelete(_ c: VoiceChat) {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "Delete “\(c.title)”?"
+        a.informativeText = "The conversation is removed from the history. This cannot be undone."
+        a.addButton(withTitle: "Delete")
+        a.addButton(withTitle: "Cancel")
+        a.buttons.first?.hasDestructiveAction = true
+        if a.runModal() == .alertFirstButtonReturn { voice.delete(c.id) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("CHATS").font(VHUD.mono(10, .semibold)).tracking(1.4).foregroundColor(VHUD.dim)
+                Spacer()
+                Button { voice.newConversation(); close() } label: { Label("New", systemImage: "square.and.pencil") }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundColor(VHUD.cyan)
+            }.padding(.horizontal, 12).padding(.vertical, 10)
+            Divider()
+            let chats = voice.history.sorted
+            if chats.isEmpty {
+                Text("Nothing saved yet — a conversation appears here after its first message.")
+                    .font(.system(size: 12)).foregroundColor(VHUD.dim).padding(14).frame(width: 300, alignment: .leading)
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(chats) { c in
+                            HStack(spacing: 8) {
+                                Button { voice.open(c.id); close() } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(c.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                                        Text(subtitle(c)).font(VHUD.mono(9.5)).foregroundColor(VHUD.dim)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                                Menu {
+                                    Button("Open") { voice.open(c.id); close() }
+                                    Button("Rename…") { rename(c) }
+                                    Divider()
+                                    Button("Delete…", role: .destructive) { confirmDelete(c) }
+                                } label: { Image(systemName: "ellipsis.circle") }
+                                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundColor(VHUD.dim)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(c.id == voice.currentChat ? VHUD.cyan.opacity(0.12) : Color.clear)
+                        }
+                    }
+                }.frame(width: 300).frame(maxHeight: 360)
+            }
+        }
+        .frame(width: 300)
+    }
+}
+
 struct VoiceView: View {
     @ObservedObject var voice: Voice
     @State private var dropping = false
+    @State private var showHistory = false
 
     private var label: (String, Color) {
         switch voice.state {
@@ -892,6 +1023,11 @@ struct VoiceView: View {
             }.frame(width: 8, height: 8)
             Text("LLM VOICE").font(VHUD.mono(10, .semibold)).tracking(1.6).foregroundColor(VHUD.dim)
             Spacer()
+            Button { showHistory.toggle() } label: {
+                Image(systemName: "clock.arrow.circlepath").foregroundColor(VHUD.dim)
+            }
+            .buttonStyle(.plain).help("Chat history — open, rename, delete")
+            .popover(isPresented: $showHistory, arrowEdge: .bottom) { HistoryList(voice: voice) { showHistory = false } }
             Menu {
                 Toggle("Read voice answers aloud", isOn: $voice.speakReplies)
                 Toggle("Listen when opened", isOn: $voice.autoListen)
