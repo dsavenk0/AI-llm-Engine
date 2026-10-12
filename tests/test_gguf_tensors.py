@@ -82,14 +82,61 @@ def ref_block(name, raw):
                 out[base + l + 32] = d * SC[i + 2] * q2
                 out[base + l + 64] = d * SC[i + 4] * q3
                 out[base + l + 96] = d * SC[i + 6] * q4
+    elif name == "Q2_K":                                      # ggml dequantize_row_q2_K, loop for loop
+        sc, qs, d, dmin = r[0:16], r[16:80], f(80), f(82)
+        is_, q0 = 0, 0
+        for n in range(0, 256, 128):
+            shift = 0
+            for _ in range(4):
+                for half in range(2):
+                    s = sc[is_]
+                    is_ += 1
+                    dl, ml = d * (s & 0xF), dmin * (s >> 4)
+                    out += [dl * ((qs[q0 + 16 * half + l] >> shift) & 3) - ml for l in range(16)]
+                shift += 2
+            q0 += 32
+    elif name == "Q3_K":                                      # ggml dequantize_row_q3_K
+        hm, qs, raw12, d = r[0:32], r[32:96], list(r[96:108]), f(108)
+        aux = [int.from_bytes(bytes(raw12[4 * i:4 * i + 4]), "little") for i in range(3)] + [0]
+        tmp = aux[2]
+        aux[2] = ((aux[0] >> 4) & 0x0F0F0F0F) | (((tmp >> 4) & 0x03030303) << 4)
+        aux[3] = ((aux[1] >> 4) & 0x0F0F0F0F) | (((tmp >> 6) & 0x03030303) << 4)
+        aux[0] = (aux[0] & 0x0F0F0F0F) | (((tmp >> 0) & 0x03030303) << 4)
+        aux[1] = (aux[1] & 0x0F0F0F0F) | (((tmp >> 2) & 0x03030303) << 4)
+        scales = [b - 32 for b in b"".join(a.to_bytes(4, "little") for a in aux)]
+        is_, m, q0 = 0, 1, 0
+        for n in range(0, 256, 128):
+            shift = 0
+            for _ in range(4):
+                for half in range(2):
+                    dl = d * scales[is_]
+                    is_ += 1
+                    out += [dl * (((qs[q0 + 16 * half + l] >> shift) & 3) - (0 if hm[16 * half + l] & m else 4))
+                            for l in range(16)]
+                shift += 2
+                m <<= 1
+            q0 += 32
+    elif name == "IQ4_NL":
+        d, qs = f(0), r[2:18]
+        out = [d * KV[qs[j] & 0xF] for j in range(16)] + [d * KV[qs[j] >> 4] for j in range(16)]
+    elif name == "IQ4_XS":
+        d, sh, sl, qs = f(0), struct.unpack("<H", r[2:4])[0], r[4:8], r[8:136]
+        for ib in range(8):
+            ls = ((sl[ib // 2] >> (4 * (ib % 2))) & 0xF) | (((sh >> (2 * ib)) & 3) << 4)
+            dl = d * (ls - 32)
+            q = qs[16 * ib:16 * ib + 16]
+            out += [dl * KV[q[j] & 0xF] for j in range(16)] + [dl * KV[q[j] >> 4] for j in range(16)]
     return np.array(out, np.float32)
+
+
+KV = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113]       # kvalues_iq4nl
 
 
 def random_blocks(name, n, rng):
     size = BLOCK_BYTES[name]                                  # ggml's sizes, not the engine's table
     raw = rng.integers(0, 256, (n, size), dtype=np.uint8)
     fields = {"Q4_0": [0], "Q8_0": [0], "Q4_1": [0, 2], "Q5_0": [0], "Q5_1": [0, 2], "Q4_K": [0, 2], "Q5_K": [0, 2],
-              "Q6_K": [208]}[name]
+              "Q6_K": [208], "Q2_K": [80, 82], "Q3_K": [108], "IQ4_NL": [0], "IQ4_XS": [0]}[name]
     for i in range(n):
         for o in fields:                                     # small finite fp16 scales (random bytes could be NaN)
             raw[i, o:o + 2] = np.frombuffer(F16(rng.uniform(0.002, 0.03)), np.uint8)
@@ -114,9 +161,10 @@ def write_file(path, tensors):
         f.write(pre + b"".join(blobs))
 
 
-BLOCK_BYTES = {"Q4_0": 18, "Q4_1": 20, "Q5_0": 22, "Q5_1": 24, "Q8_0": 34, "Q4_K": 144, "Q5_K": 176, "Q6_K": 210}
+BLOCK_BYTES = {"Q4_0": 18, "Q4_1": 20, "Q5_0": 22, "Q5_1": 24, "Q8_0": 34, "Q4_K": 144, "Q5_K": 176, "Q6_K": 210,
+               "Q2_K": 84, "Q3_K": 110, "IQ4_NL": 18, "IQ4_XS": 136}
 GGML_ID = {"F32": 0, "F16": 1, "Q4_0": 2, "Q4_1": 3, "Q5_0": 6, "Q5_1": 7, "Q8_0": 8, "Q4_K": 12, "Q5_K": 13,
-           "Q6_K": 14, "BF16": 30}
+           "Q6_K": 14, "BF16": 30, "Q2_K": 10, "Q3_K": 11, "IQ4_NL": 20, "IQ4_XS": 23}
 
 
 class TestBlockDecoders(unittest.TestCase):
@@ -151,6 +199,36 @@ class TestBlockDecoders(unittest.TestCase):
         step = scale[:, :, None]                              # half a level is the most a rounding can cost
         self.assertTrue(np.all(np.abs(got - want.reshape(4, 8, 32)) <= step / 2 + 1e-5))
 
+    def test_k_and_i_quants_decode_exactly_and_requantize_within_half_a_step(self):
+        """Q2_K, Q3_K, IQ4_NL, IQ4_XS: the values equal ggml's reference loops; the MLX groups they are
+        re-quantized to (4 / 5 / 6 bits) reproduce them to half a level."""
+        from engine import gguf_tensors as T
+        rng = np.random.default_rng(5)
+        for name, elems, bits in (("Q2_K", 256, 4), ("Q3_K", 256, 5), ("IQ4_NL", 32, 6), ("IQ4_XS", 256, 6)):
+            raw = random_blocks(name, 6, rng)
+            want = np.stack([ref_block(name, raw[i]) for i in range(6)])
+            np.testing.assert_allclose(T.EXACT[name](raw), want, rtol=1e-5, atol=1e-5, err_msg=name)
+            codes, scale, bias, got_bits = T.decode_blocks(name, raw)
+            self.assertEqual(got_bits, bits, name)
+            self.assertEqual(T.REQUANT_BITS[name], bits)
+            self.assertTrue(int(codes.max()) < (1 << bits), name)
+            groups = elems // 32
+            got = codes.reshape(6, groups, 32) * scale.reshape(6, groups, 1) + bias.reshape(6, groups, 1)
+            step = scale.reshape(6, groups, 1)
+            self.assertTrue(np.all(np.abs(got - want.reshape(6, groups, 32)) <= step / 2 + 1e-5), name)
+
+    def test_the_iq4_table_and_a_hand_built_q2_k_block(self):
+        from engine import gguf_tensors as T
+        self.assertEqual(list(T.KVALUES_IQ4NL), KV)
+        blk = np.zeros((1, 84), np.uint8)
+        blk[0, 0] = 0x21                                       # sub-block 0: scale nibble 1, min nibble 2
+        blk[0, 16:20] = [0, 1, 2, 3]                           # the first four codes of plane 0
+        blk[0, 80:82] = np.frombuffer(F16(0.5), np.uint8)      # d
+        blk[0, 82:84] = np.frombuffer(F16(0.25), np.uint8)     # dmin
+        v = T.q2k_values(blk)[0]
+        np.testing.assert_allclose(v[:4], [0.5 * 1 * q - 0.25 * 2 for q in (0, 1, 2, 3)])   # -0.5, 0, 0.5, 1
+        self.assertAlmostEqual(float(v[16]), -0.0 * 1 - 0.25 * 0)                           # sub-block 1: all zero
+
     def test_requantize_hits_the_group_extremes_and_handles_flat_groups(self):
         from engine import gguf_tensors as T
         w = np.zeros((1, 64), np.float32)
@@ -167,7 +245,7 @@ class TestBlockDecoders(unittest.TestCase):
     def test_unknown_formats_are_refused(self):
         from engine import gguf_tensors as T
         with self.assertRaises(T.UnsupportedQuant):
-            T.decode_blocks("Q2_K", np.zeros((1, 84), np.uint8))
+            T.decode_blocks("IQ3_S", np.zeros((1, 110), np.uint8))
 
 
 class TestPacking(unittest.TestCase):
@@ -235,7 +313,8 @@ class TestFile(unittest.TestCase):
         rng = np.random.default_rng(11)
         rows = 3
         for name, cols, block in (("Q4_0", 64, 32), ("Q4_1", 64, 32), ("Q5_0", 64, 32), ("Q5_1", 64, 32),
-                                  ("Q8_0", 64, 32), ("Q4_K", 512, 256), ("Q5_K", 512, 256), ("Q6_K", 512, 256)):
+                                  ("Q8_0", 64, 32), ("Q4_K", 512, 256), ("Q5_K", 512, 256), ("Q6_K", 512, 256),
+                                  ("Q2_K", 512, 256), ("Q3_K", 512, 256), ("IQ4_NL", 64, 32), ("IQ4_XS", 512, 256)):
             raw = random_blocks(name, rows * cols // block, rng)
             p = os.path.join(self.dir, f"{name}.gguf")
             write_file(p, [("w", (cols, rows), GGML_ID[name], raw.tobytes())])
@@ -247,13 +326,14 @@ class TestFile(unittest.TestCase):
             deq = np.asarray(mx.dequantize(mx.array(w), mx.array(s), mx.array(b), group_size=32, bits=bits)
                              .astype(mx.float32))
             want = np.stack([ref_block(name, raw[i]) for i in range(raw.shape[0])]).reshape(rows, cols)
-            tol = float(np.abs(want).max()) * (1 / 255 + 2e-3) if name == "Q6_K" else 0.0   # 8-bit levels + fp16 scales
+            requant = {"Q6_K": 8, "Q2_K": 4, "Q3_K": 5, "IQ4_NL": 6, "IQ4_XS": 6}.get(name)
+            tol = float(np.abs(want).max()) * (1 / ((1 << requant) - 1) + 2e-3) if requant else 0.0   # levels + fp16 scales
             np.testing.assert_allclose(deq, want, rtol=3e-3, atol=3e-2 + tol, err_msg=name)
 
     def test_load_matrix_refuses_what_it_cannot_do(self):
         from engine import gguf_tensors as T
         p = os.path.join(self.dir, "bad.gguf")
-        write_file(p, [("odd", (48, 1), 8, bytes(34 * 2)), ("k2", (256, 1), 10, bytes(84)),
+        write_file(p, [("odd", (48, 1), 8, bytes(34 * 2)), ("k2", (256, 1), 21, bytes(110)),
                        ("f", (32, 1), 0, bytes(128))])
         gf = T.GGUFFile(p)
         for name in ("odd", "k2", "f"):

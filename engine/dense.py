@@ -57,7 +57,7 @@ class Config:
 
 # ggml's rope type per architecture (llama.cpp: llama_model_rope_type)
 ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma3": False,
-                    "granite": True, "granitemoe": True, "qwen3moe": False}
+                    "granite": True, "granitemoe": True, "qwen3moe": False, "minicpm": True}
 SUPPORTED = tuple(ROPE_TRADITIONAL)
 
 
@@ -379,8 +379,16 @@ def build(path, log=print):
     if g("attention.value_length", head_dim) != head_dim:
         raise Unsupported("different key and value head sizes")
     scaling = m.get(f"{arch}.rope.scaling.type")
-    if scaling not in (None, "none", "llama3") and not (scaling == "linear" and arch == "gemma3"):
+    longrope = scaling == "longrope" and arch == "minicpm"
+    if scaling not in (None, "none", "llama3") and not (scaling == "linear" and arch == "gemma3") and not longrope:
         raise Unsupported(f"rope scaling {scaling!r}")
+    if longrope:
+        # llama.cpp picks the short factors while the context fits the original length (the engine's never exceeds)
+        orig = g("rope.scaling.original_context_length")
+        if "rope_factors_short.weight" not in gf.tensors:
+            raise Unsupported("longrope scaling without its short factors")
+        if orig and int(orig) < int(g("context_length", orig)):
+            raise Unsupported("longrope scaling with a longer context than the original")
     if scaling == "llama3" and "rope_freqs.weight" not in gf.tensors:
         raise Unsupported("llama3 rope scaling without its frequency table")
     if g("attention.sliding_window") and arch != "gemma3":
@@ -426,6 +434,8 @@ def build(path, log=print):
         cfg.attn_scale = (n_embd / n_head) ** -0.5 if n_layer == 62 else 0.0
     if "rope_freqs.weight" in names:
         cfg.rope_freqs = T.load_dense(gf, names["rope_freqs.weight"])
+    elif longrope:
+        cfg.rope_freqs = T.load_dense(gf, names["rope_factors_short.weight"])
     tensors = {}
     emb = names["token_embd.weight"]
     if emb.type_name in ("F32", "F16", "BF16"):

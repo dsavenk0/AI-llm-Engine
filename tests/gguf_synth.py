@@ -140,9 +140,11 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
         meta.update({f"{arch}.expert_count": N_EXPERT, f"{arch}.expert_used_count": N_USED})
     if arch in ("granite", "granitemoe"):
         meta.update({f"{arch}.{k}": v for k, v in GRANITE_SCALES.items()})
+    if arch == "minicpm":                                       # the same multipliers, no attention scale
+        meta.update({f"{arch}.{k}": v for k, v in GRANITE_SCALES.items() if k != "attention.scale"})
     meta.update(extra_meta or {})
     if rope_factors is not None:
-        meta[f"{arch}.rope.scaling.type"] = "llama3"
+        meta[f"{arch}.rope.scaling.type"] = "longrope" if arch == "minicpm" else "llama3"
     values, tensors = {}, []
 
     def matrix(name, rows, cols, std=0.08, experts=0):
@@ -194,7 +196,13 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
             matrix(f"blk.{i}.ffn_gate.weight", FF, HIDDEN)
             matrix(f"blk.{i}.ffn_up.weight", FF, HIDDEN)
             matrix(f"blk.{i}.ffn_down.weight", HIDDEN, FF)
-    if rope_factors is not None:                              # per-dimension divisors of the rotation frequencies
+    if rope_factors is not None and arch == "minicpm":        # LongRoPE: a short and a long table, short is read
+        w = np.asarray(rope_factors, np.float32)
+        for name, table in (("rope_factors_short.weight", w), ("rope_factors_long.weight", w * 3.0)):
+            tensors.append((name, (len(w),), 0, table.tobytes()))
+            values[name] = table
+        values["rope_freqs.weight"] = w
+    elif rope_factors is not None:                            # per-dimension divisors of the rotation frequencies
         w = np.asarray(rope_factors, np.float32)
         tensors.append(("rope_freqs.weight", (len(w),), 0, w.tobytes()))
         values["rope_freqs.weight"] = w
@@ -239,7 +247,7 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
             inv = inv / values["rope_freqs.weight"]
         ang = pos[:, None] * inv[None, :]
         c, s = np.cos(ang)[:, None, :], np.sin(ang)[:, None, :]
-        if arch in ("llama", "granite", "granitemoe"):
+        if arch in ("llama", "granite", "granitemoe", "minicpm"):
             a, b = x[..., 0::2], x[..., 1::2]
             out = np.empty_like(x)
             out[..., 0::2], out[..., 1::2] = a * c - b * s, a * s + b * c
@@ -250,14 +258,14 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
 
     T = len(ids)
     pos = np.arange(T)
-    granite = arch in ("granite", "granitemoe")
+    granite = arch in ("granite", "granitemoe", "minicpm")
     x = values["token_embd.weight"][ids]
     if gemma:
         x = x * np.sqrt(HIDDEN)
     if granite:
         x = x * GRANITE_SCALES["embedding_scale"]
     res = GRANITE_SCALES["residual_scale"] if granite else 1.0
-    att_scale = GRANITE_SCALES["attention.scale"] if granite else 1.0 / np.sqrt(HEAD_DIM)
+    att_scale = GRANITE_SCALES["attention.scale"] if arch in ("granite", "granitemoe") else 1.0 / np.sqrt(HEAD_DIM)
     for i in range(n_layers):
         p = f"blk.{i}."
         local = gemma and i % 6 != 5

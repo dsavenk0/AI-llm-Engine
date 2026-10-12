@@ -9,10 +9,13 @@ A GGUF stores each weight matrix in one of ggml's block formats. MLX multiplies 
     Q6_K             →  8-bit, group 32: ggml's scale per 16 weights does not fit MLX's per 32, so the values are
                         re-quantized to 8 bits per group — finer than the 6-bit step except where the two
                         16-wide halves differ in scale by more than ~4x
+    Q2_K Q3_K        →  scales (and mins) per 16 weights: decoded exactly, then re-quantized per 32 to 4 / 5 bits
+                        (the grid is finer than the 2 / 3-bit steps they started from)
+    IQ4_NL IQ4_XS    →  16 non-uniform levels (a lookup table): decoded exactly, re-quantized per 32 to 6 bits
 
 so the weights are repacked once at load, never expanded to fp16: memory and decode speed stay those of the
-quantized file. Formats that need lookup tables or odd group shapes (IQ*, Q2_K, Q3_K) are refused with a
-clear error so the caller can fall back to llama.cpp.
+quantized file (the re-quantized ones spend a few bits more than the file does). The remaining i-quants
+(IQ1-IQ3, which need big lookup grids) are refused with a clear error so the caller can fall back to llama.cpp.
 """
 import struct
 
@@ -24,9 +27,13 @@ Q6K_BITS = 8
 # ggml_type ids → (name, block elements, bytes per block)
 TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 2: ("Q4_0", 32, 18), 3: ("Q4_1", 32, 20), 6: ("Q5_0", 32, 22),
          7: ("Q5_1", 32, 24), 8: ("Q8_0", 32, 34), 12: ("Q4_K", 256, 144), 13: ("Q5_K", 256, 176),
-         14: ("Q6_K", 256, 210), 30: ("BF16", 1, 2)}
-OTHER = {10: "Q2_K", 11: "Q3_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS", 19: "IQ1_S", 20: "IQ4_NL",
-         21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS", 29: "IQ1_M"}
+         14: ("Q6_K", 256, 210), 30: ("BF16", 1, 2), 10: ("Q2_K", 256, 84), 11: ("Q3_K", 256, 110),
+         20: ("IQ4_NL", 32, 18), 23: ("IQ4_XS", 256, 136)}
+OTHER = {15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS", 19: "IQ1_S", 21: "IQ3_S", 22: "IQ2_S", 29: "IQ1_M"}
+# bits the exactly decoded values are re-quantized to (per group of 32)
+REQUANT_BITS = {"Q6_K": 8, "Q2_K": 4, "Q3_K": 5, "IQ4_NL": 6, "IQ4_XS": 6}
+# ggml's kvalues_iq4nl: the 16 levels of IQ4_NL / IQ4_XS
+KVALUES_IQ4NL = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113], np.float32)
 
 
 class UnsupportedQuant(ValueError):
@@ -152,6 +159,8 @@ def decode_blocks(name, blocks):
         return np.concatenate(parts, axis=1).astype(np.uint8), scale, bias, 5
     if name == "Q6_K":
         return _requantize(q6k_values(blocks), Q6K_BITS)
+    if name in ("Q2_K", "Q3_K", "IQ4_NL", "IQ4_XS"):
+        return _requantize(EXACT[name](blocks), REQUANT_BITS[name])
     raise UnsupportedQuant(f"no decoder for {name}")
 
 
@@ -175,6 +184,84 @@ def q6k_values(blocks):
             out[:, 128 * half + 32 * k:128 * half + 32 * (k + 1)] = q * s[:, isub + 2 * k]
     out *= d[:, None]
     return out
+
+
+def q2k_values(blocks):
+    """Q2_K blocks [n, 84] → float32 [n, 256]: 16 sub-blocks of 16, each with a 4-bit scale and a 4-bit min."""
+    n = blocks.shape[0]
+    sc = blocks[:, 0:16]
+    q = blocks[:, 16:80]
+    d, dmin = _f16(blocks[:, 80:82]), _f16(blocks[:, 82:84])
+    out = np.empty((n, 256), np.float32)
+    for half in range(2):                                      # two runs of 128 elements, 32 quant bytes each
+        qq = q[:, 32 * half:32 * half + 32]
+        for j in range(4):                                     # four 2-bit planes
+            plane = ((qq >> (2 * j)) & 3).astype(np.float32)   # [n, 32]: elements 0-15 then 16-31 of this plane
+            for k in range(2):
+                i = 8 * half + 2 * j + k
+                dl = d * (sc[:, i] & 0xF).astype(np.float32)
+                ml = dmin * (sc[:, i] >> 4).astype(np.float32)
+                out[:, 128 * half + 32 * j + 16 * k:128 * half + 32 * j + 16 * k + 16] = \
+                    dl[:, None] * plane[:, 16 * k:16 * k + 16] - ml[:, None]
+    return out
+
+
+def q3k_values(blocks):
+    """Q3_K blocks [n, 110] → float32 [n, 256]: 3-bit codes (2 bits + a high-bit mask), 6-bit scale per 16."""
+    n = blocks.shape[0]
+    hmask, q = blocks[:, 0:32], blocks[:, 32:96]
+    raw = np.ascontiguousarray(blocks[:, 96:108])
+    d = _f16(blocks[:, 108:110])
+    aux = raw.view("<u4").reshape(n, 3).astype(np.uint32)
+    kmask1, kmask2 = np.uint32(0x03030303), np.uint32(0x0F0F0F0F)
+    tmp = aux[:, 2]
+    a = np.empty((n, 4), np.uint32)
+    a[:, 2] = ((aux[:, 0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4)
+    a[:, 3] = ((aux[:, 1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4)
+    a[:, 0] = (aux[:, 0] & kmask2) | (((tmp >> 0) & kmask1) << 4)
+    a[:, 1] = (aux[:, 1] & kmask2) | (((tmp >> 2) & kmask1) << 4)
+    scales = np.ascontiguousarray(a).view(np.uint8).reshape(n, 16).astype(np.float32) - 32.0
+    out = np.empty((n, 256), np.float32)
+    for half in range(2):
+        qq = q[:, 32 * half:32 * half + 32]
+        for j in range(4):
+            m = 4 * half + j                                   # bit of the high-bit mask used by this plane
+            low = ((qq >> (2 * j)) & 3).astype(np.int16)
+            high = ((hmask >> m) & 1).astype(np.int16)         # 1 → no -4 offset
+            code = (low - 4 * (1 - high)).astype(np.float32)   # [n, 32]
+            for k in range(2):
+                i = 8 * half + 2 * j + k
+                out[:, 128 * half + 32 * j + 16 * k:128 * half + 32 * j + 16 * k + 16] = \
+                    (d * scales[:, i])[:, None] * code[:, 16 * k:16 * k + 16]
+    return out
+
+
+def iq4nl_values(blocks):
+    """IQ4_NL blocks [n, 18] → float32 [n, 32]: d * kvalues[nibble]; low nibbles first, then high."""
+    d = _f16(blocks[:, 0:2])
+    qs = blocks[:, 2:18]
+    vals = np.concatenate([KVALUES_IQ4NL[qs & 0xF], KVALUES_IQ4NL[qs >> 4]], axis=1)
+    return vals * d[:, None]
+
+
+def iq4xs_values(blocks):
+    """IQ4_XS blocks [n, 136] → float32 [n, 256]: eight 32-element groups, each a 6-bit scale and 16 bytes of nibbles."""
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    sh = np.ascontiguousarray(blocks[:, 2:4]).view("<u2").reshape(n).astype(np.uint32)
+    sl = blocks[:, 4:8]
+    qs = blocks[:, 8:136].reshape(n, 8, 16)
+    out = np.empty((n, 256), np.float32)
+    for ib in range(8):
+        ls = ((sl[:, ib // 2] >> (4 * (ib % 2))) & 0xF).astype(np.int32) | (((sh >> (2 * ib)) & 3).astype(np.int32) << 4)
+        dl = d * (ls - 32).astype(np.float32)
+        q = qs[:, ib]
+        vals = np.concatenate([KVALUES_IQ4NL[q & 0xF], KVALUES_IQ4NL[q >> 4]], axis=1)
+        out[:, 32 * ib:32 * ib + 32] = vals * dl[:, None]
+    return out
+
+
+EXACT = {"Q2_K": q2k_values, "Q3_K": q3k_values, "IQ4_NL": iq4nl_values, "IQ4_XS": iq4xs_values}
 
 
 def _requantize(w, bits):
@@ -205,7 +292,7 @@ def load_matrix(gf, info, chunk_rows=2048):
     """A 2-D tensor as (w uint32, scales f16, biases f16, bits) numpy arrays ready for mx.quantized_matmul."""
     name = info.type_name
     rows, cols = info.shape
-    if name not in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K"):
+    if name not in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K", "Q2_K", "Q3_K", "IQ4_NL", "IQ4_XS"):
         raise UnsupportedQuant(f"{info.name}: {name}")
     _, block, size = TYPES[info.type]
     if cols % block:

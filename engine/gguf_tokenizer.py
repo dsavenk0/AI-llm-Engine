@@ -96,13 +96,17 @@ class GGUFTokenizer:
             scores = gguf.read_array(path, "tokenizer.ggml.scores")
             if not scores or len(scores) != len(tokens):
                 raise Unsupported("the SentencePiece vocabulary has no scores")
-            if meta.get("tokenizer.ggml.add_space_prefix", True):
-                raise Unsupported("SentencePiece with a dummy space prefix")
             unk = tokens[int(meta.get("tokenizer.ggml.unknown_token_id", 0))]
             tok = Tokenizer(models.BPE(vocab=vocab, merges=_spm_merges(tokens, scores, types), unk_token=unk,
                                        byte_fallback=True, fuse_unk=True))
-            tok.normalizer = normalizers.Replace(" ", SPIECE)
-            tok.decoder = decoders.Sequence([decoders.Replace(SPIECE, " "), decoders.ByteFallback(), decoders.Fuse()])
+            # llama.cpp puts a space in front of the text — and of every piece of text that follows a special
+            # token — when the vocabulary was trained with SentencePiece's dummy prefix (Llama 2, Mistral); the
+            # normalizer runs on each such piece separately. Detokenizing drops that leading space again.
+            prefix = bool(meta.get("tokenizer.ggml.add_space_prefix", True))
+            tok.normalizer = normalizers.Sequence(([normalizers.Prepend(" ")] if prefix else [])
+                                                  + [normalizers.Replace(" ", SPIECE)])
+            tok.decoder = decoders.Sequence([decoders.Replace(SPIECE, " "), decoders.ByteFallback(), decoders.Fuse()]
+                                            + ([decoders.Strip(" ", 1, 0)] if prefix else []))
         specials = [AddedToken(tokens[i], special=True, normalized=False)
                     for i, t in enumerate(types) if t in (CONTROL, USER_DEFINED) and i < len(tokens)]
         if specials:

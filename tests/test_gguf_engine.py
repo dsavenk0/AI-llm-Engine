@@ -35,7 +35,7 @@ class TestSupportProbe(Base):
         S.write(gemma, arch="gemma3")
         self.assertEqual(gguf.native_support(gemma), (True, ""))
         iq = os.path.join(self.dir, "iq.gguf")
-        S.write(iq, tensor_type_override=("blk.0.ffn_up.weight", 20))           # IQ4_NL
+        S.write(iq, tensor_type_override=("blk.0.ffn_up.weight", 21))           # IQ3_S: a lookup grid we do not read
         self.assertIn("quantization", gguf.native_support(iq)[1])
         spm = os.path.join(self.dir, "spm.gguf")
         S.write(spm, extra_meta={"tokenizer.ggml.model": "llama"})
@@ -233,13 +233,32 @@ class TestGemma3(Base):
         self.assertIn(names.index("<end_of_turn>"), tk.eos_token_ids)
         self.assertIn(1, tk.eos_token_ids)
 
-    def test_a_dummy_prefix_vocabulary_is_refused_not_mis_tokenized(self):
+    def test_a_dummy_prefix_vocabulary_gets_the_space_llama_cpp_adds(self):
+        """Llama 2 / Mistral / MiniCPM: a space goes in front of the text and of each piece of text after a
+        special token; detokenizing drops the first one again (checked against llama.cpp on MiniCPM4)."""
         from engine import gguf, gguf_tokenizer
         path = os.path.join(self.dir, "gemma-prefix.gguf")
         S.write(path, arch="gemma3", extra_meta={"tokenizer.ggml.add_space_prefix": True})
-        self.assertIn("tokenizer", gguf.native_support(path)[1])
+        self.assertEqual(gguf.native_support(path), (True, ""))
+        tk = gguf_tokenizer.GGUFTokenizer(path, gguf.read_header_full(path))
+        names = S.spm_vocab()[0]
+        as_names = lambda text: [names[i] for i in tk.encode(text)]          # noqa: E731
+        self.assertEqual(as_names("the"), ["\u2581the"])
+        self.assertEqual(as_names("a the"), ["\u2581a", "\u2581the"])
+        self.assertEqual(as_names("<start_of_turn>user"), ["<start_of_turn>", "\u2581", "u", "s", "e", "r"])
+        self.assertEqual(as_names("hi<end_of_turn>the"), ["\u2581", "h", "i", "<end_of_turn>", "\u2581the"])
+        for text in ("hello", "  x", "the thing in a"):
+            self.assertEqual(tk.decode(tk.encode(text)), text, text)
+        # SentencePiece's known quirk, reproduced on purpose (llama.cpp does the same): text right after a
+        # special token carries the dummy space, so it does not round-trip exactly
+        self.assertEqual(tk.decode(tk.encode("<start_of_turn>user")), "<start_of_turn> user")
+        # the vocabulary without scores cannot be merged: refused before anything is built
+        bare = os.path.join(self.dir, "llama-spm-bare.gguf")
+        S.write(bare, extra_meta={"tokenizer.ggml.model": "llama"})
+        self.assertEqual(gguf.native_support(bare)[0], False)
+        self.assertIn("tokenizer", gguf.native_support(bare)[1])
         with self.assertRaises(gguf_tokenizer.Unsupported):
-            gguf_tokenizer.GGUFTokenizer(path, gguf.read_header_full(path))
+            gguf_tokenizer.GGUFTokenizer(bare, gguf.read_header_full(bare))
 
 
 class TestMixtureOfExperts(Base):
@@ -279,6 +298,28 @@ class TestMixtureOfExperts(Base):
         cfg = self.check("granitemoe", "F16")
         self.assertEqual((cfg.embed_scale, cfg.residual_scale, cfg.logit_scale), (3.0, 0.5, 2.0))
         self.assertAlmostEqual(cfg.attn_scale, 0.2, places=6)
+
+    def test_minicpm_longrope_short_factors_and_multipliers(self):
+        from engine import dense, gguf
+        path = os.path.join(self.dir, "minicpm.gguf")
+        factors = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]                  # HEAD_DIM / 2 of them
+        values = S.write(path, seed=11, quant="F16", arch="minicpm", rope_factors=factors)
+        self.assertEqual(gguf.native_support(path), (True, ""))
+        _, cfg, got = self.logits(path)
+        self.assertEqual((cfg.embed_scale, cfg.residual_scale, cfg.logit_scale), (3.0, 0.5, 2.0))
+        want = S.reference_logits(values, self.IDS, arch="minicpm")
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0)
+        # the long table would give other numbers: the short one is what is read
+        values["rope_freqs.weight"] = values["rope_factors_long.weight"]
+        other = S.reference_logits(values, self.IDS, arch="minicpm")
+        self.assertGreater(float(np.abs(other - want).max()), 0.02)
+        # a longer context than the original needs the long table, which is not read: refused, never wrong
+        for meta in ({"minicpm.rope.scaling.original_context_length": 64},):
+            p2 = os.path.join(self.dir, "minicpm-long.gguf")
+            S.write(p2, arch="minicpm", rope_factors=factors, extra_meta=meta)
+            self.assertIn("longrope", gguf.native_support(p2)[1])
+            with self.assertRaises(dense.Unsupported):
+                dense.build(p2)
 
     def test_dense_granite(self):
         cfg = self.check("granite", "F16", moe=False)

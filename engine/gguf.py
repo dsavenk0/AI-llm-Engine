@@ -141,9 +141,27 @@ def read_array(path, key, limit=1 << 24):
     return None
 
 
-# ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K BF16
-NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 12, 13, 14, 30}
-NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma3", "granite", "granitemoe", "qwen3moe")
+def has_array(path, key):
+    """Is `key` a metadata array of the file? (Nothing is read: a vocabulary can be hundreds of thousands of entries.)"""
+    with open(path, "rb") as f:
+        if f.read(4) != MAGIC:
+            raise GGUFError("not a GGUF file")
+        _read(f, "<I")
+        _read(f, "<Q")
+        kv = _read(f, "<Q")
+        for _ in range(kv):
+            k = _string(f)
+            t = _read(f, "<I")
+            if k == key and t == 9:
+                return True
+            _value(f, t, False)
+    return False
+
+
+# ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0
+# Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_NL IQ4_XS
+NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 30}
+NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma3", "granite", "granitemoe", "qwen3moe", "minicpm")
 # pre-tokenizer rules verified against llama.cpp (engine/gguf_tokenizer.py keeps the expressions)
 NATIVE_PRE = ("default", "gpt2", "llama-bpe", "llama3", "smaug-bpe", "qwen2", "qwen35", "deepseek-r1-qwen",
               "smollm", "refact")
@@ -194,16 +212,23 @@ def native_support(path):
             if "blk.0.ffn_gate_shexp.weight" in names:
                 return False, "mixture of experts with a shared expert"
         tk = meta.get("tokenizer.ggml.model")
-        if tk == "llama":                              # SentencePiece (Gemma): scored pieces, no dummy prefix
-            if meta.get("tokenizer.ggml.add_space_prefix", True):
-                return False, "tokenizer: SentencePiece with a dummy space prefix"
+        if tk == "llama":                              # SentencePiece (Gemma, Mistral, MiniCPM): scored pieces
+            if not has_array(path, "tokenizer.ggml.scores"):
+                return False, "tokenizer: SentencePiece without scores"
         elif tk != "gpt2":
             return False, f"tokenizer {tk!r}"
         elif meta.get("tokenizer.ggml.pre", "default") not in NATIVE_PRE:
             return False, f"pre-tokenizer {meta.get('tokenizer.ggml.pre')!r}"
         scaling = meta.get(f"{arch}.rope.scaling.type")
-        if scaling not in (None, "none", "llama3") and not (scaling == "linear" and arch == "gemma3"):
+        longrope = scaling == "longrope" and arch == "minicpm"
+        if scaling not in (None, "none", "llama3") and not (scaling == "linear" and arch == "gemma3") and not longrope:
             return False, f"rope scaling {scaling!r}"
+        if longrope:                  # only the short factors are read: fine while the context stays within the original
+            orig = meta.get(f"{arch}.rope.scaling.original_context_length")
+            if "rope_factors_short.weight" not in tensor_names(path):
+                return False, "longrope scaling without its short factors"
+            if orig and orig < meta.get(f"{arch}.context_length", orig):
+                return False, "longrope scaling with a longer context than the original"
         if meta.get(f"{arch}.attention.sliding_window") and arch != "gemma3":
             return False, "sliding-window attention"
         if scaling == "llama3" and "rope_freqs.weight" not in tensor_names(path):

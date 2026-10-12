@@ -14,6 +14,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **More GGUF on the engine's own decoder**: Q2_K, Q3_K, IQ4_NL and IQ4_XS (decoded exactly — checked tensor by
+  tensor against llama.cpp's own dequantization — then re-quantized per 32 weights to 4 / 5 / 6 / 6 bits, so they
+  take more memory than in the file), SentencePiece vocabularies with the dummy space prefix (Llama 2 / Mistral /
+  MiniCPM; token ids identical to llama.cpp), MiniCPM with LongRoPE (short factors) and its multipliers. IQ1–IQ3 and
+  per-expert / shared-expert MoE files still go to llama.cpp.
 - **Mixture-of-experts GGUF on the engine's own decoder** (Mixtral-style llama, Qwen3-MoE, Granite-MoE) and dense
   Granite: the experts stay stacked and quantized, a token runs only its top-k with `gather_qmm` (prefill groups
   tokens by expert), Granite's embedding / residual / logit / attention multipliers are read from the file.
