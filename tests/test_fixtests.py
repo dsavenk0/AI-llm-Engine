@@ -69,6 +69,68 @@ class TestDetect(unittest.TestCase):
         self.assertIsNone(fixtests.detect_command(project({"README.md": "hi"})))
 
 
+class TestDetectMore(unittest.TestCase):
+    def test_swift_make_pyproject_and_the_unittest_layouts(self):
+        self.assertEqual(fixtests.detect_command(project({"Package.swift": ""})), "swift test")
+        self.assertEqual(fixtests.detect_command(project({"makefile": "x:\n\ttrue\ntest:\n\ttrue\n"})), "make test")
+        self.assertIsNone(fixtests.detect_command(project({"Makefile": "contest:\n\ttrue\n"})))   # "test:" must start a line
+        self.assertIn("-m pytest -x -q", fixtests.detect_command(project({"pyproject.toml": "[tool.pytest.ini_options]"})))
+        self.assertIn("-m pytest", fixtests.detect_command(project({"setup.cfg": "[tool:pytest]\n"})))
+        self.assertIn("-m pytest", fixtests.detect_command(project({"conftest.py": ""})))
+        with_pkg = fixtests.detect_command(project({"tests/__init__.py": "", "tests/test_a.py": ""}))
+        self.assertTrue(with_pkg.endswith("discover -s tests -t ."))
+        bare = fixtests.detect_command(project({"test/test_a.py": ""}))
+        self.assertTrue(bare.endswith("discover -s test"))
+        self.assertIn("-B", bare)
+        # an empty .llm/test_cmd falls through to the ecosystems
+        self.assertEqual(fixtests.detect_command(project({".llm/test_cmd": "  \n", "Cargo.toml": ""})), "cargo test")
+        self.assertIsNone(fixtests.detect_command(project({"package.json": "{broken"})))
+
+    def test_the_prompt_names_the_command_the_round_and_the_previous_attempt(self):
+        first = fixtests.prompt("pytest -q", "FAILED x", 1)
+        self.assertIn("`pytest -q`", first)
+        self.assertIn("Round 1. Failing output:\n\nFAILED x", first)
+        self.assertNotIn("previous attempt", first)
+        again = fixtests.prompt("pytest -q", "FAILED x", 2, previous=True)
+        self.assertIn("previous attempt did not fix it", again)
+        self.assertIn("Round 2.", again)
+
+    def test_constants(self):
+        self.assertEqual((fixtests.MAX_EXCERPT, fixtests.TIMEOUT), (6000, 900))
+
+    def test_run_returns_the_exit_code_and_both_streams(self):
+        code, out = fixtests.run(f"{sys.executable} -c \"import sys; print('A'); print('B', file=sys.stderr); sys.exit(3)\"",
+                                 tempfile.mkdtemp())
+        self.assertEqual(code, 3)
+        self.assertIn("A", out)
+        self.assertIn("B", out)
+
+
+class TestFailuresMore(unittest.TestCase):
+    def test_the_fallback_keeps_the_last_sixty_lines_and_at_most_the_limit(self):
+        log = "\n".join(f"line {i:03d}" for i in range(100))
+        ex = fixtests.failures(log)
+        self.assertEqual(ex.split("\n")[0], "line 040")
+        self.assertEqual(len(ex.split("\n")), 60)
+        self.assertEqual(len(fixtests.failures("x" * 20000, limit=100)), 100)
+
+    def test_an_oversized_block_is_cut_in_the_middle_and_the_rest_are_counted(self):
+        big = f"{'=' * 70}\nFAIL: test_big (m.C.test_big)\n{'-' * 70}\n" + "H" * 5000 + "T" * 5000 + "\n"
+        two = f"{'=' * 70}\nFAIL: test_two (m.C.test_two)\n{'-' * 70}\ntraceback two\n"
+        ex = fixtests.failures(big + two, limit=1000)
+        self.assertIn("\n…\n", ex)
+        self.assertTrue(ex.startswith("FAIL: test_big"))
+        self.assertIn("T" * 100, ex)                                 # the tail of the block survives
+        self.assertIn("… and 1 more failing test(s) not shown", ex)
+        self.assertNotIn("traceback two", ex)
+
+    def test_summary_lines_of_other_runners(self):
+        out = f"{'_' * 20} test_a {'_' * 20}\nassert 1 == 2\n{'=' * 10} short test summary info {'=' * 10}\nFAILED t.py::test_a\n{'=' * 5} 1 failed in 0.1s {'=' * 5}\n"
+        self.assertIn("1 failed in 0.1s", fixtests.failures(out))
+        self.assertIn("test result: FAILED. 0 passed; 1 failed",
+                      fixtests.failures("running 1 test\nsomething\ntest result: FAILED. 0 passed; 1 failed\n"))
+
+
 class TestFailures(unittest.TestCase):
     def test_pytest_failures_are_cut_to_the_failing_tests(self):
         ex = fixtests.failures(PYTEST_OUT)

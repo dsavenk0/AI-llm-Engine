@@ -103,6 +103,61 @@ class TestCompaction(unittest.TestCase):
         long = convo(4)
         self.assertIs(compact.compact(long, lambda p: "  "), long)
 
+    def test_the_trigger_is_inclusive_and_constants_are_what_the_docs_say(self):
+        self.assertEqual((compact.TRIGGER, compact.KEEP_USER_TURNS, compact.OLD_TOOL_KEEP, compact.TRANSCRIPT_MAX),
+                         (0.70, 2, 300, 24000))
+        self.assertTrue(compact.needs_compaction(70, 100))               # exactly at the share: compact
+        self.assertFalse(compact.needs_compaction(69, 100))
+        self.assertTrue(compact.needs_compaction(50, 100, trigger=0.5))
+
+    def test_the_tail_starts_at_the_nth_user_message_from_the_end_and_never_at_the_system(self):
+        m = [{"role": "system"}, {"role": "user"}, {"role": "assistant"}, {"role": "user"}, {"role": "assistant"},
+             {"role": "user"}, {"role": "assistant"}]
+        self.assertEqual(compact._tail_start(m, 1), 5)
+        self.assertEqual(compact._tail_start(m, 2), 3)
+        self.assertEqual(compact._tail_start(m, 3), 1)
+        self.assertEqual(compact._tail_start(m, 9), 1)                   # fewer user turns than asked: all but the system
+        self.assertEqual(compact._tail_start([{"role": "system"}, {"role": "assistant"}], 1), 1)
+
+    def test_shrink_counts_every_saved_character_and_keeps_the_system_and_the_tail(self):
+        long = "x" * 1000
+        m = [{"role": "system", "content": "S" * 900, "reasoning_content": "keep me"},
+             {"role": "user", "content": "q1"},
+             {"role": "assistant", "content": "", "reasoning_content": "think", "tool_calls": []},
+             {"role": "tool", "content": long},
+             {"role": "tool", "content": "y" * 300},                      # exactly the limit: left alone
+             {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2", "reasoning_content": "t2"}]
+        out, saved = compact.shrink(m, keep_user_turns=1)
+        self.assertEqual(out[0], m[0])                                    # the system message is never touched
+        self.assertNotIn("reasoning_content", out[2])
+        self.assertEqual(out[3]["content"], "x" * 300 + "\n… [700 chars of old tool output dropped]")
+        self.assertEqual(out[4], m[4])
+        self.assertEqual(out[5:], m[5:])                                  # the tail stays as it was
+        self.assertEqual(saved, 1 + 700)                                  # one dropped reasoning + the cut characters
+
+    def test_transcript_describes_tool_calls_and_hides_edit_bodies(self):
+        import json
+        m = [{"role": "assistant", "content": "looking", "tool_calls": [
+                {"function": {"name": "edit_file", "arguments": json.dumps({"path": "a.py", "old": "SECRET", "new": "x"})}},
+                {"function": {"name": "read_file", "arguments": "{broken"}}]},
+             {"role": "tool", "content": "z" * 500}, {"role": "user", "content": None}]
+        t = compact.transcript(m)
+        self.assertIn("assistant: looking [tool calls: edit_file(path='a.py'); read_file()]", t)
+        self.assertNotIn("SECRET", t)
+        self.assertIn("tool: " + "z" * 300 + "\n", t + "\n")
+        self.assertNotIn("z" * 301, t)
+        self.assertTrue(t.rstrip().endswith("user:"))
+
+    def test_compact_passes_the_summary_prompt_and_trims_the_note(self):
+        m = convo(4)
+        got = []
+        out = compact.compact(m, lambda p: got.append(p) or "  the note \n")
+        self.assertTrue(got[0].startswith(compact.SUMMARY_PROMPT))
+        self.assertTrue(out[1]["content"].endswith("\nthe note"))
+        self.assertEqual(out[1]["content"].split("\n")[0],
+                         "[Summary of the earlier conversation — the transcript was compacted to save context]")
+        self.assertEqual(compact.compact(m, lambda p: None), m)         # None from the summarizer: unchanged
+
     def test_transcript_is_capped_keeping_the_newest(self):
         m = convo(200, tool_chars=100)
         t = compact.transcript(m[1:])
