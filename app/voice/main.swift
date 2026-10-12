@@ -7,6 +7,7 @@ import Combine
 import NaturalLanguage
 import Speech
 import SwiftUI
+import WidgetKit
 
 // MARK: - configuration (same files and arguments as the other apps)
 
@@ -310,6 +311,30 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// Turns the model on, or off when it is running — what the widget's button asks for. No window involved.
+    func toggleModelInBackground() async {
+        await refreshModel()
+        let on = model.running
+        modelLoading = !on
+        let watcher = on ? nil : Task { await watchLoading() }
+        let root = Setup.llmRoot, args = [on ? "stop" : "start"]
+        await Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: root + "/llm")
+            p.arguments = args
+            p.currentDirectoryURL = URL(fileURLWithPath: root)
+            p.standardInput = FileHandle.nullDevice
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+        }.value
+        modelLoading = false
+        watcher?.cancel()
+        await refreshModel()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
     func stopEverything() {
         silenceTimer?.invalidate()
         ask?.cancel()
@@ -372,6 +397,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         info.name = (h?["model"] as? String) ?? ((info.path as NSString).lastPathComponent)
         let path = info.path
         info.bytes = path.isEmpty ? 0 : await Task.detached { Voice.weightBytes(path) }.value
+        if info.name != model.name { WidgetCenter.shared.reloadAllTimelines() }      // the desktop widget names the model
         model = info
     }
 
@@ -395,7 +421,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     /// Starts the model with the `llm` command when nothing answers (it picks the selected model, or the first
     /// one that fits), then waits for it.
-    private func ensureModel() async -> Bool {
+    func ensureModel() async -> Bool {
         if let running = modelTask { return await running.value }      // one start at a time, however many ask
         let t = Task { await self.loadModel() }
         modelTask = t
@@ -949,6 +975,48 @@ struct VoiceView: View {
     }
 }
 
+// MARK: - what the widget's icons open
+
+enum Launchers {
+    static let editorBundleID = "local.llm-engine.editor"
+
+    /// The editor: another window when it already runs, else the app next to this one (LLMBar's Resources), in the
+    /// checkout, or in /Applications.
+    @MainActor static func openEditor() {
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: editorBundleID).first {
+            DistributedNotificationCenter.default().postNotificationName(
+                Notification.Name("local.llm-engine.editor.new-window"), object: nil,
+                userInfo: ["root": ""], deliverImmediately: true)
+            running.activate(options: [.activateIgnoringOtherApps])
+            return
+        }
+        let candidates = [Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("LLMEditor.app"),
+                          URL(fileURLWithPath: Setup.llmRoot + "/LLMEditor.app"),
+                          URL(fileURLWithPath: "/Applications/LLMEditor.app")]
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: editorBundleID)
+                ?? candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else { return }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        cfg.arguments = ["--llm-root", Setup.llmRoot, "--engine-port", String(Setup.port)]
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, _ in }
+    }
+
+    /// A command in a new Terminal window, through a throwaway .command file (no Automation permission needed).
+    static func openTerminal(_ command: String) {
+        let dir = Setup.home + "/.llm"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let file = dir + "/run-\(Int(Date().timeIntervalSince1970 * 1000)).command"
+        let body = "#!/bin/sh\ncd '\(Setup.llmRoot)' || exit 1\nexport LLM_HOME='\(Setup.home)'\nrm -f '\(file)'\n\(command)\n"
+        do {
+            try body.write(toFile: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file)
+        } catch { return }
+        NSWorkspace.shared.open([URL(fileURLWithPath: file)],
+                                withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
+                                configuration: NSWorkspace.OpenConfiguration())
+    }
+}
+
 // MARK: - app
 
 final class VoiceWindow: NSWindow {
@@ -1022,8 +1090,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let voice = Voice()
     private var onTop: AnyCancellable?
 
+    private var launchURL: URL?
+
+    override init() {
+        super.init()
+        // the link that launched the app arrives as an Apple event before didFinishLaunching
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:reply:)),
+                                                     forEventClass: AEEventClass(kInternetEventClass),
+                                                     andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc func handleURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let url = URL(string: s),
+              url.scheme == "llmvoice" else { return }
+        if window == nil && launchURL == nil { launchURL = url; return }                // still starting up
+        route(url)
+    }
+
+    private enum Action { case toggle, voice, editor, cli }
+
+    private func action(for url: URL) -> Action {
+        let target = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "target" }?.value
+        if url.host == "toggle" { return .toggle }
+        if url.host == "launch" { return target == "editor" ? .editor : target == "cli" ? .cli : .voice }
+        return .voice                                                               // llmvoice://listen
+    }
+
+    /// The widget's links: `toggle` turns the model on / off, `launch?target=voice|editor|cli` opens one of the
+    /// three — and each of them starts loading the model at once, so it is ready when the window is.
+    private func route(_ url: URL) {
+        switch action(for: url) {
+        case .toggle:
+            Task { await voice.toggleModelInBackground() }
+        case .editor:
+            Launchers.openEditor()
+            Task { _ = await voice.ensureModel(); WidgetCenter.shared.reloadAllTimelines() }
+        case .cli:
+            Launchers.openTerminal("./llm")
+            Task { _ = await voice.ensureModel(); WidgetCenter.shared.reloadAllTimelines() }
+        case .voice:
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            if voice.state == .idle { voice.begin() }
+        }
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
         resolveTheme()
+        if let url = launchURL, action(for: url) != .voice {                  // launched by one of the widget's buttons
+            NSApp.setActivationPolicy(.accessory)                                 // no window, no Dock icon
+            installMenus()
+            Task {
+                switch action(for: url) {
+                case .toggle: await voice.toggleModelInBackground()
+                case .editor: Launchers.openEditor(); _ = await voice.ensureModel()
+                case .cli: Launchers.openTerminal("./llm"); _ = await voice.ensureModel()
+                case .voice: break
+                }
+                WidgetCenter.shared.reloadAllTimelines()
+                try? await Task.sleep(nanoseconds: 800_000_000)                 // let the widget reload first
+                NSApp.terminate(nil)
+            }
+            return
+        }
         NSApp.setActivationPolicy(.regular)                                 // a Dock icon: a minimised window must be findable
         installMenus()
         let w = makeWindow(voice: voice)
@@ -1035,18 +1164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window = w
         onTop = voice.$keepOnTop.sink { [weak w] on in w?.level = on ? .floating : .normal }
-        if voice.autoListen { voice.begin() }                               // by default this is a voice assistant
+        if voice.autoListen || launchURL != nil { voice.begin() }              // by default this is a voice assistant
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
             MainActor.assumeIsolated { self.voice.stopEverything(); NSApp.terminate(nil) }
         }
-    }
-
-    /// `llmvoice://listen` (the desktop widget): bring the window up and start listening.
-    func application(_ app: NSApplication, open urls: [URL]) {
-        guard urls.contains(where: { $0.scheme == "llmvoice" }) else { return }
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        if voice.state == .idle { voice.begin() }
     }
 
     func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

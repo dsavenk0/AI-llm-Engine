@@ -317,8 +317,12 @@ system, with the same transparency setting), and it reads LLMBar's settings (`.l
 shows which model is selected and its state (ready / asleep / not running); while the weights are read into memory
 there is a progress bar with the bytes the engine process holds so far, and a sleeping engine is woken on open. The first run asks for the microphone and speech-recognition permissions.
 
-**Desktop widget** (macOS 14+): the app carries a small WidgetKit extension — an orb that, on one click (the
-`llmvoice://listen` link), opens the chat; the app starts the model and listens at once. WidgetKit lists extensions only of apps that live in
+**Desktop widget** (macOS 14+): the app carries a WidgetKit extension in two sizes. The small one is the orb: a click
+opens the chat, the app starts the model and listens at once. The wide one shows the selected model and whether it is
+up, a large sphere (a click opens the voice chat), a power button that turns the model on or off **in the
+background** (the app starts without a window, runs `llm start` / `llm stop`, and quits), and three icons — voice
+assistant, editor, terminal CLI — each of which starts loading the model ahead of use, so it is ready when the window
+is. WidgetKit lists extensions only of apps that live in
 `/Applications`, so `./build-voice.sh --install` builds the app, copies it there and registers the widget; then
 right-click the desktop → *Edit Widgets* → *LLM Voice*. It is signed ad hoc (no developer account), so it works on
 the Mac that built it.

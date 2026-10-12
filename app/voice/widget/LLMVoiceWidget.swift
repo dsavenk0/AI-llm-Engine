@@ -4,13 +4,52 @@
 import SwiftUI
 import WidgetKit
 
-struct OrbEntry: TimelineEntry { let date: Date }
+struct OrbEntry: TimelineEntry {
+    let date: Date
+    let model: String            // the model chosen in LLMBar / `./llm use`, "" when none
+    let running: Bool            // the engine answers on its port
+    let russian: Bool
+}
+
+/// What the widget may know: LLMBar's and the CLI's shared config (the build grants the sandboxed extension read
+/// access to exactly that folder, path in Info.plist as LLMHome) and the engine's /health on localhost.
+enum Status {
+    private static func config() -> [String: Any] {
+        guard let home = Bundle.main.object(forInfoDictionaryKey: "LLMHome") as? String,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: home + "/.llm/config.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj
+    }
+
+    static func entry(completion: @escaping (OrbEntry) -> Void) {
+        let c = config()
+        let path = c["model"] as? String ?? ""
+        let name = (path as NSString).lastPathComponent
+        let ru = (c["lang"] as? String) == "ru"
+        let port = c["port"] as? Int ?? 8090
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/health")!)
+        req.timeoutInterval = 1.2
+        if let key = c["api_key"] as? String, !key.isEmpty { req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            let up = (resp as? HTTPURLResponse)?.statusCode == 200
+            completion(OrbEntry(date: Date(), model: name, running: up, russian: ru))
+        }.resume()
+    }
+}
 
 struct OrbProvider: TimelineProvider {
-    func placeholder(in context: Context) -> OrbEntry { OrbEntry(date: Date()) }
-    func getSnapshot(in context: Context, completion: @escaping (OrbEntry) -> Void) { completion(OrbEntry(date: Date())) }
+    func placeholder(in context: Context) -> OrbEntry {
+        OrbEntry(date: Date(), model: "qwen3.5-0.8b-4bit", running: true, russian: false)
+    }
+    func getSnapshot(in context: Context, completion: @escaping (OrbEntry) -> Void) {
+        if context.isPreview { completion(placeholder(in: context)) } else { Status.entry(completion: completion) }
+    }
     func getTimeline(in context: Context, completion: @escaping (Timeline<OrbEntry>) -> Void) {
-        completion(Timeline(entries: [OrbEntry(date: Date())], policy: .never))      // nothing ever changes
+        // the app asks for a reload whenever the model changes state; this is the fallback
+        Status.entry { entry in
+            let next = Calendar.current.date(byAdding: .minute, value: 5, to: Date()) ?? Date().addingTimeInterval(300)
+            completion(Timeline(entries: [entry], policy: .after(next)))
+        }
     }
 }
 
@@ -53,18 +92,64 @@ struct StaticOrb: View {
 }
 
 struct OrbWidgetView: View {
-    var body: some View {
-        ZStack {
-            StaticOrb()
-            VStack {
-                Spacer()
-                Text("LLM VOICE")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(1.6)
-                    .foregroundColor(Color(red: 0.0, green: 0.9, blue: 1.0).opacity(0.9))
-            }.padding(.bottom, 2)
+    @Environment(\.widgetFamily) private var family
+    let entry: OrbEntry
+
+    private let cyan = Color(red: 0.0, green: 0.9, blue: 1.0)
+    private let mint = Color(red: 0.3, green: 0.95, blue: 0.76)
+    private let pink = Color(red: 1, green: 0.18, blue: 0.53)
+
+    private func launcher(_ symbol: String, _ en: String, _ ru: String, _ target: String) -> some View {
+        Link(destination: URL(string: "llmvoice://launch?target=\(target)")!) {
+            VStack(spacing: 2) {
+                Image(systemName: symbol).font(.system(size: 14, weight: .semibold))
+                Text((entry.russian ? ru : en).uppercased())
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced)).tracking(0.8)
+            }
+            .foregroundColor(cyan)
+            .frame(width: 70, height: 32)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(cyan.opacity(0.35), lineWidth: 1))
         }
-        .widgetURL(URL(string: "llmvoice://listen"))
+    }
+
+    var body: some View {
+        Group {
+            if family == .systemMedium {
+                VStack(spacing: 3) {
+                    HStack(spacing: 5) {                                      // which model, and whether it is up
+                        Circle().fill(entry.running ? mint : Color.white.opacity(0.35)).frame(width: 6, height: 6)
+                        Text(entry.model.isEmpty ? (entry.russian ? "МОДЕЛЬ НЕ ВЫБРАНА" : "NO MODEL SELECTED") : entry.model)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        Link(destination: URL(string: "llmvoice://toggle")!) {      // the model on / off, in the background
+                            Image(systemName: "power").font(.system(size: 11, weight: .bold))
+                                .foregroundColor(entry.running ? pink : cyan)
+                                .frame(width: 24, height: 20)
+                                .background(Capsule().strokeBorder((entry.running ? pink : cyan).opacity(0.7), lineWidth: 1))
+                        }
+                    }
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced)).tracking(0.4)
+                    .foregroundColor(entry.model.isEmpty ? pink : .white.opacity(0.92))
+                    StaticOrb().scaleEffect(1.3).frame(maxHeight: .infinity)  // the big icon: a tap opens the voice chat
+                    HStack(spacing: 8) {                                     // each of these loads the model ahead of use
+                        launcher("waveform", "Voice", "Голос", "voice")
+                        launcher("chevron.left.forwardslash.chevron.right", "Editor", "Редактор", "editor")
+                        launcher("terminal", "CLI", "CLI", "cli")
+                    }
+                }
+            } else {
+                ZStack {
+                    StaticOrb()
+                    VStack {
+                        Spacer()
+                        Text("LLM VOICE")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced)).tracking(1.6)
+                            .foregroundColor(cyan.opacity(0.9))
+                    }.padding(.bottom, 2)
+                }
+            }
+        }
+        .widgetURL(URL(string: "llmvoice://launch?target=voice"))
         .containerBackground(for: .widget) {
             LinearGradient(colors: [Color(red: 0.02, green: 0.05, blue: 0.08), Color(red: 0.04, green: 0.10, blue: 0.14)],
                            startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -74,10 +159,10 @@ struct OrbWidgetView: View {
 
 struct OrbWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "local.llm-engine.voice.widget", provider: OrbProvider()) { _ in OrbWidgetView() }
+        StaticConfiguration(kind: "local.llm-engine.voice.widget", provider: OrbProvider()) { OrbWidgetView(entry: $0) }
             .configurationDisplayName("LLM Voice")
-            .description("One tap opens the quick chat: it starts the model and listens.")
-            .supportedFamilies([.systemSmall])
+            .description("The selected model, a power button that turns it on and off in the background, and the voice chat, editor and terminal — each one loads the model ahead of use.")
+            .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
 

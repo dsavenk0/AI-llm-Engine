@@ -57,6 +57,8 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 # the desktop widget (macOS 14+): a WidgetKit extension that only draws the orb and opens the app on a tap.
 # It needs the App Sandbox entitlement and a signature (ad hoc is enough on this Mac); skipped if it cannot build.
 WIDGET="$APP/Contents/PlugIns/LLMVoiceWidget.appex"
+# where the config LLMBar and ./llm share lives (the widget reads the selected model from it)
+if [[ -f "$ROOT/llm.py" ]]; then LLM_HOME_DIR="$ROOT"; else LLM_HOME_DIR="$HOME/Library/Application Support/LLMBar"; fi
 mkdir -p "$WIDGET/Contents/MacOS"
 if swiftc -O -parse-as-library -application-extension -target "$(uname -m)-apple-macos14.0" \
      -framework WidgetKit -framework SwiftUI -Xlinker -e -Xlinker _NSExtensionMain \
@@ -74,6 +76,7 @@ if swiftc -O -parse-as-library -application-extension -target "$(uname -m)-apple
   <key>CFBundlePackageType</key><string>XPC!</string>
   <key>CFBundleExecutable</key><string>LLMVoiceWidget</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LLMHome</key><string>$LLM_HOME_DIR</string>
   <key>NSExtension</key><dict>
     <key>NSExtensionPointIdentifier</key><string>com.apple.widgetkit-extension</string>
   </dict>
@@ -83,7 +86,12 @@ PLIST
   cat > "$TMP/widget.entitlements" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/></dict></plist>
+<plist version="1.0"><dict>
+  <key>com.apple.security.app-sandbox</key><true/>
+  <key>com.apple.security.network.client</key><true/>
+  <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+  <array><string>$LLM_HOME_DIR/.llm/</string></array>
+</dict></plist>
 PLIST
   codesign --force --sign - --entitlements "$TMP/widget.entitlements" "$WIDGET" >/dev/null 2>&1 || true
 else
