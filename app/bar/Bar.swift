@@ -8,6 +8,7 @@
 // All engine work goes through the `llm` CLI and the HTTP API; the app only
 // polls and edits .llm/config.json. Build: ./build-app.sh
 import AppKit
+import WidgetKit
 import Darwin
 import IOKit
 import SwiftUI
@@ -321,7 +322,7 @@ final class EngineState: ObservableObject {
     }
 
     func g<T>(_ k: String, _ def: T) -> T { config[k] as? T ?? def }
-    func setG(_ k: String, _ v: Any?) { config[k] = v; saveConfig() }
+    func setG(_ k: String, _ v: Any?) { config[k] = v; saveConfig(); if k == "model" { syncWidget() } }
 
     var modelPath: String { config["model"] as? String ?? "" }
     /// per-model settings, for any model (not only the active one)
@@ -346,8 +347,19 @@ final class EngineState: ObservableObject {
         config["advanced"] = a; saveConfig()
     }
 
+    /// The desktop widget shows the model and whether it is on: tell it whenever any of that changes, whoever
+    /// changed it (this panel, `./llm`, the editor, the voice chat, the idle sleep).
+    private var widgetSignature = ""
+    private func syncWidget() {
+        let sig = "\(running)|\(sleeping)|\(health?["model"] as? String ?? "")|\(modelPath)"
+        if sig != widgetSignature {
+            widgetSignature = sig
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
     func poll() {
-        get("/health") { j in self.health = j }
+        get("/health") { j in self.health = j; self.syncWidget() }
         if running { get("/v1/stats") { j in self.stats = j } }
     }
 
