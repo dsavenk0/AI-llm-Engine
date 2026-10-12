@@ -712,8 +712,37 @@ class TestFiles(Base):
     def test_binary_and_missing_and_large(self):
         self.assertTrue(self.call("GET", "/api/file?path=data.bin")[1]["binary"])
         self.assertEqual(self.call("GET", "/api/file?path=nope.txt")[0], 404)
-        self.put("big.txt", "x" * 2_100_000)
-        self.assertTrue(self.call("GET", "/api/file?path=big.txt")[1]["too_large"])
+        self.put("huge.bin", "x")
+        with open(os.path.join(self.root, "huge.bin"), "r+b") as f:
+            f.truncate(512_000_001)                                     # sparse: past what is offered at all
+        self.assertTrue(self.call("GET", "/api/file?path=huge.bin")[1]["too_large"])
+
+    def test_a_large_file_opens_as_a_read_only_head_and_cannot_be_saved(self):
+        body = "".join(f"line {i} — ünïcode ok\n" for i in range(120_000))        # ~3 MB
+        self.put("big.log", body)
+        r = self.call("GET", "/api/file?path=big.log")[1]
+        self.assertTrue(r["truncated"])
+        self.assertEqual(r["size"], len(body.encode()))
+        self.assertLessEqual(r["shown_bytes"], 256_000)
+        self.assertTrue(r["text"].startswith("line 0 —") and r["text"].endswith("\n"))   # whole lines only
+        self.assertTrue(body.startswith(r["text"]))
+        self.assertEqual((r["outline"], r["spans"]), ([], []))
+        # saving that head would cut the file: refused, the file is untouched
+        code, err = self.call("PUT", "/api/file", {"path": "big.log", "text": r["text"], "expected_mtime": r["mtime"]})
+        self.assertEqual(code, 400)
+        self.assertIn("too large", str(err))
+        with open(os.path.join(self.root, "big.log"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), body)
+        # a big binary file is still just "binary"
+        with open(os.path.join(self.root, "big.dat"), "wb") as f:
+            f.write(b"\x00" * 3_000_000)
+        self.assertTrue(self.call("GET", "/api/file?path=big.dat")[1]["binary"])
+        # a file with no newline in its head is cut at the byte limit, and a split character is dropped
+        with open(os.path.join(self.root, "one.txt"), "wb") as f:
+            f.write("é".encode() * 1_500_000)
+        r = self.call("GET", "/api/file?path=one.txt")[1]
+        self.assertTrue(r["truncated"])
+        self.assertTrue(set(r["text"]) == {"é"})
 
     def test_save_is_atomic_and_detects_a_concurrent_edit(self):
         opened = self.call("GET", "/api/file?path=src/app.py")[1]

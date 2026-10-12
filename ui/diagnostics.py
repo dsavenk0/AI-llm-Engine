@@ -154,7 +154,26 @@ def _bash(path, shell="bash"):
     return p.stderr, None, shell
 
 
+def _mypy(path):
+    """Type errors of a Python buffer (mypy, when installed). Imports it cannot resolve are not reported: the
+    buffer is checked alone, so a sibling module is "missing" only because it was not copied here."""
+    p = subprocess.run(["mypy", "--no-error-summary", "--show-column-numbers", "--no-color-output",
+                        "--ignore-missing-imports", "--follow-imports=silent", "--no-incremental", path],
+                       capture_output=True, text=True, timeout=25)
+    return p.stdout, r"^(?!.*\[import-)(?:.*?):(\d+):(\d+): (error|warning): (.*?)(?:  \[[\w-]+\])?$", "mypy"
+
+
+def _tsc(path):
+    """Type errors of a TypeScript buffer (tsc, when installed), without the ones caused by files and packages
+    that are simply not in the temporary folder (TS2307 / TS2792 / TS7016: a module it cannot find)."""
+    p = subprocess.run(["tsc", "--noEmit", "--pretty", "false", "--skipLibCheck", "--target", "es2020",
+                        "--moduleResolution", "node", path], capture_output=True, text=True, timeout=25)
+    return p.stdout, r"^(?:.*?)\((\d+),(\d+)\): (error|warning) TS(?!2307|2792|7016)\d+: (.*)$", "tsc"
+
+
 TOOLS = {
+    "python": ("mypy", ".py", _mypy),
+    "typescript": ("tsc", ".ts", _tsc),
     "swift": ("swiftc", ".swift", _swift),
     "javascript": ("node", ".js", _node),
     "shell": ("bash", ".sh", _bash),

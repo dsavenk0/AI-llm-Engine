@@ -14,6 +14,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Editor**: several terminals (tabs in the bottom panel, "+" for another shell, each a real shell with its own
+  output; the last one cannot be closed); large files (over 2 MB) open as a read-only head of 256 KB with a banner
+  instead of being refused, and are never saved from the editor (the server refuses it too, so a head cannot
+  overwrite the file); type errors from `mypy` (Python) and `tsc` (TypeScript) join the Problems list when those
+  tools are installed — modules the checker cannot find in a lone buffer are not reported as errors.
 - **LLM Voice: dialog mode, the whole conversation, the web.** After an answer the microphone opens again by itself
   (menu: "Dialog mode"; it ends on a long silence, a click on the sphere while nothing is said, or a typed
   message). Each question is sent with the whole exchange so far (newest turns kept within a budget, never a dangling

@@ -31,6 +31,7 @@ struct FileResponse: Decodable {
     let mtime: Int64?
     let outline: [Symbol]?, spans: [Span]?
     let binary: Bool?, too_large: Bool?, not_utf8: Bool?
+    let truncated: Bool?, size: Int64?, shown_bytes: Int64?       // a large file: only its head, read-only
 }
 struct AnalyzeResponse: Decodable {
     let language: String

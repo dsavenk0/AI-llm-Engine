@@ -27,7 +27,9 @@ from ui import agentloop, codeinfo, diagnostics  # noqa: E402
 
 SKIP_DIRS = {".git", ".llm", "node_modules", "__pycache__", ".venv", "venv", ".build", "DerivedData", ".idea",
              ".DS_Store"}
-MAX_FILE = 2_000_000          # larger files are listed but not opened
+MAX_FILE = 2_000_000          # larger files are opened as a read-only head, never saved from the editor
+HEAD_BYTES = 256_000          # how much of a larger file is shown
+HEAD_LIMIT = 512_000_000      # beyond this size not even a head is offered
 MAX_ATTACH_TOTAL = 200_000    # bytes of attachments inlined into one prompt
 MAX_BODY = 40_000_000         # images arrive inline (base64) with the request
 MAX_IMAGES = 6
@@ -145,10 +147,20 @@ class Project:
         if os.path.isdir(full):
             raise IsADirectoryError(rel)
         st = os.stat(full)
-        if st.st_size > MAX_FILE:
+        if st.st_size > HEAD_LIMIT:
             return {"path": self.rel(full), "too_large": True, "size": st.st_size}
+        big = st.st_size > MAX_FILE
         with open(full, "rb") as f:
-            raw = f.read()
+            raw = f.read(HEAD_BYTES) if big else f.read()
+        if big:
+            cut = raw.rfind(b"\n")                      # end on a whole line, and never inside a UTF-8 sequence
+            raw = raw[:cut + 1] if cut > 0 else raw
+            if b"\x00" in raw[:8192]:
+                return {"path": self.rel(full), "binary": True, "size": st.st_size}
+            text = raw.decode("utf-8", "ignore")
+            return {"path": self.rel(full), "text": text, "language": codeinfo.detect_language(full, text),
+                    "mtime": st.st_mtime_ns, "size": st.st_size, "truncated": True, "shown_bytes": len(raw),
+                    "outline": [], "spans": []}
         if b"\x00" in raw[:8192]:
             return {"path": self.rel(full), "binary": True, "size": st.st_size}
         try:
@@ -164,6 +176,9 @@ class Project:
         full = self.resolve(rel, must_exist=False)
         if os.path.isdir(full):
             raise IsADirectoryError(rel)
+        if os.path.exists(full) and os.path.getsize(full) > MAX_FILE:
+            # such a file is only ever shown as a head: saving that head would cut the file
+            raise ValueError(f"{rel} is too large to save from the editor")
         if expected_mtime is not None and os.path.exists(full) and os.stat(full).st_mtime_ns != int(expected_mtime):
             raise FileExistsError("the file changed on disk since it was opened")
         os.makedirs(os.path.dirname(full), exist_ok=True)

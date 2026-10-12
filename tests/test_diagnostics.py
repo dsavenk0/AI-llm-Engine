@@ -107,6 +107,50 @@ class TestDeepChecks(unittest.TestCase):
         self.assertEqual((d[0]["line"], d[0]["source"]), (1, "node"))
         self.assertIn("SyntaxError", d[0]["message"])
 
+    def with_fake_tools(self, **scripts):
+        """PATH with executables that print canned type-checker output for the file they are given."""
+        import stat
+        import tempfile
+        d = tempfile.mkdtemp()
+        for name, body in scripts.items():
+            p = os.path.join(d, name)
+            with open(p, "w") as f:
+                f.write('#!/bin/sh\nfor last; do :; done\n' + body)
+            os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
+        from unittest import mock
+        return mock.patch.dict(os.environ, {"PATH": d + os.pathsep + os.environ.get("PATH", "")})
+
+    def test_mypy_type_errors_are_reported_without_unresolvable_imports(self):
+        fake = ('echo "$last:3:5: error: Incompatible types in assignment (expression has type \\"str\\", '
+                'variable has type \\"int\\")  [assignment]"\n'
+                'echo "$last:1:1: error: Cannot find implementation or library stub for module named \\"foo\\"  [import-not-found]"\n'
+                'echo "$last:7:1: note: this is only a note"\n'
+                'echo "$last:9:2: warning: unused thing  [misc]"\n')
+        with self.with_fake_tools(mypy=fake):
+            self.assertTrue(D.available("python"))
+            d = D.deep_check("x: int = 'a'\n", "python")
+        self.assertEqual([(x["line"], x["col"], x["severity"], x["source"]) for x in d],
+                         [(3, 5, "error", "mypy"), (9, 2, "warning", "mypy")])
+        self.assertTrue(d[0]["message"].startswith("Incompatible types in assignment"))
+        self.assertFalse(d[0]["message"].endswith("[assignment]"))
+        self.assertNotIn("buffer.py", d[0]["message"])
+
+    def test_tsc_type_errors_are_reported_without_missing_modules(self):
+        fake = ('echo "$last(3,7): error TS2322: Type \'string\' is not assignable to type \'number\'."\n'
+                'echo "$last(1,20): error TS2307: Cannot find module \'./x\' or its corresponding type declarations."\n'
+                'echo "$last(5,1): error TS7016: Could not find a declaration file for module \'y\'."\n')
+        with self.with_fake_tools(tsc=fake):
+            d = D.deep_check("const a: number = 'x';\n", "typescript")
+        self.assertEqual([(x["line"], x["col"], x["source"]) for x in d], [(3, 7, "tsc")])
+        self.assertIn("not assignable", d[0]["message"])
+
+    def test_a_missing_or_failing_type_checker_is_silent(self):
+        import shutil
+        if not shutil.which("mypy"):
+            self.assertEqual(D.deep_check("x: int = 'a'\n", "python"), [])
+        with self.with_fake_tools(mypy="echo 'internal error' >&2\nexit 2\n"):
+            self.assertEqual(D.deep_check("x = 1\n", "python"), [])
+
     def test_a_language_without_a_tool_gives_nothing(self):
         self.assertEqual(D.deep_check("anything", "markdown"), [])
         self.assertFalse(D.available("markdown"))

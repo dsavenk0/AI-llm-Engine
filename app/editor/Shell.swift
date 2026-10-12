@@ -520,12 +520,25 @@ private struct EditorSurface: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var file: OpenFile
     var body: some View {
-        CodeEditor(file: file,
-                   snippets: ws.snippets[file.language] ?? [],
-                   onEdit: { f in Task { await ws.analyze(f) } },
-                   onCursor: { l, c in ws.cursor = (l, c) })
-            .id(file.path)
-            .onAppear { ws.loadSnippets(for: file.language) }
+        VStack(spacing: 0) {
+            if let note = file.readOnlyNote {
+                HStack(spacing: 6) {
+                    Image(systemName: "lock")
+                    Text(note)
+                    Spacer()
+                    Button("Open in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: ws.root).appendingPathComponent(file.path)])
+                    }.buttonStyle(.borderless)
+                }.font(.caption).padding(.horizontal, 10).padding(.vertical, 4).background(Palette.accent.opacity(0.10))
+                Divider()
+            }
+            CodeEditor(file: file,
+                       snippets: ws.snippets[file.language] ?? [],
+                       onEdit: { f in Task { await ws.analyze(f) } },
+                       onCursor: { l, c in ws.cursor = (l, c) })
+                .id(file.path)
+                .onAppear { ws.loadSnippets(for: file.language) }
+        }
     }
 }
 

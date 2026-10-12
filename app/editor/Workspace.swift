@@ -80,6 +80,7 @@ final class OpenFile: ObservableObject, Identifiable {
     @Published var outline: [Symbol]
     @Published var diagnostics: [Diagnostic] = []     // built-in checks + the language's parser, when run
     @Published var jumpLine: Int?          // set by the outline / search, consumed by the editor
+    @Published var readOnlyNote: String?     // a large file shown as its head: nothing to edit, nothing to save
     var deepDiagnostics: [Diagnostic] = []
     var version = 0                        // bumped on every edit; stale analysis results are dropped
     var id: String { path }
@@ -294,12 +295,16 @@ final class Workspace: ObservableObject {
         guarded("Open \(PathTools.displayName(path))") {
             let r: FileResponse = try await self.backend.get("/api/file?path=\(self.backend.encoded(path))")
             if r.binary == true { self.say("\(path) is a binary file", bad: true); return }
-            if r.too_large == true { self.say("\(path) is too large to open", bad: true); return }
+            if r.too_large == true { self.say("\(path) is too large to open (over 500 MB)", bad: true); return }
             if r.not_utf8 == true { self.say("\(path) is not UTF-8 text; it is not opened (saving would damage it)", bad: true); return }
             if let again = self.open.first(where: { $0.path == r.path }) { self.activePath = again.path; return }  // opened twice quickly
             let f = OpenFile(path: r.path, text: r.text ?? "", mtime: r.mtime ?? 0, language: r.language ?? "plaintext",
                              spans: r.spans ?? [], outline: r.outline ?? [])
             f.jumpLine = line
+            if r.truncated == true {
+                let mb = { (n: Int64) in String(format: "%.1f MB", Double(n) / 1_000_000) }
+                f.readOnlyNote = "Large file (\(mb(r.size ?? 0))): showing the first \((r.shown_bytes ?? 0) / 1000) KB, read-only"
+            }
             self.open.append(f)
             self.activePath = f.path
             await self.analyze(f)                  // diagnostics for a file the moment it opens
@@ -320,7 +325,7 @@ final class Workspace: ObservableObject {
     }
 
     func save() {
-        guard let f = active else { return }
+        guard let f = active, f.readOnlyNote == nil else { return }
         guarded("Save") {
             _ = try await self.write(f)
             self.say("Saved \(PathTools.displayName(f.path))")
@@ -366,6 +371,7 @@ final class Workspace: ObservableObject {
 
     /// Re-run highlighting/outline for the buffer (debounced by the editor).
     func analyze(_ f: OpenFile) async {
+        guard f.readOnlyNote == nil else { return }          // a head of a large file: its "errors" would be the cut
         let v = f.version, text = f.text
         guard let r: AnalyzeResponse = try? await backend.request("POST", "/api/analyze", body: ["path": f.path, "text": text]),
               f.version == v else { return }

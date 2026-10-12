@@ -260,6 +260,7 @@ struct CodeEditor: NSViewRepresentable {
 
         func sync(_ f: OpenFile) {
             guard let tv = textView else { return }
+            tv.isEditable = f.readOnlyNote == nil
             if shownPath != f.path { load(f) }
             else if tv.string != f.text {                    // changed from outside (e.g. an applied suggestion)
                 applying = true
