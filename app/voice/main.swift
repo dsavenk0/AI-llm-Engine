@@ -3,6 +3,7 @@
 // this Mac, and starts the model through the same `llm` command everything else uses.
 import AppKit
 import AVFoundation
+import Combine
 import NaturalLanguage
 import Speech
 import SwiftUI
@@ -107,6 +108,62 @@ enum Sentences {
     }
 }
 
+/// A file picked for the next message: its text is inlined, a picture goes along as an image part.
+struct Attachment: Identifiable, Equatable {
+    enum Kind { case text, image }
+    let id = UUID()
+    let name: String
+    let kind: Kind
+    let payload: String                      // the file's text, or a data: URL
+}
+
+/// One line of the conversation.
+struct Turn: Identifiable, Equatable {
+    let id = UUID()
+    let role: String                         // "user" | "assistant"
+    var text: String
+    var files: [String] = []                 // names, for display
+    var fileText = ""                        // what the text files said, sent after the message
+    var images: [String] = []                // data: URLs
+    var spoken = false                       // it was asked by voice (and so answered short, aloud)
+}
+
+enum Files {
+    static let maxText = 120_000, maxTotal = 300_000, maxImage = 5_000_000, maxImages = 4
+    static let imageTypes: [String: String] = ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                                               "gif": "image/gif", "webp": "image/webp"]
+
+    /// (attachments, problems): what could be taken from `urls`, and one sentence per file that could not.
+    static func read(_ urls: [URL], already: [Attachment]) -> ([Attachment], [String]) {
+        var out: [Attachment] = [], problems: [String] = []
+        var total = already.filter { $0.kind == .text }.reduce(0) { $0 + $1.payload.utf8.count }
+        var images = already.filter { $0.kind == .image }.count
+        for url in urls {
+            let name = url.lastPathComponent
+            guard let data = try? Data(contentsOf: url) else { problems.append("\(name): cannot be read"); continue }
+            if let mime = imageTypes[url.pathExtension.lowercased()] {
+                if data.count > maxImage { problems.append("\(name): larger than \(maxImage / 1_000_000) MB"); continue }
+                if images >= maxImages { problems.append("\(name): at most \(maxImages) pictures"); continue }
+                images += 1
+                out.append(Attachment(name: name, kind: .image, payload: "data:\(mime);base64,\(data.base64EncodedString())"))
+                continue
+            }
+            if data.prefix(8192).contains(0) { problems.append("\(name): not a text file"); continue }
+            if data.count > maxText { problems.append("\(name): larger than \(maxText / 1000) KB"); continue }
+            if total + data.count > maxTotal { problems.append("\(name): the files together would exceed \(maxTotal / 1000) KB"); continue }
+            total += data.count
+            out.append(Attachment(name: name, kind: .text, payload: String(decoding: data, as: UTF8.self)))
+        }
+        return (out, problems)
+    }
+
+    /// The text files, as one block that follows the message.
+    static func block(_ files: [Attachment]) -> String {
+        files.filter { $0.kind == .text }
+            .map { "\n\nFile \($0.name):\n```\n\($0.payload)\n```" }.joined()
+    }
+}
+
 enum VoiceState: Equatable {
     case idle, starting, listening, thinking, speaking
     case failed(String)
@@ -118,8 +175,17 @@ enum VoiceState: Equatable {
 final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var state: VoiceState = .idle
     @Published var level: Double = 0          // 0…1, what the orb moves with
-    @Published var heard = ""
-    @Published var reply = ""
+    @Published var heard = ""                 // what is being recognised right now
+    @Published var turns: [Turn] = []
+    @Published var draft = ""
+    @Published var attachments: [Attachment] = []
+    @Published var attachNote: String?
+    @Published var autoListen: Bool {
+        didSet { UserDefaults.standard.set(autoListen, forKey: "autoListen") }
+    }
+    @Published var keepOnTop: Bool {
+        didSet { UserDefaults.standard.set(keepOnTop, forKey: "keepOnTop") }
+    }
     @Published var speakReplies: Bool {
         didSet { UserDefaults.standard.set(speakReplies, forKey: "speakReplies") }
     }
@@ -136,11 +202,13 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private let synth = AVSpeechSynthesizer()
     private var pendingUtterances = 0
     private var streamDone = true
-    private var history: [[String: String]] = []
+    private var speakCurrent = false           // the answer being streamed is read aloud
     private var levelTarget: Double = 0
 
     override init() {
         speakReplies = UserDefaults.standard.object(forKey: "speakReplies") as? Bool ?? true
+        autoListen = UserDefaults.standard.object(forKey: "autoListen") as? Bool ?? true
+        keepOnTop = UserDefaults.standard.object(forKey: "keepOnTop") as? Bool ?? false
         localeID = UserDefaults.standard.string(forKey: "voiceLocale") ?? ""
         super.init()
         synth.delegate = self
@@ -173,10 +241,44 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func begin() {
-        heard = ""; reply = ""
+        heard = ""
         Task {
             guard await ensureModel() else { return }
             await startListening()
+        }
+    }
+
+    /// Forget the conversation (what the model sees as history, and what is on the screen).
+    func newConversation() {
+        stopEverything()
+        turns = []; heard = ""; draft = ""; attachments = []; attachNote = nil
+        state = .idle
+    }
+
+    func pick(_ urls: [URL]) {
+        let (got, problems) = Files.read(urls, already: attachments)
+        attachments += got
+        attachNote = problems.isEmpty ? nil : problems.joined(separator: " · ")
+    }
+
+    func remove(_ a: Attachment) { attachments.removeAll { $0 == a } }
+
+    /// A typed message (with its files): the same conversation, answered in full and not read aloud.
+    func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        if state == .thinking || state == .starting { return }
+        stopEverything()
+        var t = Turn(role: "user", text: text.isEmpty ? "(see the attached files)" : text)
+        t.files = attachments.map(\.name)
+        t.fileText = Files.block(attachments)
+        t.images = attachments.filter { $0.kind == .image }.map(\.payload)
+        turns.append(t)
+        draft = ""; attachments = []; attachNote = nil; heard = ""
+        state = .thinking
+        ask = Task {
+            guard await ensureModel() else { return }
+            await respond(spoken: false)
         }
     }
 
@@ -295,19 +397,38 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         stopCapture()
         let text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { state = .idle; return }
+        turns.append(Turn(role: "user", text: text, spoken: true))
+        heard = ""
         state = .thinking
-        ask = Task { await answer(text) }
+        ask = Task { await respond(spoken: true) }
     }
 
     // ---- the answer
 
-    private func answer(_ question: String) async {
-        history.append(["role": "user", "content": question])
-        history = Array(history.suffix(10))
-        let system = "You are a voice assistant. Answer in the language the user spoke, in one to three short "
-            + "sentences, plain spoken text: no markdown, no lists, no emoji, no code blocks."
+    private static let spokenPrompt = "You are a voice assistant. Answer in the language the user spoke, in one to "
+        + "three short sentences, plain spoken text: no markdown, no lists, no emoji, no code blocks."
+    private static let chatPrompt = "You are a helpful assistant in a small quick-chat window. Answer in the "
+        + "language of the question, concisely; files the user attaches are included in their message."
+
+    /// One turn as the API takes it: the text and any files, and pictures as image parts.
+    private func apiMessage(_ t: Turn) -> [String: Any] {
+        guard t.role == "user" else { return ["role": "assistant", "content": t.text] }
+        let text = t.text + t.fileText
+        if t.images.isEmpty { return ["role": "user", "content": text] }
+        var parts: [[String: Any]] = [["type": "text", "text": text]]
+        parts += t.images.map { ["type": "image_url", "image_url": ["url": $0]] }
+        return ["role": "user", "content": parts]
+    }
+
+    private func respond(spoken: Bool) async {
+        let system = spoken ? Voice.spokenPrompt : Voice.chatPrompt
+        let reply = Turn(role: "assistant", text: "", spoken: spoken)
+        let history = turns.suffix(12).map { apiMessage($0) }
+        turns.append(reply)
+        speakCurrent = spoken
+        state = .thinking
         let body: [String: Any] = [
-            "model": "local", "stream": true, "max_tokens": 400, "temperature": 0.6,
+            "model": "local", "stream": true, "max_tokens": spoken ? 400 : 1200, "temperature": 0.6,
             "chat_template_kwargs": ["enable_thinking": false],
             "messages": [["role": "system", "content": system]] + history,
         ]
@@ -332,27 +453,29 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                       let choice = (obj["choices"] as? [[String: Any]])?.first,
                       let piece = (choice["delta"] as? [String: Any])?["content"] as? String else { continue }
                 full += piece; buffer += piece
-                reply = full
+                if let i = turns.firstIndex(where: { $0.id == reply.id }) { turns[i].text = full }
                 levelTarget = 0.35
-                let (done, rest) = Sentences.split(buffer)
-                buffer = rest
-                for s in done { say(s) }
+                if spoken {
+                    let (done, rest) = Sentences.split(buffer)
+                    buffer = rest
+                    for s in done { say(s) }
+                }
             }
             let tail = Sentences.spoken(buffer)
-            if !tail.isEmpty { say(tail) }
+            if spoken, !tail.isEmpty { say(tail) }
         } catch {
             if !Task.isCancelled { state = .failed("Cannot reach the model: \(error.localizedDescription)") }
             streamDone = true
             return
         }
         streamDone = true
-        if !full.isEmpty { history.append(["role": "assistant", "content": full]) }
+        if full.isEmpty { turns.removeAll { $0.id == reply.id } }
         if pendingUtterances == 0, state != .speaking { state = .idle }
     }
 
     private func say(_ sentence: String) {
         let text = Sentences.spoken(sentence)
-        guard speakReplies, !text.isEmpty else { return }
+        guard speakReplies, speakCurrent, !text.isEmpty else { return }
         let u = AVSpeechUtterance(string: text)
         let lang = NLLanguageRecognizer.dominantLanguage(for: text)?.rawValue
         if let lang, let voice = AVSpeechSynthesisVoice(language: lang) ?? AVSpeechSynthesisVoice(language: String(lang.prefix(2))) {
@@ -492,10 +615,11 @@ struct Orb: View {
 
 struct VoiceView: View {
     @ObservedObject var voice: Voice
+    @State private var dropping = false
 
     private var label: (String, Color) {
         switch voice.state {
-        case .idle: return ("READY · CLICK THE SPHERE", HUD.dim)
+        case .idle: return (voice.turns.isEmpty ? "SPEAK OR TYPE · CLICK THE SPHERE" : "READY", HUD.dim)
         case .starting: return ("LOADING THE MODEL…", HUD.yellow)
         case .listening: return ("LISTENING", HUD.cyan)
         case .thinking: return ("THINKING", HUD.yellow)
@@ -504,13 +628,21 @@ struct VoiceView: View {
         }
     }
 
-    private func card(_ tag: String, _ text: String, _ color: Color, size: CGFloat) -> some View {
+    private func card(_ tag: String, _ text: String, _ color: Color, size: CGFloat, files: [String] = []) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 1).fill(color).frame(width: 2.5, height: 9)
                 Text(tag).font(HUD.mono(9, .semibold)).tracking(1.6).foregroundColor(color)
             }
-            Text(text).font(.system(size: size)).foregroundColor(HUD.text)
+            if !files.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(files, id: \.self) { f in
+                        Label(f, systemImage: "doc.text").font(HUD.mono(9)).foregroundColor(HUD.dim).lineLimit(1)
+                    }
+                }
+            }
+            Text(text.isEmpty ? "…" : text).font(.system(size: size)).foregroundColor(HUD.text)
+                .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
         }
         .padding(10)
@@ -520,156 +652,286 @@ struct VoiceView: View {
                                              startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)))
     }
 
-    var body: some View {
-        let (stateText, stateColor) = label
-        VStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Circle().fill(stateColor).frame(width: 7, height: 7).shadow(color: stateColor.opacity(0.7), radius: 3)
-                Text("LLM VOICE").font(HUD.mono(10, .semibold)).tracking(1.6).foregroundColor(HUD.dim)
-                Spacer()
-                Menu {
-                    Toggle("Speak replies", isOn: $voice.speakReplies)
-                    Picker("Recognition language", selection: $voice.localeID) {
-                        Text("System language").tag("")
-                        Text("English").tag("en-US")
-                        Text("Русский").tag("ru-RU")
-                        Text("Deutsch").tag("de-DE")
-                        Text("Français").tag("fr-FR")
-                        Text("Español").tag("es-ES")
-                        Text("中文").tag("zh-CN")
-                        Text("日本語").tag("ja-JP")
+    private var header: some View {
+        let (_, stateColor) = label
+        return HStack(spacing: 7) {
+            Circle().fill(stateColor).frame(width: 7, height: 7).shadow(color: stateColor.opacity(0.7), radius: 3)
+            Text("LLM VOICE").font(HUD.mono(10, .semibold)).tracking(1.6).foregroundColor(HUD.dim)
+            Spacer()
+            Menu {
+                Toggle("Read voice answers aloud", isOn: $voice.speakReplies)
+                Toggle("Listen when opened", isOn: $voice.autoListen)
+                Toggle("Keep on top", isOn: $voice.keepOnTop)
+                Picker("Recognition language", selection: $voice.localeID) {
+                    Text("System language").tag("")
+                    Text("English").tag("en-US")
+                    Text("Русский").tag("ru-RU")
+                    Text("Deutsch").tag("de-DE")
+                    Text("Français").tag("fr-FR")
+                    Text("Español").tag("es-ES")
+                    Text("中文").tag("zh-CN")
+                    Text("日本語").tag("ja-JP")
+                }
+                Divider()
+                Button("New conversation") { voice.newConversation() }
+            } label: { Image(systemName: "ellipsis").foregroundColor(HUD.dim) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        }
+        .padding(.leading, 78).padding(.trailing, 14).padding(.top, 9)       // the system's window buttons sit at the left
+    }
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(voice.turns) { t in
+                        if t.role == "user" {
+                            card(t.spoken ? "YOU · VOICE" : "YOU", t.text, HUD.cyan, size: 12.5, files: t.files)
+                        } else {
+                            card("MODEL", t.text, HUD.phosphor, size: 13)
+                        }
                     }
-                } label: { Image(systemName: "ellipsis").foregroundColor(HUD.dim) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            }.padding(.horizontal, 16).padding(.top, 12)
+                    if voice.state == .listening, !voice.heard.isEmpty {
+                        card("YOU · LISTENING", voice.heard, HUD.cyan, size: 12.5)
+                    }
+                    if case .failed(let message) = voice.state {
+                        card("WHAT HAPPENED", message, HUD.magenta, size: 12.5)
+                    }
+                    Color.clear.frame(height: 1).id("end")
+                }.padding(.horizontal, 14)
+            }
+            .onChange(of: voice.turns.last?.text) { _ in proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: voice.turns.count) { _ in proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: voice.heard) { _ in proxy.scrollTo("end", anchor: .bottom) }
+        }
+    }
 
-            Orb(voice: voice)
-                .frame(height: 250)
-                .contentShape(Rectangle())
-                .onTapGesture { voice.toggle() }
-
-            Text(stateText).font(HUD.mono(10, .semibold)).tracking(1.8).foregroundColor(stateColor)
-
-            VStack(spacing: 8) {
-                if case .failed(let message) = voice.state {
-                    card("WHAT HAPPENED", message, HUD.magenta, size: 12.5)
-                } else {
-                    if !voice.heard.isEmpty { card("YOU", voice.heard, HUD.cyan, size: 12.5) }
-                    if !voice.reply.isEmpty {
-                        ScrollView { card("REPLY", voice.reply, HUD.phosphor, size: 13.5) }.frame(maxHeight: 130)
+    private var composer: some View {
+        let canSend = !voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !voice.attachments.isEmpty
+        let busy = voice.state == .thinking || voice.state == .starting
+        return VStack(alignment: .leading, spacing: 6) {
+            if !voice.attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(voice.attachments) { a in
+                            HStack(spacing: 4) {
+                                Image(systemName: a.kind == .image ? "photo" : "doc.text").font(.system(size: 10))
+                                Text(a.name).font(HUD.mono(10)).lineLimit(1)
+                                Button { voice.remove(a) } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 10)) }
+                                    .buttonStyle(.plain)
+                            }
+                            .foregroundColor(HUD.text)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(Capsule().fill(HUD.panel.opacity(HUD.cardShade)))
+                        }
                     }
                 }
-            }.padding(.horizontal, 16)
-            Spacer(minLength: 0)
+            }
+            if let note = voice.attachNote {
+                Text(note).font(HUD.mono(9.5)).foregroundColor(HUD.magenta).lineLimit(2)
+            }
+            HStack(alignment: .bottom, spacing: 10) {
+                Button { choose() } label: { Image(systemName: "paperclip").font(.system(size: 15)) }
+                    .buttonStyle(.plain).foregroundColor(HUD.dim).help("Attach files or pictures")
+                TextField("Type a message, or just speak", text: $voice.draft, axis: .vertical)
+                    .textFieldStyle(.plain).lineLimit(1...5).font(.system(size: 13)).foregroundColor(HUD.text)
+                    .onSubmit { voice.send() }
+                Button { voice.toggle() } label: {
+                    Image(systemName: voice.state == .listening ? "stop.circle.fill" : "mic.fill").font(.system(size: 16))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(voice.state == .listening ? HUD.magenta : HUD.cyan)
+                .help(voice.state == .listening ? "Stop listening" : "Speak")
+                Button { voice.send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 20)) }
+                    .buttonStyle(.plain).foregroundColor(canSend && !busy ? HUD.cyan : HUD.dim.opacity(0.5))
+                    .disabled(!canSend || busy).help("Send")
+            }
         }
-        .frame(width: 340, height: 500)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(HUD.panel.opacity(HUD.cardShade))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(dropping ? HUD.cyan : HUD.cyan.opacity(0.25), lineWidth: 1)))
+        .padding(.horizontal, 14).padding(.bottom, 14)
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = "Attach files or pictures to the message"
+        if panel.runModal() == .OK { voice.pick(panel.urls) }
+    }
+
+    var body: some View {
+        let (stateText, stateColor) = label
+        let talking = voice.turns.isEmpty && voice.heard.isEmpty
+        VStack(spacing: 6) {
+            header
+            Orb(voice: voice)
+                .frame(height: talking ? 220 : 86)
+                .animation(.easeInOut(duration: 0.25), value: talking)
+                .contentShape(Rectangle())
+                .onTapGesture { voice.toggle() }
+            Text(stateText).font(HUD.mono(10, .semibold)).tracking(1.8).foregroundColor(stateColor)
+            transcript
+            composer
+        }
+        .frame(minWidth: 340, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity)
         .background((lightTheme ? Color.white : HUD.ink).opacity(HUD.windowShade))
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
-            .strokeBorder(LinearGradient(colors: [HUD.cyan.opacity(0.5), HUD.cyan.opacity(0.08)],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
+        .onDrop(of: [.fileURL], isTargeted: $dropping) { providers in
+            for p in providers {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    if let url { DispatchQueue.main.async { MainActor.assumeIsolated { voice.pick([url]) } } }
+                }
+            }
+            return true
+        }
         .preferredColorScheme(lightTheme ? .light : .dark)
     }
 }
 
 // MARK: - app
 
-final class VoicePanel: NSPanel {
+final class VoiceWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { close() }                // Esc
 }
 
+/// The window — real title-bar buttons (close, minimise), glass behind the content, resizable.
+@MainActor
+func makeWindow(voice: Voice) -> VoiceWindow {
+    let host = NSHostingView(rootView: VoiceView(voice: voice))
+    let w = VoiceWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 640),
+                        styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                        backing: .buffered, defer: false)
+    w.title = "LLM Voice"
+    w.titleVisibility = .hidden
+    w.titlebarAppearsTransparent = true
+    w.isMovableByWindowBackground = true
+    w.isReleasedWhenClosed = false
+    w.minSize = NSSize(width: 340, height: 480)
+    w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
+    if #available(macOS 26.0, *) {
+        let glass = NSGlassEffectView()          // the system's real glass, as in LLMBar
+        glass.style = .clear
+        glass.contentView = host
+        w.contentView = glass
+    } else {
+        let fx = NSVisualEffectView()
+        fx.material = .hudWindow
+        fx.blendingMode = .behindWindow
+        fx.state = .active
+        host.frame = fx.bounds
+        host.autoresizingMask = [.width, .height]
+        fx.addSubview(host)
+        w.contentView = fx
+    }
+    w.isOpaque = false
+    w.backgroundColor = .clear
+    w.level = voice.keepOnTop ? .floating : .normal
+    w.collectionBehavior = [.fullScreenAuxiliary]
+    return w
+}
+
+/// A main menu: without an Edit menu ⌘C / ⌘V do nothing in a text field, without Window there is no ⌘M / ⌘W.
+@MainActor
+func installMenus() {
+    let main = NSMenu()
+    func submenu(_ title: String, _ items: [(String, Selector?, String)]) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: title)
+        for (t, sel, key) in items {
+            if t == "-" { menu.addItem(.separator()) } else { menu.addItem(NSMenuItem(title: t, action: sel, keyEquivalent: key)) }
+        }
+        item.submenu = menu
+        return item
+    }
+    main.addItem(submenu("LLM Voice", [("Hide LLM Voice", #selector(NSApplication.hide(_:)), "h"), ("-", nil, ""),
+                                       ("Quit LLM Voice", #selector(NSApplication.terminate(_:)), "q")]))
+    main.addItem(submenu("Edit", [("Undo", Selector(("undo:")), "z"), ("Redo", Selector(("redo:")), "Z"), ("-", nil, ""),
+                                  ("Cut", #selector(NSText.cut(_:)), "x"), ("Copy", #selector(NSText.copy(_:)), "c"),
+                                  ("Paste", #selector(NSText.paste(_:)), "v"),
+                                  ("Select All", #selector(NSText.selectAll(_:)), "a")]))
+    main.addItem(submenu("Window", [("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+                                    ("Close", #selector(NSWindow.performClose(_:)), "w")]))
+    NSApp.mainMenu = main
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var panel: VoicePanel?
+    private var window: VoiceWindow?
     private let voice = Voice()
+    private var onTop: AnyCancellable?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         resolveTheme()
-        NSApp.setActivationPolicy(.accessory)                               // no Dock icon, like Siri's panel
-        let host = NSHostingView(rootView: VoiceView(voice: voice))
-        let p = VoicePanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 500),
-                           styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
-                           backing: .buffered, defer: false)
-        host.wantsLayer = true
-        host.layer?.cornerRadius = 26
-        host.layer?.cornerCurve = .continuous
-        host.layer?.masksToBounds = true
-        host.layer?.backgroundColor = NSColor.clear.cgColor
-        p.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()          // the system's real glass, as in LLMBar
-            glass.cornerRadius = 26
-            glass.style = .clear
-            glass.contentView = host
-            p.contentView = glass
-            p.hasShadow = false                      // a glass panel draws its own edge
-        } else {
-            let fx = NSVisualEffectView()
-            fx.material = .hudWindow
-            fx.blendingMode = .behindWindow
-            fx.state = .active
-            fx.wantsLayer = true
-            fx.layer?.cornerRadius = 26
-            fx.layer?.cornerCurve = .continuous
-            fx.layer?.masksToBounds = true
-            host.frame = fx.bounds
-            host.autoresizingMask = [.width, .height]
-            fx.addSubview(host)
-            p.contentView = fx
-            p.hasShadow = true
-        }
-        p.isOpaque = false
-        p.backgroundColor = .clear
-        p.level = .floating
-        p.isMovableByWindowBackground = true
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        NSApp.setActivationPolicy(.regular)                                 // a Dock icon: a minimised window must be findable
+        installMenus()
+        let w = makeWindow(voice: voice)
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
-            p.setFrameOrigin(NSPoint(x: f.midX - 170, y: f.minY + f.height * 0.22))
+            w.setFrameOrigin(NSPoint(x: f.midX - 190, y: f.minY + f.height * 0.15))
         }
-        p.makeKeyAndOrderFront(nil)
+        w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        panel = p
-        voice.begin()                                                       // opening the app means "I want to talk"
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { _ in
+        window = w
+        onTop = voice.$keepOnTop.sink { [weak w] on in w?.level = on ? .floating : .normal }
+        if voice.autoListen { voice.begin() }                               // by default this is a voice assistant
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
             MainActor.assumeIsolated { self.voice.stopEverything(); NSApp.terminate(nil) }
         }
+    }
+
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        window?.makeKeyAndOrderFront(nil)
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 }
 
-// `LLMVoice --snapshot out.png [--state listening|thinking|speaking|idle|failed] [--level 0.6]`: renders the
-// panel for a look at the sphere without starting the model or touching the microphone.
+// `LLMVoice --snapshot out.png [--state listening|thinking|speaking|idle|failed] [--level 0.6] [--demo] [--theme light|dark]`:
+// opens the real window, without starting the model or touching the microphone, and saves what the compositor
+// shows of it (the window's own pixels, title-bar buttons included).
 @MainActor
 func renderSnapshot(_ args: [String]) {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
     guard let out = value("--snapshot") else { return }
     resolveTheme()
+    NSApp.setActivationPolicy(.regular)
     let voice = Voice()
+    voice.autoListen = false
+    if args.contains("--demo") {
+        var u = Turn(role: "user", text: "Summarise the attached notes in two lines.")
+        u.files = ["meeting-notes.md"]
+        voice.turns = [
+            u,
+            Turn(role: "assistant", text: "The team will ship the editor first and the voice app next week. Open items: the desktop widget and the installer."),
+            Turn(role: "user", text: "What's the weather like in Lisbon in May?", spoken: true),
+            Turn(role: "assistant", text: "Lisbon in May is warm and mostly sunny, around 22 degrees, with only a little rain.", spoken: true),
+        ]
+        voice.draft = ""
+    }
     switch value("--state") ?? "idle" {
-    case "listening": voice.state = .listening; voice.heard = "What's the weather like in Lisbon in May?"
-    case "thinking": voice.state = .thinking; voice.heard = "What's the weather like in Lisbon in May?"
-    case "speaking":
-        voice.state = .speaking; voice.heard = "What's the weather like in Lisbon in May?"
-        voice.reply = "Lisbon in May is warm and mostly sunny, around 22 degrees, with only a little rain."
+    case "listening": voice.state = .listening; voice.heard = "And what should I pack?"
+    case "thinking": voice.state = .thinking
+    case "speaking": voice.state = .speaking
     case "failed": voice.state = .failed("The model did not start. Open LLMBar and press Start, then try again.")
     default: break
     }
     voice.level = Double(value("--level") ?? "0.5") ?? 0.5
-    let host = NSHostingView(rootView: VoiceView(voice: voice))
-    host.frame = NSRect(x: 0, y: 0, width: 340, height: 500)
-    let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-    win.isOpaque = false
-    win.backgroundColor = .clear
-    win.contentView = host
-    win.orderFrontRegardless()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.6))
-    guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { exit(3) }
-    host.cacheDisplay(in: host.bounds, to: rep)
-    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
-    print("SNAPSHOT \(out)")
+    let w = makeWindow(voice: voice)
+    installMenus()
+    w.center()
+    w.orderFrontRegardless()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.9))
+    typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+    guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { exit(3) }
+    let f = unsafeBitCast(sym, to: Capture.self)
+    guard let img = f(CGRect.null, 8, UInt32(w.windowNumber), 1)?.takeRetainedValue(),
+          let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { exit(4) }
+    try? png.write(to: URL(fileURLWithPath: out))
+    print("SNAPSHOT \(out) \(img.width)x\(img.height)")
     exit(0)
 }
 

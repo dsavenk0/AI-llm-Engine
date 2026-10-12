@@ -26,7 +26,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>LLMVoice</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>LLMRoot</key><string>$ROOT</string>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
@@ -37,10 +36,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# its own icon: LLMBar's little terminal with a "))" — sound waves — in the accent yellow
+# its own icon (app/voice/icon-1024.png): the orb on the family's dark tile
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-swift "$ROOT/tools/make-icon.swift" "$TMP/icon-1024.png" "o))" FFE94D
+cp "$ROOT/app/voice/icon-1024.png" "$TMP/icon-1024.png"
 ICONSET="$TMP/AppIcon.iconset"
 mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
