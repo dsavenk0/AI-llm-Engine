@@ -71,7 +71,12 @@ this 27B model.
 
 Double-clicking **`LLM.command`** in Finder does the same as `./llm open`. `./llm setup` is actually optional —
 `start`/`open`/LLMBar's Start button create the `.venv` and install `requirements.txt` on first use anyway; the only
-thing you need already on the Mac is Python 3.10+.
+thing you need already on the Mac is nothing: when there is no Python 3.10+ (or only an outdated one) a private
+CPython (~35 MB, checksum-verified) is downloaded into the data folder first. `./llm check` reports in a second
+whether everything is there — Apple Silicon and macOS, Python, the engine libraries, the network (only when
+something must be downloaded), free disk, models — and LLMBar shows the same as a banner with *Check again*; a
+missing connection is named as such. For a Mac that will never see the internet,
+`./build-app.sh --offline` / `./build-dmg.sh --offline` put Python and the libraries' wheels inside the app (+~150 MB).
 
 ### Models: search, download, switch
 
@@ -97,17 +102,25 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 
 - **Own decoder (no llama.cpp).** A file whose architecture, quantization and tokenizer the engine implements runs on
   its own MLX decoder: llama and Qwen2/Qwen3 families (Llama 3.x, Mistral, SmolLM2, DeepSeek-R1-Distill-Qwen, Qwen2.5…),
-  `Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K F16 BF16 F32`, byte-level BPE vocabularies. The weights are repacked
-  into MLX's affine quantization when loaded (Q4/Q5/Q8 exactly; Q6_K into 8 bits), the tokenizer and the chat template
-  are built from the file's own metadata, and it shares the server, the prompt cache, the stop handling, the reasoning
-  budget, the memory watchdog and prompt-lookup speculation with the other routes.
-- **llama.cpp for the rest.** Any other GGUF (other architectures, IQ/Q2/Q3 quantizations, Gemma, MiniCPM, MoE, files
-  with an image projector) goes to llama.cpp's `llama-server` behind the same API. It is downloaded only when such a
-  file is chosen (`./llm setup --gguf`); with `gguf_native` off every GGUF uses it.
+  **Gemma 3** (sliding-window layers, two rope bases, GeGLU), **Granite** and **MiniCPM** (with LongRoPE), and
+  **mixture-of-experts** files (Mixtral-style, Qwen3-MoE, Granite-MoE: experts stay stacked and quantized, a token
+  runs only its top-k with `gather_qmm`). Quantizations `Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K F16 BF16 F32` plus
+  `Q2_K Q3_K IQ4_NL IQ4_XS`; vocabularies are byte-level BPE or SentencePiece (incl. the dummy space prefix). The
+  weights are repacked into MLX's affine quantization when loaded (Q4/Q5/Q8 exactly; Q6_K into 8 bits; Q2_K, Q3_K and
+  the IQ4 types are decoded exactly — checked tensor by tensor against llama.cpp's own dequantization — then
+  re-quantized per 32 weights to 4 / 5 / 6 bits, so they take more memory than in the file), the tokenizer and the
+  chat template are built from the file's own metadata, and it shares the server, the prompt cache, the stop handling,
+  the reasoning budget, the memory watchdog and prompt-lookup speculation with the other routes.
+- **llama.cpp for the rest.** Any other GGUF (other architectures, IQ1–IQ3 quantizations, MoE with per-expert tensors
+  or a shared expert, files with an image projector) goes to llama.cpp's `llama-server` behind the same API. It is
+  downloaded only when such a file is chosen (`./llm setup --gguf`); with `gguf_native` off every GGUF uses it.
 - **How close.** Against llama.cpp on the same files (logits on 11 prompts, 24-token greedy continuation): Qwen2.5 0.5B
   and 3B, DeepSeek-R1-Distill-Qwen 1.5B and SmolLM2 135M agree on the top token on every prompt (log-probabilities
-  within 0.02–0.08) and on 24 of 24 greedy tokens; Llama 3.2 1B agrees on 10 of 11 prompts (≤ 0.18). Activations are
-  kept in float32 between layers, as ggml does.
+  within 0.02–0.08) and on 24 of 24 greedy tokens; Llama 3.2 1B agrees on 10 of 11 prompts (≤ 0.18). Gemma 3 1B,
+  Granite-MoE 1B-A400M and MiniCPM4 0.5B give token ids identical to llama.cpp on every test string (English,
+  Russian, CJK, code, emoji, special tokens), the same top token everywhere and the same 32 greedy tokens on most
+  prompts (a few differ at near-tied tokens, log-probabilities within ~0.3). Activations are kept in float32
+  between layers, as ggml does.
 - **How fast** (M5 MacBook Air, 16 GB, Q4_K_M, a busy machine so ±10 %): small models decode on par with llama.cpp
   (Qwen2.5 0.5B ~190–210 tok/s); on a 3B model the engine is ~13 % behind (22 ms against 19.5 ms per token — MLX's
   4-bit format spends 5 bits per Q4_K weight where Q4_K spends 4.5). Rewriting a file, where the answer copies the
@@ -167,6 +180,8 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm open | up            new window with chat | start + chat + menu in this terminal
 ./llm start|stop|restart|status|chat|bench|logs
 ./llm models | use <n>     discover / select models
+./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
+./llm web search "<q>"     web search + the top pages as one JSON line (what the voice chat uses)
 ./llm agent [dir]          terminal coding agent (files, search, edits, shell)
 ./llm connect [client]     register the model in Continue, Kilo Code or opencode
 ./llm free                 quit vMLX / oMLX / Ollama to free memory
@@ -179,6 +194,9 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 
 Language is English by default and Russian when the system locale is Russian. You can force it with `LLM_LANG=ru` or
 in Settings.
+
+`./llm chat` keeps its history **per project in the same file the code editor uses**: `/history` lists the chats,
+`/open <N>` continues one (also one started in the editor), `/rename <N> <title>`, `/delete <N>`, `/new`.
 
 ## API
 
@@ -278,7 +296,11 @@ Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one se
   a short note (the same two-stage compaction as the terminal agent). Chats are renamed and deleted from the ⋯ menu.
 - **Editor:** syntax colours and an outline for ~25 languages, line numbers, problems underlined as you type
   (built-in checks, plus `swiftc -parse`, `node --check`, `bash -n` … when installed), unsaved-changes protection.
-- **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click.
+- **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click. Several
+  terminals (a plus in the strip, each its own shell). Type errors from `mypy` (Python) and `tsc` (TypeScript) join the
+  problems when those tools are installed.
+- **Command palette:** ⇧⌘P — a few letters find any command of the File and View menus (the list is the menus).
+- **Large files:** over 2 MB a file opens as a read-only head of 256 KB (and is never saved from the editor).
 - **Git:** changes, diff, commit selected files, push (always asks first; it uses your own git credentials). ↶ on a
   file (or *Discard all*) puts it back to the last commit and deletes new files — after a confirmation that says what
   is lost. The branch menu in the toolbar switches or creates branches. **GitHub** (through the `gh` tool): sign-in check, open
@@ -318,6 +340,17 @@ window — close and minimise buttons, resizable, *Keep on top* in its menu — 
 system, with the same transparency setting), and it reads LLMBar's settings (`.llm/config.json`). Under the sphere it
 shows which model is selected and its state (ready / asleep / not running); while the weights are read into memory
 there is a progress bar with the bytes the engine process holds so far, and a sleeping engine is woken on open. The first run asks for the microphone and speech-recognition permissions.
+
+- **Dialog mode** (menu, on by default): after each answer the microphone opens again by itself, so a conversation
+  needs no button presses; it ends on a long silence, a click on the sphere while nothing is said, or a typed message.
+- **The whole conversation** goes with every question (oldest turns dropped only past a budget), so follow-ups
+  ("and its population?") refer to what was just said.
+- **The web** (menu, on by default): a question about news, weather, prices, scores or "today" is looked up — the
+  model proposes a query, with keyword cues in five languages when a small model stays silent, `llm web search`
+  fetches the results and the top pages, and the answer is built from them; a failed lookup is said honestly. Only the
+  search query leaves the Mac (to DuckDuckGo).
+- **History:** a clock button at the top left opens saved conversations — open, rename, delete; the model menu under
+  the sphere is always there (favourites, any installed model).
 
 **Desktop widget** (macOS 14+): the app carries a WidgetKit extension in two sizes. The small one is the orb: a click
 opens the chat, the app starts the model and listens at once. The wide one shows the selected model and whether it is
