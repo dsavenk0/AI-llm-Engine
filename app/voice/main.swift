@@ -261,7 +261,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     /// Eases `level` toward its target so the orb never jumps.
     private func tick() {
-        level += (levelTarget - level) * 0.28
+        level += (levelTarget - level) * (levelTarget > level ? 0.22 : 0.12)
         if state == .speaking || state == .thinking || state == .idle { levelTarget *= 0.9 }
     }
 
@@ -719,8 +719,23 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
 // MARK: - the orb: a burst of energy — a white-hot core, dozens of thin curling filaments, a haze behind them
 
+/// The orb's own clock. The wobble used to take `t * speed` with t ≈ 8·10⁸ s since the 2001 reference date, so every
+/// small change of `speed` threw the phase far away — the picture jumped between unrelated frames while speaking.
+/// The phase is integrated instead: it only ever moves forward, by dt × the current speed.
+final class OrbClock {
+    var phase = 0.0
+    var last: Double?
+    func advance(to t: Double, speed: Double) -> Double {
+        let dt = last.map { min(0.1, max(0, t - $0)) } ?? 0
+        last = t
+        phase += dt * speed
+        return phase
+    }
+}
+
 struct Orb: View {
     @ObservedObject var voice: Voice
+    @State private var clock = OrbClock()
 
     /// (filament, accent, haze) colours for the state.
     private var colors: (Color, Color, Color) {
@@ -740,6 +755,24 @@ struct Orb: View {
         return CGFloat(a * 0.6 + b * 0.4)
     }
 
+    /// A faint flash now and then: the clock is cut into 3.4 s slots, a little over half of them hold one flash at a
+    /// pseudo-random moment (so about one every six seconds), and it rises in 70 ms and fades in about 0.5 s.
+    /// 0…1; never more than a brightening, so it reads as a spark, not a blink.
+    private func flash(at t: Double) -> Double {
+        let slot = 3.4
+        let k = (t / slot).rounded(.down)
+        var strongest = 0.0
+        for j in [k - 1, k] {
+            guard rnd(Int(j.truncatingRemainder(dividingBy: 100_000)), 31) > 0.42 else { continue }
+            let when = j * slot + rnd(Int(j.truncatingRemainder(dividingBy: 100_000)), 37) * (slot - 0.6)
+            let d = t - when
+            if d < 0 || d > 0.6 { continue }
+            let env = d < 0.07 ? d / 0.07 : pow(1 - (d - 0.07) / 0.53, 2)
+            strongest = max(strongest, env)
+        }
+        return strongest
+    }
+
     /// 0…1, fixed per index: lengths, curls and thicknesses differ from filament to filament.
     private func rnd(_ i: Int, _ salt: Double) -> Double {
         let v = sin(Double(i) * 12.9898 + salt * 78.233) * 43758.5453
@@ -757,7 +790,10 @@ struct Orb: View {
                 let c = CGPoint(x: size.width / 2, y: size.height / 2)
                 let R = min(size.width, size.height) * 0.38
                 let speed = busy ? 2.2 : (idle ? 0.6 : 1.0 + lv * 2.0)
-                let count = idle ? 34 : (busy ? 54 : 46 + Int(lv * 44))
+                let p = clock.advance(to: t, speed: speed)                      // continuous phase, see OrbClock
+                let count = 64                                                  // fixed: the layout never reshuffles
+                let shown = idle ? 0.55 : (busy ? 0.85 : 0.6 + 0.4 * lv)        // how many of them are lit
+                let spark = idle ? 0 : flash(at: t) * 0.45                      // subtle, infrequent
                 let steps = 12
                 let r0 = R * ((lightTheme ? 0.07 : 0.05) + 0.06 * CGFloat(lv) + (busy ? 0.015 * CGFloat(sin(t * 3)) : 0))
 
@@ -771,7 +807,7 @@ struct Orb: View {
                         let x = c.x + CGFloat(cos(a)) * off, y = c.y + CGFloat(sin(a * 1.2)) * off
                         let r = R * CGFloat(0.50 + 0.08 * sin(a * 2))
                         layer.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
-                                   with: .color((j % 2 == 0 ? haze : fil).opacity((lightTheme ? 0.10 : 0.16) + 0.22 * lv)))
+                                   with: .color((j % 2 == 0 ? haze : fil).opacity((lightTheme ? 0.10 : 0.16) + 0.22 * lv + 0.18 * spark)))
                     }
                 }
 
@@ -779,21 +815,29 @@ struct Orb: View {
                 var all = Path()
                 var sharp: [(Path, Double, CGFloat, Bool)] = []
                 for i in 0..<count {
-                    let angle = Double(i) / Double(count) * 2 * .pi + Double(rnd(i, 1)) * 0.5 + t * 0.05 * (rnd(i, 2) - 0.5)
+                    // a filament fades in as the level passes its own threshold — no filament ever jumps
+                    let lit = max(0, min(1, (shown - rnd(i, 8)) / 0.15 + 0.5))
+                    if lit < 0.02 { continue }
+                    let flares = rnd(i, 10) > 0.72                              // the few that catch a flash
+                    let angle = Double(i) / Double(count) * 2 * .pi + Double(rnd(i, 1)) * 0.5 + p * 0.05 * (rnd(i, 2) - 0.5)
                     let length = R * CGFloat(0.45 + 0.55 * rnd(i, 3)) * CGFloat(0.8 + 0.35 * lv)
+                        * CGFloat(0.55 + 0.45 * lit) * CGFloat(1 + (flares ? 0.12 * spark : 0))
                     let curl = CGFloat(rnd(i, 4) - 0.5) * R * 0.5 * CGFloat(0.7 + 0.8 * lv)
                     var line = Path()
                     for k in 0...steps {
                         let f = CGFloat(k) / CGFloat(steps)
                         let dist = r0 + (length - r0) * f
-                        let lateral = curl * f * f + wobble(i, k, t, speed) * R * 0.045 * f * CGFloat(0.5 + lv)
+                        let lateral = curl * f * f + wobble(i, k, p, 1) * R * 0.045 * f * CGFloat(0.5 + lv)
                         let ca = CGFloat(cos(angle)), sa = CGFloat(sin(angle))
                         let pt = CGPoint(x: c.x + ca * dist - sa * lateral, y: c.y + sa * dist + ca * lateral)
                         if k == 0 { line.move(to: pt) } else { line.addLine(to: pt) }
                     }
                     all.addPath(line)
-                    let flicker = 0.5 + 0.5 * Double((wobble(i, 77, t, speed * 1.5) + 1) / 2)
-                    sharp.append((line, flicker * (0.45 + 0.55 * rnd(i, 5)), CGFloat(0.5 + 0.9 * rnd(i, 6)), rnd(i, 7) > 0.8))
+                    let flicker = 0.5 + 0.5 * Double((wobble(i, 77, p * 1.5, 1) + 1) / 2)
+                    var alpha = flicker * (0.45 + 0.55 * rnd(i, 5)) * lit
+                    if flares { alpha = min(1, alpha + 0.5 * spark) }
+                    sharp.append((line, alpha, CGFloat(0.5 + 0.9 * rnd(i, 6)) * CGFloat(1 + (flares ? 0.5 * spark : 0)),
+                                  rnd(i, 7) > 0.8))
                 }
                 ctx.drawLayer { layer in
                     layer.addFilter(.blur(radius: 3.5 + 3 * CGFloat(lv)))
@@ -812,9 +856,9 @@ struct Orb: View {
                 ctx.drawLayer { layer in
                     layer.blendMode = lightTheme ? .normal : .screen
                     var glow = layer
-                    glow.addFilter(.blur(radius: r0 * 1.8))
+                    glow.addFilter(.blur(radius: r0 * (1.8 + 0.8 * CGFloat(spark))))
                     glow.fill(Path(ellipseIn: CGRect(x: c.x - r0 * 3.2, y: c.y - r0 * 3.2, width: r0 * 6.4, height: r0 * 6.4)),
-                              with: .color(fil.opacity((lightTheme ? 0.45 : 0.65) + 0.3 * lv)))
+                              with: .color(fil.opacity(min(1, (lightTheme ? 0.45 : 0.65) + 0.3 * lv + 0.25 * spark))))
                     // dark page: white-hot; light page: a saturated dot with a white heart (white would vanish)
                     layer.fill(Path(ellipseIn: CGRect(x: c.x - r0 * 1.4, y: c.y - r0 * 1.4, width: r0 * 2.8, height: r0 * 2.8)),
                                with: .radialGradient(Gradient(colors: lightTheme
@@ -931,8 +975,10 @@ struct VoiceView: View {
                         let starred = voice.installed.first { $0.path == voice.model.path }?.favorite == true
                         HStack(spacing: 4) {
                             if starred { Image(systemName: "star.fill").font(.system(size: 9)).foregroundColor(HUD.yellow) }
-                            Text(voice.model.name).foregroundColor(HUD.text).lineLimit(1).truncationMode(.middle)
+                            Text(voice.model.name).font(HUD.mono(9.5, .semibold)).tracking(0.6)
+                                .foregroundColor(HUD.text).lineLimit(1).truncationMode(.middle)
                         }
+                        .frame(maxWidth: 230)
                     }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                     .help("Choose another model, or star this one")
@@ -1015,18 +1061,20 @@ struct VoiceView: View {
                 Text(note).font(HUD.mono(9.5)).foregroundColor(HUD.magenta).lineLimit(2)
             }
             HStack(alignment: .bottom, spacing: 10) {
-                Button { choose() } label: { Image(systemName: "paperclip").font(.system(size: 15)) }
+                Button { choose() } label: { Image(systemName: "paperclip").font(.system(size: 15)).frame(width: 26, height: 26) }
                     .buttonStyle(.plain).foregroundColor(HUD.dim).help("Attach files or pictures")
                 TextField("Type a message, or just speak", text: $voice.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...5).font(.system(size: 13)).foregroundColor(HUD.text)
+                    .frame(minHeight: 26)                                   // the same row height as the buttons
                     .onSubmit { voice.send() }
                 Button { voice.toggle() } label: {
                     Image(systemName: voice.state == .listening ? "stop.circle.fill" : "mic.fill").font(.system(size: 16))
+                        .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(voice.state == .listening ? HUD.magenta : HUD.cyan)
                 .help(voice.state == .listening ? "Stop listening" : "Speak")
-                Button { voice.send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 20)) }
+                Button { voice.send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).frame(width: 26, height: 26) }
                     .buttonStyle(.plain).foregroundColor(canSend && !busy ? HUD.cyan : HUD.dim.opacity(0.5))
                     .disabled(!canSend || busy).help("Send")
             }
