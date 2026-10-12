@@ -41,8 +41,10 @@ def load(root):
             data = json.load(f)
     except (OSError, ValueError):
         return {}
-    return {n: w for n, w in (data.get("workers") or {}).items()
-            if isinstance(w, dict) and w.get("type") in ("openai", "cli")}
+    workers = data.get("workers") if isinstance(data, dict) else None
+    if not isinstance(workers, dict):
+        return {}
+    return {n: w for n, w in workers.items() if isinstance(w, dict) and w.get("type") in ("openai", "cli")}
 
 
 PRESETS = {
@@ -61,7 +63,11 @@ def add_preset(root, name):
             data = json.load(f)
     except (OSError, ValueError):
         data = {}
-    data.setdefault("workers", {})[name] = dict(PRESETS[name])
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get("workers"), dict):
+        data["workers"] = {}
+    data["workers"][name] = dict(PRESETS[name])
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

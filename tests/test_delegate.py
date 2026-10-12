@@ -149,6 +149,108 @@ class TestDelegate(Base):
         self.assertIn("command not found", fn(worker="gone", task="t"))
 
 
+class TestDelegateDetails(Base):
+    def setUp(self):
+        Fake.seen.clear()
+        Fake.status = 200
+        self.root = tempfile.mkdtemp()
+
+    def spec(self, **kw):
+        return dict({"type": "openai", "url": self.url, "model": "m"}, **kw)
+
+    def test_config_that_is_not_an_object_is_empty_and_a_preset_repairs_it(self):
+        os.makedirs(os.path.join(self.root, ".llm"))
+        p = os.path.join(self.root, ".llm", "workers.json")
+        for body in ("[1]", '{"workers": [1]}', '"x"', "{"):
+            with open(p, "w") as f:
+                f.write(body)
+            self.assertEqual(delegate.load(self.root), {}, body)
+        with open(p, "w") as f:
+            f.write("[1]")
+        delegate.add_preset(self.root, "openrouter")
+        self.assertIn("openrouter", delegate.load(self.root))
+        with self.assertRaises(ValueError):
+            delegate.add_preset(self.root, "nope")
+
+    def test_only_loopback_hosts_are_local(self):
+        for url in ("http://localhost:8091/v1", "http://127.0.0.1/v1", "https://[::1]:1/v1", "http://LOCALHOST/x"):
+            self.assertTrue(delegate.is_local_url(url), url)
+        for url in ("http://127.evil.com/v1", "https://api.openai.com/v1", "http://192.168.1.5/v1", "", "not a url"):
+            self.assertFalse(delegate.is_local_url(url), url)
+
+    def test_what_a_worker_needs_is_explained(self):
+        self.assertEqual(delegate.usable({"type": "openai", "url": "u"}), (False, "needs url and model"))
+        self.assertEqual(delegate.usable({"type": "openai", "model": "m"}), (False, "needs url and model"))
+        os.environ.pop("DELEGATE_TEST_KEY", None)
+        self.assertEqual(delegate.usable({"type": "openai", "url": "u", "model": "m", "key_env": "DELEGATE_TEST_KEY"}),
+                         (False, "set $DELEGATE_TEST_KEY"))
+        self.assertEqual(delegate.usable({"type": "cli"}), (False, "needs command"))
+        self.assertEqual(delegate.usable({"type": "cli", "command": ["x"]}), (True, ""))
+        self.assertEqual(delegate.usable({"type": "openai", "url": "u", "model": "m"}), (True, ""))
+
+    def test_describe_and_summary_lines(self):
+        lines = delegate.describe({"c": {"type": "cli", "command": ["gemini", "-p"]},
+                                   "o": {"type": "openai", "url": "https://x/v1", "key_env": "K"},
+                                   "l": {"type": "openai", "url": "http://localhost:1/v1"}})
+        self.assertEqual(lines[0], "c: runs  gemini -p  in the workspace (may edit files)")
+        self.assertEqual(lines[1], "o: sends tasks to https://x/v1 with $K  (leaves this machine)")
+        self.assertEqual(lines[2], "l: sends tasks to http://localhost:1/v1  (this machine)")
+        s = delegate.summary({"a": {"type": "openai", "url": "u", "model": "m", "about": "fast"},
+                              "b": {"type": "cli"}})
+        self.assertEqual(s[0], "✓ a  [openai] m u  · fast")
+        self.assertEqual(s[1], "✗ b  [cli]  — needs command")
+
+    def test_the_request_has_the_default_token_cap_and_the_answer_is_cut_with_a_count(self):
+        delegate.ask_openai(self.spec(), "hello")
+        self.assertEqual(Fake.seen[-1]["body"]["max_tokens"], 4096)
+        self.assertEqual(Fake.seen[-1]["path"], "/v1/chat/completions")
+        self.assertEqual(Fake.seen[-1]["body"]["stream"], False)
+        delegate.ask_openai(self.spec(max_tokens=7), "hello")
+        self.assertEqual(Fake.seen[-1]["body"]["max_tokens"], 7)
+        out = delegate.ask("w", {"type": "cli", "command": [sys.executable, "-c",
+                                 f"import sys; print('x' * {delegate.MAX_ANSWER + 500})", "--"]}, "task", self.root)
+        self.assertTrue(out.startswith("x" * 100))
+        self.assertTrue(out.endswith("\n… [500 more characters]"))
+        self.assertEqual(len(out), delegate.MAX_ANSWER + len("\n… [500 more characters]"))
+
+    def test_an_empty_answer_is_named_and_the_prompt_carries_the_context(self):
+        script = os.path.join(self.root, "none.sh")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(script, os.stat(script).st_mode | stat.S_IEXEC)
+        self.assertEqual(delegate.ask("w", {"type": "cli", "command": [script]}, "t", self.root), "(empty answer)")
+        self.assertEqual(delegate.build_prompt("  do it  ", ""), "do it")
+        self.assertEqual(delegate.build_prompt("do it", "CTX"), "do it\n\nContext files:\n\nCTX")
+
+    def test_files_are_attached_in_order_and_the_limit_is_in_bytes(self):
+        for n, body in (("a.txt", "AAA"), ("b.txt", "BBB")):
+            with open(os.path.join(self.root, n), "w") as f:
+                f.write(body)
+        block = delegate.attach(self.root, ["a.txt", "b.txt"])
+        self.assertEqual(block, "### a.txt\n```\nAAA\n```\n\n### b.txt\n```\nBBB\n```")
+        with open(os.path.join(self.root, "u.txt"), "w", encoding="utf-8") as f:
+            f.write("я" * 40_000)                                # 80 000 bytes, 40 000 characters
+        with self.assertRaises(ValueError):
+            delegate.attach(self.root, ["u.txt"])
+        self.assertEqual(delegate.attach(self.root, None), "")
+
+    def test_a_cli_worker_that_fails_or_is_missing_says_why(self):
+        with self.assertRaisesRegex(RuntimeError, "command not found: /no/such/bin"):
+            delegate.ask_cli({"command": ["/no/such/bin"]}, "t", self.root)
+        sh = os.path.join(self.root, "fail.sh")
+        with open(sh, "w") as f:
+            f.write("#!/bin/sh\necho oops >&2\nexit 2\n")
+        os.chmod(sh, os.stat(sh).st_mode | stat.S_IEXEC)
+        with self.assertRaisesRegex(RuntimeError, "exit code 2: oops"):
+            delegate.ask_cli({"command": [sh]}, "t", self.root)
+        slow = os.path.join(self.root, "slow.sh")
+        with open(slow, "w") as f:
+            f.write("#!/bin/sh\nsleep 5\n")
+        os.chmod(slow, os.stat(slow).st_mode | stat.S_IEXEC)
+        with self.assertRaisesRegex(RuntimeError, "no answer within 1 s"):
+            delegate.ask_cli({"command": [slow]}, "t", self.root, timeout=1)
+
+
 class TestAgentWorkers(Base):
     def test_off_by_default_and_toggle(self):
         import agent
