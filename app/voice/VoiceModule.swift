@@ -352,8 +352,9 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     /// Resident memory of the engine process, in bytes (0 when there is none).
     nonisolated private static func engineResident(home: String) -> Int64 {
+        // the file holds the pid and, on a second line, what was started ("engine.server"): the first word is the pid
         guard let text = try? String(contentsOfFile: home + "/.llm/engine.pid", encoding: .utf8),
-              let pid = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return 0 }
+              let first = text.split(whereSeparator: \.isWhitespace).first, let pid = Int(first) else { return 0 }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/ps")
         p.arguments = ["-o", "rss=", "-p", String(pid)]
