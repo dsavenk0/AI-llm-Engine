@@ -492,6 +492,131 @@ class TestDecoderDetails(Base):
         self.assertEqual(c.offset, 3 + KVCache.STEP + 1 - 5)
 
 
+class TestGenerationLoop(Base):
+    """The shared generate() loop of engine/compat.py, watched from outside: how the prompt is cut into chunks,
+    what is checked and how often, and the numbers speculation reports."""
+
+    def engine(self, **kw):
+        from engine.gguf_engine import GGUFEngine
+        logs = []
+        kw.setdefault("max_context", 1024)
+        kw.setdefault("max_tokens", 200)
+        e = GGUFEngine(self.q8, log=lambda *a: logs.append(" ".join(map(str, a))), **kw)
+        e._logs = logs
+        return e
+
+    def run_gen(self, e, ids, **kw):
+        out = []
+        for item in e.generate(ids, **kw):
+            if isinstance(item, dict):
+                return out, item
+            out.append(item)
+        return out, {}
+
+    def spy(self, e):
+        """Record the width of every model call (and the engine's progress at that moment)."""
+        calls, real = [], e.model
+
+        class Spy:
+            def __getattr__(inner, name):
+                return getattr(real, name)
+
+            def __call__(inner, ids, cache=None):
+                calls.append((ids.shape[1], dict(e.progress) if e.progress else None))
+                return real(ids, cache)
+        e.model = Spy()
+        return calls
+
+    GREEDY = {"temperature": 0.0}
+
+    def test_the_context_limit_is_exclusive_and_max_tokens_is_clamped_to_the_room(self):
+        from engine.generate import ContextError
+        e = self.engine(max_context=40, max_tokens=64)
+        ids = list(range(10, 50))
+        with self.assertRaises(ContextError):
+            self.run_gen(e, ids[:40], sampling=self.GREEDY)                      # exactly the limit: refused
+        _, st = self.run_gen(e, ids[:35], max_tokens=50, sampling=self.GREEDY)   # 5 tokens of room
+        self.assertLessEqual(st["completion_tokens"], 5)
+
+    def test_a_long_prompt_is_prefilled_in_chunks_of_at_least_64_and_progress_reports_them(self):
+        e = self.engine(prefill_step=1)                                          # asks for 1: the floor is 64
+        calls = self.spy(e)
+        ids = [(7 * i) % 200 + 3 for i in range(150)]
+        _, st = self.run_gen(e, ids, max_tokens=2, sampling=self.GREEDY)
+        widths = [w for w, _ in calls]
+        self.assertEqual(widths[:3], [64, 64, 21])                              # 149 = 64 + 64 + 21, then the last token
+        self.assertEqual([p["done"] for _, p in calls[:3]], [0, 64, 128])
+        self.assertEqual({p["phase"] for _, p in calls[:3]}, {"prefill"})
+        self.assertEqual(calls[3][0], 1)                                        # the last prompt token, alone
+        self.assertEqual(st["prompt_tokens"], 150)
+        self.assertIsNone(e.progress)                                           # cleared when prefill is over
+
+    def test_the_cache_holds_exactly_what_was_fed(self):
+        e = self.engine()
+        ids = [(5 * i) % 150 + 3 for i in range(30)]
+        out, st = self.run_gen(e, ids, max_tokens=7, sampling=self.GREEDY)
+        n_out = st["completion_tokens"]
+        self.assertEqual(e.cache_tokens[:30], ids)
+        self.assertEqual(len(e.cache_tokens), 30 + n_out)                       # every sampled token went through
+        self.assertEqual(e.cache[0].offset, len(e.cache_tokens))
+
+    def test_memory_is_checked_every_32_tokens_and_a_refusal_ends_the_answer(self):
+        e = self.engine(max_tokens=100)
+        seen = []
+        real = e._check_memory
+        e._check_memory = lambda stage: (seen.append(stage), True)[1]
+        ids = [(3 * i) % 100 + 3 for i in range(12)]
+        _, st = self.run_gen(e, ids, max_tokens=70, sampling=self.GREEDY, stop=None)
+        self.assertEqual(st["completion_tokens"], 70)
+        self.assertEqual(seen.count("decode"), 2)                                # at 32 and 64
+        self.assertEqual(seen.count("prefill"), 0)                               # a 12-token prompt is one chunk
+        e2 = self.engine(max_tokens=100)
+        e2._check_memory = lambda stage: stage != "decode"                      # decode checks fail
+        _, st2 = self.run_gen(e2, ids, max_tokens=90, sampling=self.GREEDY)
+        self.assertEqual((st2["completion_tokens"], st2["finish_reason"]), (32, "length"))
+        self.assertTrue(any("memory: stopped generation" in l for l in e2._logs))
+
+    def test_a_looping_answer_is_cut_at_the_first_check_after_16_tokens(self):
+        import engine.compat as compat
+        from unittest import mock
+        e = self.engine(max_tokens=100)
+        ids = [(3 * i) % 100 + 3 for i in range(12)]
+        with mock.patch.object(compat, "is_looping", lambda text: True):
+            _, st = self.run_gen(e, ids, max_tokens=60, sampling=self.GREEDY)
+        self.assertEqual((st["finish_reason"], st["loop_stopped"], st["completion_tokens"]), ("stop", True, 16))
+        self.assertTrue(any("repetition: the answer was looping; stopped after 16 tokens" in l for l in e._logs))
+
+    def test_speculation_reports_exactly_what_the_model_calls_show(self):
+        e = self.engine(max_context=2048, max_tokens=120)
+        calls = self.spy(e)
+        unit = e.tok.encode("the cat in the hat sat in a hat. ")
+        ids = unit * 8
+        out, st = self.run_gen(e, ids, max_tokens=60, sampling=self.GREEDY)
+        widths = [w for w, _ in calls]
+        decode_widths = widths[len(ids) // 64 + 1:] if False else [w for w, p in calls if p is None]
+        verifies = [w for w in decode_widths if w > 1]
+        self.assertEqual(st["verifies"], len(verifies))
+        self.assertGreater(st["verifies"], 0)                                   # the repeating prompt gave drafts
+        drafted = sum(w - 1 for w in verifies)
+        self.assertEqual(e.totals["drafted"], drafted)
+        self.assertLessEqual(e.totals["accepted"], drafted)
+        self.assertEqual(st["draft_accept"], round(e.totals["accepted"] / drafted, 2))
+        self.assertEqual(e.totals["requests"], 1)
+        self.assertEqual(e.totals["prompt_tokens"], len(ids))
+        self.assertEqual(e.totals["completion_tokens"], st["completion_tokens"])
+        self.assertEqual(e.history[-1]["out"], st["completion_tokens"])
+        self.assertEqual(e.stats["last"], st)
+        # drafts never exceed the configured longest level
+        self.assertLessEqual(max(w - 1 for w in verifies), max(e.draft_levels))
+
+    def test_without_speculation_nothing_is_drafted_and_the_rate_is_none(self):
+        e = self.engine(speculative=False)
+        ids = e.tok.encode("the cat in the hat sat in a hat. ") * 4
+        _, st = self.run_gen(e, ids, max_tokens=20, sampling=self.GREEDY)
+        self.assertEqual((st["verifies"], st["draft_accept"]), (0, None))
+        self.assertEqual((e.totals["drafted"], e.totals["accepted"]), (0, 0))
+
+
 class TestEngineSettings(Base):
     def make(self, **kw):
         from engine.gguf_engine import GGUFEngine
