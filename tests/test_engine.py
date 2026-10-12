@@ -979,9 +979,19 @@ class TestPTQ1Model(unittest.TestCase):
         self.assertEqual((w.dtype, w.ndim, tuple(w.shape[2:])), (mx.uint8, 4, (1024, 28)))
 
     def test_prefill_matches_the_dequantized_float_twin_exactly(self):
-        lq = self.last_logits(self.engine(self.q, ptq1=True))
+        # the dequantize + matmul path (what long prompts use) reproduces the float twin to rounding
+        from unittest import mock
+        from engine import ptq1
+        with mock.patch.object(ptq1, "SMALL_MAX", 0):
+            lq = self.last_logits(self.engine(self.q, ptq1=True))
         lf = self.last_logits(self.engine(self.f))
         np.testing.assert_allclose(lq, lf, atol=1e-4)
+        self.assertEqual(int(lq.argmax()), int(lf.argmax()))
+
+    def test_short_prefill_through_the_fused_kernel_matches_the_float_twin(self):
+        lq = self.last_logits(self.engine(self.q, ptq1=True))
+        lf = self.last_logits(self.engine(self.f))
+        self.assertLess(float(np.abs(lq - lf).max()) / float(np.abs(lf).max()), 0.01)
         self.assertEqual(int(lq.argmax()), int(lf.argmax()))
 
     def test_one_token_decode_kernel_matches_the_prefill_path(self):

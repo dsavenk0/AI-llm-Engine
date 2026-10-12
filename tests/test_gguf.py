@@ -539,7 +539,7 @@ class TestHeaderAndSupportDetails(unittest.TestCase):
         ok, why = gguf.native_support(self.write("moe.gguf", extra_meta={"llama.expert_count": 8}))
         self.assertEqual((ok, why), (False, "mixture of experts"))
         ok, why = gguf.native_support(self.write("spm.gguf", extra_meta={"tokenizer.ggml.model": "llama"}))
-        self.assertEqual((ok, why), (False, "tokenizer 'llama'"))
+        self.assertEqual((ok, why), (False, "tokenizer: SentencePiece with a dummy space prefix"))
         ok, why = gguf.native_support(self.write("pre.gguf", extra_meta={"tokenizer.ggml.pre": "weird"}))
         self.assertEqual((ok, why), (False, "pre-tokenizer 'weird'"))
         ok, why = gguf.native_support(self.write("yarn.gguf", extra_meta={"llama.rope.scaling.type": "yarn"}))

@@ -29,8 +29,11 @@ class TestSupportProbe(Base):
         self.assertFalse(ok)
         self.assertIn("experts", why)
         odd = os.path.join(self.dir, "odd.gguf")
-        S.write(odd, arch="gemma3")
+        S.write(odd, arch="phi3")
         self.assertIn("architecture", gguf.native_support(odd)[1])
+        gemma = os.path.join(self.dir, "gemma.gguf")
+        S.write(gemma, arch="gemma3")
+        self.assertEqual(gguf.native_support(gemma), (True, ""))
         iq = os.path.join(self.dir, "iq.gguf")
         S.write(iq, tensor_type_override=("blk.0.ffn_up.weight", 20))           # IQ4_NL
         self.assertIn("quantization", gguf.native_support(iq)[1])
@@ -132,6 +135,111 @@ class TestDecoder(Base):
         on = np.asarray(model(mx.array([ids]), model.make_cache())[0].astype(mx.float32))
         np.testing.assert_allclose(zero, base, atol=1e-3)
         self.assertGreater(float(np.abs(on - base).max()), 1e-2)
+
+
+class TestGemma3(Base):
+    """Gemma 3: sliding-window layers (5 of every 6) with their own rope base, norms after attention and
+    feed-forward, GeGLU, tied output, SentencePiece vocabulary — against an independent numpy forward pass."""
+    IDS = [5, 40, 7, 250, 12, 99, 3, 260, 14, 15, 60, 61, 62, 33, 34, 35, 70, 71]     # longer than the window (4)
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.path = os.path.join(cls.dir, "gemma.gguf")
+        cls.values = S.write(cls.path, seed=4, quant="F16", arch="gemma3")
+
+    def logits(self, path, ids=None):
+        import mlx.core as mx
+        from engine import dense
+        model, cfg, gf = dense.build(path)
+        out = model(mx.array([ids or self.IDS]), model.make_cache())
+        return model, cfg, np.asarray(out[0].astype(mx.float32))
+
+    def test_logits_match_the_reference_with_the_window_actually_cutting(self):
+        _, cfg, got = self.logits(self.path)
+        self.assertEqual((cfg.window, cfg.window_pattern, cfg.gelu, cfg.sandwich), (S.GEMMA_WINDOW, 6, True, True))
+        want = S.reference_logits(self.values, self.IDS, arch="gemma3")
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0)
+        self.assertTrue((got.argmax(-1) == want.argmax(-1)).mean() > 0.85)
+        # the window matters: the same weights without it give other logits (so the match is not shared code)
+        import mlx.core as mx
+        from engine import dense
+        model, _, _ = dense.build(self.path)
+        model.cfg.window = 0
+        nowin = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+        self.assertGreater(float(np.abs(nowin - got).max()), 0.05)
+
+    def test_linear_rope_scaling_applies_to_the_global_layer_only(self):
+        path = os.path.join(self.dir, "gemma-linear.gguf")
+        values = S.write(path, seed=4, quant="F16", arch="gemma3",
+                         extra_meta={"gemma3.rope.scaling.type": "linear", "gemma3.rope.scaling.factor": 2.0})
+        _, cfg, got = self.logits(path)
+        self.assertAlmostEqual(cfg.rope_scale, 0.5)
+        want = S.reference_logits(values, self.IDS, arch="gemma3", rope_scale=0.5)
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0)
+        plain = S.reference_logits(values, self.IDS, arch="gemma3")
+        self.assertGreater(float(np.abs(want - plain).max()), 0.02)
+
+    def test_token_by_token_equals_one_pass_across_the_window_edge(self):
+        import mlx.core as mx
+        from engine import dense
+        model, _, _ = dense.build(self.path)
+        ids = self.IDS + list(range(100, 112))                   # 30 tokens, window 4: old keys must be dropped
+        full = np.asarray(model(mx.array([ids]), model.make_cache())[0, -1].astype(mx.float32))
+        cache = model.make_cache()
+        model(mx.array([ids[:11]]), cache)
+        for t in ids[11:-1]:
+            model(mx.array([[t]]), cache)
+        step = np.asarray(model(mx.array([[ids[-1]]]), cache)[0, -1].astype(mx.float32))
+        np.testing.assert_allclose(step, full, atol=0.05)
+        # and a chunk that straddles the edge (prefill continued with several tokens at once)
+        cache = model.make_cache()
+        model(mx.array([ids[:9]]), cache)
+        chunk = np.asarray(model(mx.array([ids[9:]]), cache)[0, -1].astype(mx.float32))
+        np.testing.assert_allclose(chunk, full, atol=0.05)
+
+    def test_trimming_a_windowed_cache_matches_a_fresh_pass(self):
+        import mlx.core as mx
+        from engine import dense
+        model, _, _ = dense.build(self.path)
+        ids = self.IDS
+        cache = model.make_cache()
+        model(mx.array([ids]), cache)
+        for c in cache:
+            c.trim(4)
+        again = np.asarray(model(mx.array([ids[-4:]]), cache)[0, -1].astype(mx.float32))
+        full = np.asarray(model(mx.array([ids]), model.make_cache())[0, -1].astype(mx.float32))
+        np.testing.assert_allclose(again, full, atol=0.05)
+
+    def test_sentencepiece_tokenizer(self):
+        from engine import gguf, gguf_tokenizer
+        tk = gguf_tokenizer.GGUFTokenizer(self.path, gguf.read_header_full(self.path))
+        names = S.spm_vocab()[0]
+        # pieces are merged by score: " the" becomes ▁the (not ▁t + he), "thing" ends in "ing"; no dummy prefix,
+        # so the first word has no ▁ in front
+        got = [names[i] for i in tk.encode("a the thing in a")]
+        self.assertEqual(got, ["a", "\u2581the", "\u2581t", "h", "ing", "\u2581in", "\u2581a"])
+        for text in ("the thing in a", "Hello, world!", "  two  spaces", "line1\nline2", "café ünï 日本", "a\tb", "<start_of_turn>user\nhi<end_of_turn>\n"):
+            self.assertEqual(tk.decode(tk.encode(text)), text, text)
+        # characters outside the vocabulary fall back to their UTF-8 bytes, never to <unk>
+        e = tk.encode("é")
+        self.assertEqual([names[i] for i in e], ["<0xC3>", "<0xA9>"])
+        self.assertNotIn(3, tk.encode("日"))
+        # control tokens are single ids; the chat template puts <bos> in front itself
+        self.assertEqual(tk.encode("<end_of_turn>"), [names.index("<end_of_turn>")])
+        text = tk.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True)
+        self.assertEqual(text, "<bos><start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n")
+        self.assertEqual(tk.encode(text)[0], 2)
+        self.assertIn(names.index("<end_of_turn>"), tk.eos_token_ids)
+        self.assertIn(1, tk.eos_token_ids)
+
+    def test_a_dummy_prefix_vocabulary_is_refused_not_mis_tokenized(self):
+        from engine import gguf, gguf_tokenizer
+        path = os.path.join(self.dir, "gemma-prefix.gguf")
+        S.write(path, arch="gemma3", extra_meta={"tokenizer.ggml.add_space_prefix": True})
+        self.assertIn("tokenizer", gguf.native_support(path)[1])
+        with self.assertRaises(gguf_tokenizer.Unsupported):
+            gguf_tokenizer.GGUFTokenizer(path, gguf.read_header_full(path))
 
 
 class TestTokenizer(Base):

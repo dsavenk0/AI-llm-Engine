@@ -192,7 +192,7 @@ def native_support(path):
         tk = meta.get("tokenizer.ggml.model")
         if tk == "llama":                              # SentencePiece (Gemma): scored pieces, no dummy prefix
             if meta.get("tokenizer.ggml.add_space_prefix", True):
-                return False, "SentencePiece with a dummy space prefix"
+                return False, "tokenizer: SentencePiece with a dummy space prefix"
         elif tk != "gpt2":
             return False, f"tokenizer {tk!r}"
         elif meta.get("tokenizer.ggml.pre", "default") not in NATIVE_PRE:

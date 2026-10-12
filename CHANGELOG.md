@@ -14,6 +14,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Gemma 3 on the engine's own decoder** (GGUF): sliding-window layers with their own rope base, norms after the
+  attention and feed-forward, GeGLU, tied output, linear rope scaling for the global layers, and a SentencePiece
+  tokenizer built from the file (merges ranked by piece score, byte fallback). Checked against llama.cpp: identical
+  token ids on a set of English / Russian / CJK / code / emoji strings, identical greedy text over 32 tokens including
+  a 1900-token prompt that slides the window. llama.cpp stays the fallback for what the decoder does not cover.
 - **A few rows on 1.75-bit models** (2–32: speculative verification, short prompts): a fused decode + 8×8 matrix
   multiply kernel replaces dequantize-then-matmul — 16 rows of a 34816×5120 matrix take 2.3 ms instead of 8.4 ms
   (PTQ1_0 and TQ1_G128). It is compute-bound (about 6 one-row steps for 16 rows), so speculation on these models
