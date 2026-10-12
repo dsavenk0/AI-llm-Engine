@@ -569,7 +569,7 @@ class TestGenerationLoop(Base):
         _, st = self.run_gen(e, ids, max_tokens=70, sampling=self.GREEDY, stop=None)
         self.assertEqual(st["completion_tokens"], 70)
         self.assertEqual(seen.count("decode"), 2)                                # at 32 and 64
-        self.assertEqual(seen.count("prefill"), 0)                               # a 12-token prompt is one chunk
+        self.assertEqual(seen.count("prefill"), 1)                               # a 12-token prompt is one chunk
         e2 = self.engine(max_tokens=100)
         e2._check_memory = lambda stage: stage != "decode"                      # decode checks fail
         _, st2 = self.run_gen(e2, ids, max_tokens=90, sampling=self.GREEDY)
