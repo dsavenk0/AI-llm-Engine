@@ -13,7 +13,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
-  ./llm ui [dir]             native code editor with the assistant (build it once: ./build-editor.sh)
+  ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
@@ -1255,24 +1255,34 @@ def run_tests():
     return subprocess.run([VENV_PY, "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=BASE, env=env).returncode == 0
 
 
-def find_editor():
-    """LLMEditor.app: next to LLMBar's bundled resources, or built in this folder (./build-editor.sh)."""
-    for p in (os.path.join(BASE, "LLMEditor.app"), os.path.join(os.path.dirname(BASE), "LLMEditor.app")):
+def find_app():
+    """LLMBar.app — it holds the editor (and the voice chat) as modules: the bundle this CLI runs from
+    (…/LLMBar.app/Contents/Resources/llm), or the one built in this folder (./build-app.sh), or /Applications."""
+    here = os.path.abspath(BASE)
+    parts = here.split(os.sep)
+    if "Resources" in parts and any(p.endswith(".app") for p in parts):
+        bundle = os.sep.join(parts[:max(i for i, p in enumerate(parts) if p.endswith(".app")) + 1])
+        if os.path.isdir(bundle):
+            return bundle
+    for p in (os.path.join(here, "LLMBar.app"), os.path.join(os.path.dirname(here), "LLMBar.app"),
+              "/Applications/LLMBar.app"):
         if os.path.isdir(p):
             return p
     return None
 
 
 def run_ui(args=()):
-    """Open the editor on a project (default: the folder `./llm ui` was started from)."""
-    app = find_editor()
+    """Open the editor on a project (default: the folder `./llm ui` was started from), in the one LLMBar app:
+    the llmbar://editor link starts the app if it is not running, or adds a window to the running one."""
+    app = find_app()
     if not app:
-        print(R(T("The editor is not built yet. Build it once with:  ./build-editor.sh"))); return False
-    cmd = ["open", "-n", app, "--args", "--llm-root", BASE, "--engine-port", str(load_cfg()["port"])]
-    if "--choose" not in args:   # without --root the app reopens its last project, or asks
+        print(R(T("The app is not built yet. Build it once with:  ./build-app.sh"))); return False
+    url = "llmbar://editor"
+    if "--choose" not in args:   # without a root the editor reopens its last project, or asks
         root = next((a for a in args if not a.startswith("--")), None) or os.environ.get("LLM_CWD") or os.getcwd()
-        cmd += ["--root", os.path.abspath(os.path.join(os.environ.get("LLM_CWD") or os.getcwd(), root))]
-    return subprocess.run(cmd).returncode == 0
+        root = os.path.abspath(os.path.join(os.environ.get("LLM_CWD") or os.getcwd(), root))
+        url += "?root=" + urllib.parse.quote(root, safe="")
+    return subprocess.run(["open", "-a", app, url]).returncode == 0
 
 
 def run_perf(args=()):

@@ -305,7 +305,7 @@ struct Composer: View {
                 Menu {
                     Button("File from disk…") { pickFiles(images: false) }
                     Button("Image…") { pickFiles(images: true) }
-                    Button("Current file" + (ws.activePath.map { " — " + Paths.displayName($0) } ?? "")) {
+                    Button("Current file" + (ws.activePath.map { " — " + PathTools.displayName($0) } ?? "")) {
                         if let p = ws.activePath { ws.attach(p) }
                     }.disabled(ws.activePath == nil)
                 } label: { Label("Attach", systemImage: "paperclip") }
@@ -380,7 +380,7 @@ struct Composer: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(ws.attachments, id: \.self) { p in
-                    chip(icon: "doc.text", title: Paths.displayName(p)) { ws.detach(p) }
+                    chip(icon: "doc.text", title: PathTools.displayName(p)) { ws.detach(p) }
                 }
                 ForEach(ws.inline) { f in chip(icon: "doc.badge.plus", title: f.name) { ws.inline.removeAll { $0.id == f.id } } }
                 ForEach(ws.pictures) { p in

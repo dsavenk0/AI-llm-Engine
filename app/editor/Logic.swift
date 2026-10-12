@@ -240,7 +240,7 @@ struct OffsetMap {
 
 // MARK: - small helpers
 
-enum Paths {
+enum PathTools {
     static func displayName(_ path: String) -> String { (path as NSString).lastPathComponent }
     static func isInside(_ path: String, root: String) -> Bool {
         let p = (path as NSString).standardizingPath, r = (root as NSString).standardizingPath

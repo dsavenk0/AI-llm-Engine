@@ -9,6 +9,7 @@ import re
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -599,58 +600,59 @@ class TestConfigKeepsAppSettings(unittest.TestCase):
 
 
 class TestEditorLauncher(unittest.TestCase):
-    def test_find_editor_prefers_the_folder_next_to_the_code(self):
-        from unittest import mock
-        base = tempfile.mkdtemp()
-        res = os.path.dirname(base)
-        with mock.patch.object(llm, "BASE", base):
-            self.assertIsNone(llm.find_editor() if not os.path.isdir(os.path.join(res, "LLMEditor.app")) else None)
-            os.makedirs(os.path.join(base, "LLMEditor.app"))
-            self.assertEqual(llm.find_editor(), os.path.join(base, "LLMEditor.app"))
+    """`./llm ui` opens the editor module of the one LLMBar app through its llmbar:// link."""
 
-    def test_ui_command_opens_the_app_with_root_and_ports(self):
+    def test_the_app_is_found_next_to_the_code_in_a_bundle_or_in_applications(self):
+        from unittest import mock
+        base = os.path.realpath(tempfile.mkdtemp())
+        with mock.patch.object(llm, "BASE", base):
+            self.assertNotIn(llm.find_app(), (os.path.join(base, "LLMBar.app"),))
+            os.makedirs(os.path.join(base, "LLMBar.app"))
+            self.assertEqual(llm.find_app(), os.path.join(base, "LLMBar.app"))
+        bundle = os.path.join(os.path.realpath(tempfile.mkdtemp()), "LLMBar.app")
+        inner = os.path.join(bundle, "Contents", "Resources", "llm")
+        os.makedirs(inner)
+        with mock.patch.object(llm, "BASE", inner):
+            self.assertEqual(llm.find_app(), bundle)                  # the CLI inside the bundle names its own app
+
+    def test_ui_command_sends_the_editor_link_with_the_project(self):
         from unittest import mock
         calls = []
-        base = tempfile.mkdtemp()
-        os.makedirs(os.path.join(base, "LLMEditor.app"))
-        proj = tempfile.mkdtemp()
+        base = os.path.realpath(tempfile.mkdtemp())
+        os.makedirs(os.path.join(base, "LLMBar.app"))
+        proj = os.path.realpath(tempfile.mkdtemp())
         fake = mock.Mock(returncode=0)
         with mock.patch.object(llm, "BASE", base), mock.patch.object(llm.subprocess, "run",
                                                                       lambda cmd, **k: calls.append(cmd) or fake):
             self.assertTrue(llm.run_ui([proj]))
             self.assertTrue(llm.run_ui(["--choose"]))
         first, second = calls
-        self.assertEqual(first[:4], ["open", "-n", os.path.join(base, "LLMEditor.app"), "--args"])
-        self.assertEqual(first[first.index("--root") + 1], os.path.abspath(proj))
-        self.assertEqual(first[first.index("--llm-root") + 1], base)
-        self.assertIn("--engine-port", first)
-        self.assertNotIn("--root", second)
+        self.assertEqual(first[:3], ["open", "-a", os.path.join(base, "LLMBar.app")])
+        self.assertEqual(first[3], "llmbar://editor?root=" + urllib.parse.quote(proj, safe=""))
+        self.assertEqual(second[3], "llmbar://editor")                   # no root: the last project, or the picker
 
-    def test_missing_editor_is_explained_not_launched(self):
+    def test_a_missing_app_is_explained_not_launched(self):
         from unittest import mock
-        with mock.patch.object(llm, "BASE", tempfile.mkdtemp()), mock.patch.object(llm, "find_editor", lambda: None):
-            ok = llm.run_ui([])
-        self.assertFalse(ok)
+        with mock.patch.object(llm, "find_app", lambda: None):
+            self.assertFalse(llm.run_ui([]))
 
 
-class TestEditorInTheBundle(unittest.TestCase):
-    def test_layout_of_a_bundled_app_is_found_from_the_cli(self):
-        """LLMBar.app/Contents/Resources/{LLMEditor.app, llm/} — `llm` runs with BASE = .../Resources/llm."""
-        from unittest import mock
-        res = tempfile.mkdtemp()
-        base = os.path.join(res, "llm")
-        os.makedirs(base)
-        os.makedirs(os.path.join(res, "LLMEditor.app"))
-        with mock.patch.object(llm, "BASE", base):
-            self.assertEqual(llm.find_editor(), os.path.join(res, "LLMEditor.app"))
-
+class TestOneAppBundle(unittest.TestCase):
     @unittest.skipUnless(os.path.isdir(os.path.join(ROOT, "LLMBar.app")), "LLMBar.app has not been built here")
-    def test_the_built_app_carries_the_editor_and_its_backend(self):
-        res = os.path.join(ROOT, "LLMBar.app", "Contents", "Resources")
-        self.assertTrue(os.path.isfile(os.path.join(res, "LLMEditor.app", "Contents", "MacOS", "LLMEditor")))
-        self.assertTrue(os.path.isfile(os.path.join(res, "LLMEditor.app", "Contents", "Info.plist")))
+    def test_the_built_app_is_one_bundle_with_the_backend_and_the_widget(self):
+        app = os.path.join(ROOT, "LLMBar.app", "Contents")
+        self.assertTrue(os.path.isfile(os.path.join(app, "MacOS", "LLMBar")))
+        res = os.path.join(app, "Resources")
         for rel in ("ui/server.py", "ui/codeinfo.py", "ui/agentloop.py", "ui/diagnostics.py", "harness/memory.py"):
             self.assertTrue(os.path.isfile(os.path.join(res, "llm", rel)), rel)
+        self.assertFalse(os.path.exists(os.path.join(res, "LLMEditor.app")))      # no second app inside
+        self.assertFalse(os.path.exists(os.path.join(res, "LLMVoice.app")))
+        import plistlib
+        with open(os.path.join(app, "Info.plist"), "rb") as f:
+            plist = plistlib.load(f)
+        schemes = [s for t in plist.get("CFBundleURLTypes", []) for s in t.get("CFBundleURLSchemes", [])]
+        self.assertIn("llmbar", schemes)
+        self.assertIn("NSMicrophoneUsageDescription", plist)
 
 
 class TestPullValidation(unittest.TestCase):

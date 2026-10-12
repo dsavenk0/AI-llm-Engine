@@ -11,13 +11,14 @@ enum ThemeMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// One setting for every window of the editor (like the module switches).
+/// The editor's view of the app-wide theme (LLMBar's "theme" setting): the picker here writes that setting, and a
+/// change made anywhere else arrives through `.appThemeChanged`.
 final class ThemeSettings: ObservableObject {
     static let shared = ThemeSettings()
     @Published var mode: ThemeMode {
         didSet {
-            UserDefaults.standard.set(mode.rawValue, forKey: "themeMode")
-            apply()
+            guard mode.rawValue != AppTheme.setting else { apply(); return }
+            AppTheme.set(mode.rawValue)                  // posts .appThemeChanged, which lands in sync() and apply()
         }
     }
 
@@ -31,8 +32,16 @@ final class ThemeSettings: ObservableObject {
     }
 
     init() {
-        mode = ThemeMode(rawValue: UserDefaults.standard.string(forKey: "themeMode") ?? "") ?? .dark
+        mode = ThemeMode(rawValue: AppTheme.setting) ?? .system
         custom = UserDefaults.standard.data(forKey: "customTheme").flatMap { try? JSONDecoder().decode(ThemeOverride.self, from: $0) }
+        NotificationCenter.default.addObserver(forName: .appThemeChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sync() }
+        }
+    }
+
+    private func sync() {
+        let m = ThemeMode(rawValue: AppTheme.setting) ?? .system
+        if m != mode { mode = m } else { apply() }
     }
 
     /// nil = follow the system.
@@ -58,8 +67,12 @@ final class ThemeSettings: ObservableObject {
 
     /// Pushes the choice to every window (AppKit controls and the text views' dynamic colours follow it).
     func apply() {
-        NSApp.appearance = appearance
-        for w in NSApp.windows { w.appearance = appearance; w.backgroundColor = Palette.windowNS(isDark: isDark) }
+        MainActor.assumeIsolated {
+            for w in NSApp.windows where EditorModule.shared.owns(w) {
+                w.appearance = appearance
+                w.backgroundColor = Palette.windowNS(isDark: isDark)
+            }
+        }
         NotificationCenter.default.post(name: .themeChanged, object: nil)
     }
 }

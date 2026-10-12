@@ -1,5 +1,6 @@
-"""The native editor app, headless: compiled with swiftc and run with --selftest against the real Python
-backend on a throw-away git project (no window, no focus, no model).
+"""The editor module of the one LLMBar app, headless: the whole app is compiled with swiftc and run with
+`--module editor --selftest` against the real Python backend on a throw-away git project (no window, no focus,
+no model).
 
     .venv/bin/python -m unittest tests.test_editor_app -v
 """
@@ -17,12 +18,14 @@ class TestEditorApp(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
-        cls.binary = os.path.join(cls.tmp, "LLMEditor")
-        files = sorted(os.path.join(ROOT, "app/editor", f) for f in os.listdir(os.path.join(ROOT, "app/editor"))
-                       if f.endswith(".swift"))
-        build = subprocess.run(["swiftc", "-O", *files, "-o", cls.binary], capture_output=True, text=True, timeout=900)
+        cls.binary = os.path.join(cls.tmp, "LLMBar")
+        files = [os.path.join(ROOT, "app/main.swift")]
+        for d in ("core", "bar", "editor", "voice"):
+            folder = os.path.join(ROOT, "app", d)
+            files += sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".swift"))
+        build = subprocess.run(["swiftc", "-O", *files, "-o", cls.binary], capture_output=True, text=True, timeout=1500)
         if build.returncode != 0:
-            raise AssertionError("the editor app does not compile:\n" + build.stderr[-3000:])
+            raise AssertionError("the app does not compile:\n" + build.stderr[-3000:])
         cls.project = os.path.realpath(os.path.join(cls.tmp, "proj"))
         os.makedirs(cls.project)
         with open(os.path.join(cls.project, "hello.py"), "w") as f:
@@ -35,7 +38,8 @@ class TestEditorApp(unittest.TestCase):
             subprocess.run(["git", "-C", cls.project, *args], check=True, capture_output=True, env=env)
 
     def test_the_app_drives_the_backend_end_to_end(self):
-        run = subprocess.run([self.binary, "--selftest", "--root", self.project, "--llm-root", ROOT, "--engine-port", "1"],
+        run = subprocess.run([self.binary, "--module", "editor", "--selftest", "--root", self.project, "--llm-root", ROOT,
+                              "--engine-port", "1"],
                              capture_output=True, text=True, timeout=120)
         self.assertEqual(run.returncode, 0, run.stdout[-3000:] + run.stderr[-1500:])
         self.assertIn("SELFTEST OK", run.stdout)
@@ -44,40 +48,30 @@ class TestEditorApp(unittest.TestCase):
             self.assertIn("def added", f.read())                  # the save really reached the disk
 
 
-@unittest.skipUnless(shutil.which("swiftc") and shutil.which("osascript"), "needs swiftc and osascript")
-class TestNewWindowRequest(unittest.TestCase):
-    """LLMBar asks a running editor for another window with a distributed notification."""
+class TestModuleLinks(unittest.TestCase):
+    """The llmbar:// links are the one way in for the widget, `./llm ui` and other apps."""
 
-    def test_llmbar_and_the_editor_agree_on_the_notification(self):
-        name = "local.llm-engine.editor.new-window"
-        with open(os.path.join(ROOT, "app", "LLMBar.swift")) as f:
-            self.assertIn(name, f.read())
-        with open(os.path.join(ROOT, "app", "editor", "main.swift")) as f:
-            self.assertIn(name, f.read())
+    def read(self, *parts):
+        with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
+            return f.read()
 
-    def test_a_running_editor_receives_the_request_with_the_project(self):
-        binary = TestEditorApp.binary if hasattr(TestEditorApp, "binary") else None
-        if not binary or not os.path.exists(binary):
-            self.skipTest("the editor binary is built by TestEditorApp")
-        import uuid
-        # a private notification name: the system-wide one would also open a window in the editor a person
-        # has running right now
-        name = "local.llm-engine.editor.test-" + uuid.uuid4().hex
-        proc = subprocess.Popen([binary, "--selftest-notify"], stdout=subprocess.PIPE, text=True,
-                                env=dict(os.environ, LLM_EDITOR_NEW_WINDOW_NAME=name))
-        try:
-            self.assertEqual(proc.stdout.readline().strip(), "READY")
-            js = ('ObjC.import("Foundation");'
-                  '$.NSDistributedNotificationCenter.defaultCenter.postNotificationNameObjectUserInfoDeliverImmediately('
-                  '"' + name + '", $(), $({root: "/tmp/some-project"}), true);')
-            subprocess.run(["osascript", "-l", "JavaScript", "-e", js], check=True, timeout=30)
-            import select
-            ready, _, _ = select.select([proc.stdout], [], [], 15)
-            self.assertTrue(ready, "the editor never received the notification")
-            self.assertEqual(proc.stdout.readline().strip(), "NEW-WINDOW /tmp/some-project")
-        finally:
-            proc.kill()
-            proc.wait()
+    def test_the_scheme_is_registered_and_every_route_has_a_handler(self):
+        self.assertIn("<string>llmbar</string>", self.read("build-app.sh"))
+        host = self.read("app", "core", "Host.swift")
+        for route in ('case "toggle"', 'case "editor"', 'case "cli"'):
+            self.assertIn(route, host)
+        widget = self.read("app", "widget", "LLMBarWidget.swift")
+        for link in ("llmbar://toggle", "llmbar://launch?target="):
+            self.assertIn(link, widget)
+
+    def test_ui_command_and_the_host_agree_on_the_editor_link(self):
+        self.assertIn('"llmbar://editor"', self.read("llm.py"))
+
+    def test_there_is_one_app_not_three(self):
+        for gone in ("build-editor.sh", "build-voice.sh"):
+            self.assertFalse(os.path.exists(os.path.join(ROOT, gone)), gone)
+        self.assertEqual(
+            sorted(f for f in os.listdir(os.path.join(ROOT, "app")) if f.endswith(".swift")), ["main.swift"])
 
 
 if __name__ == "__main__":

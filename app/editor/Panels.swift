@@ -45,7 +45,7 @@ struct FilesModuleView: View {
                             ForEach(nameMatches, id: \.self) { p in
                                 Button { ws.openFile(p) } label: {
                                     VStack(alignment: .leading) {
-                                        Text(Paths.displayName(p))
+                                        Text(PathTools.displayName(p))
                                         Text(p).font(.caption).foregroundColor(.secondary)
                                     }
                                 }.buttonStyle(.plain)

@@ -374,7 +374,7 @@ struct ChatItemView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.text).textSelection(.enabled)
                 if !item.attached.isEmpty {
-                    Label(item.attached.map(Paths.displayName).joined(separator: ", "), systemImage: "paperclip")
+                    Label(item.attached.map(PathTools.displayName).joined(separator: ", "), systemImage: "paperclip")
                         .font(.caption).foregroundColor(.secondary)
                 }
             }

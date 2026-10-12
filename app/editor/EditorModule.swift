@@ -1,20 +1,15 @@
-// LLM Editor — a native, on-demand code editor for the local engine. Started by `./llm ui` or LLMBar;
-// every window owns one project, its chats and a small Python backend (ui/server.py).
+// The editor module of LLMBar — a native code editor for the local engine. Opened from the panel, the tool row,
+// the llm://editor link or `./llm ui`; every window owns one project, its chats and a small Python backend
+// (ui/server.py). It lives in the same process as the other modules and is created only when first used.
 import AppKit
 import SwiftUI
-
-/// What LLMBar posts to a running editor to get one more window.
-/// LLMBar posts this to open another window. A test may give its own name (LLM_EDITOR_NEW_WINDOW_NAME) so its
-/// request never reaches an editor a person is using.
-let newWindowNotification = Notification.Name(
-    ProcessInfo.processInfo.environment["LLM_EDITOR_NEW_WINDOW_NAME"] ?? "local.llm-engine.editor.new-window")
 
 @MainActor
 final class EditorWindowController: NSObject, NSWindowDelegate {
     let ws: Workspace
     let chat: ChatStore
     private(set) var window: NSWindow!
-    weak var owner: AppDelegate?
+    weak var owner: EditorModule?
 
     init(llmRoot: String, enginePort: Int) {
         let w = Workspace(llmRoot: llmRoot, enginePort: enginePort)
@@ -129,54 +124,53 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+/// The editor as a module of the one app: owns the editor windows, their menu and the unsaved-files check.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
-    private var controllers: [EditorWindowController] = []
-    private var llmRoot = Bundle.main.object(forInfoDictionaryKey: "LLMRoot") as? String ?? FileManager.default.currentDirectoryPath
-    private var enginePort = 8090
-    private var startRoot: String?
+final class EditorModule: NSObject, NSMenuItemValidation {
+    static let shared = EditorModule()
 
-    override init() {
-        let a = CommandLine.arguments
-        var i = 1
+    private var controllers: [EditorWindowController] = []
+    private var llmRoot: String { Paths.shared.root }
+    private var enginePort: Int { Config.port }
+    private var startRoot: String?
+    private var menu: NSMenu?
+
+    private override init() {
         super.init()
-        while i < a.count {
-            switch a[i] {
-            case "--root": if i + 1 < a.count { startRoot = a[i + 1]; i += 1 }
-            case "--llm-root": if i + 1 < a.count { llmRoot = a[i + 1]; i += 1 }
-            case "--engine-port": if i + 1 < a.count { enginePort = Int(a[i + 1]) ?? 8090; i += 1 }
-            default: break
-            }
-            i += 1
-        }
+        let a = CommandLine.arguments
+        if let i = a.firstIndex(of: "--root"), i + 1 < a.count { startRoot = a[i + 1] }
         if startRoot == nil { startRoot = UserDefaults.standard.string(forKey: "lastProject") }
     }
 
-    /// The window that has the focus (or the newest one).
-    var current: EditorWindowController? { controllers.first { $0.window?.isKeyWindow == true } ?? controllers.last }
+    var hasWindows: Bool { !controllers.isEmpty }
+    func owns(_ window: NSWindow?) -> Bool { controllers.contains { $0.window === window } }
 
-    func remove(_ c: EditorWindowController) { controllers.removeAll { $0 === c } }
+    /// The editor's own main menu, shown while one of its windows is the key window.
+    var mainMenu: NSMenu {
+        if menu == nil { buildMenus() }
+        return menu!
+    }
 
-    func applicationDidFinishLaunching(_ n: Notification) {
+    /// Opens a window on `project` — or on the last project, or the welcome screen when there is none.
+    func open(project: String? = nil) {
+        let target = project ?? startRoot.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        newWindow(project: target)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Driven from the command line (`--module editor --selftest | --snapshot …`): returns true when it handled it.
+    func runCommandLineModes() -> Bool {
         if CommandLine.arguments.contains("--selftest") {
-            NSApp.setActivationPolicy(.prohibited)             // no window, no focus: a logic check
             let ws = Workspace(llmRoot: llmRoot, enginePort: enginePort)
             runSelfTest(ws, root: startRoot ?? FileManager.default.currentDirectoryPath)
-            return
+            return true
         }
-        if CommandLine.arguments.contains("--selftest-notify") {     // the LLMBar → editor "new window" contract
-            NSApp.setActivationPolicy(.prohibited)
-            DistributedNotificationCenter.default().addObserver(forName: newWindowNotification, object: nil, queue: .main) { n in
-                print("NEW-WINDOW \(n.userInfo?["root"] as? String ?? "")"); fflush(stdout); exit(0)
-            }
-            print("READY"); fflush(stdout)
-            return
+        if let out = value(after: "--snapshot") {
+            open()
+            scheduleSnapshot(to: out)
+            return true
         }
-        buildMenus()
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(newWindowRequested(_:)), name: newWindowNotification, object: nil)
-        newWindow(project: startRoot.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil })
-        if let out = value(after: "--snapshot") { scheduleSnapshot(to: out) }
+        return false
     }
 
     private func value(after flag: String) -> String? {
@@ -184,6 +178,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard let i = a.firstIndex(of: flag), i + 1 < a.count else { return nil }
         return a[i + 1]
     }
+
+    /// The window that has the focus (or the newest one).
+    var current: EditorWindowController? { controllers.first { $0.window?.isKeyWindow == true } ?? controllers.last }
+
+    func remove(_ c: EditorWindowController) { controllers.removeAll { $0 === c } }
 
     /// `--snapshot out.png [--layout ide|chat] [--open-file rel] [--theme light|dark] [--bottom tab] [--size WxH] [--resize WxH]`: renders the
     /// window's own view hierarchy to a PNG (no screen-recording permission needed) and quits. For checking the
@@ -287,16 +286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         else { c.ws.needsProject = true; c.ws.starting = false }         // the welcome screen, with the picker on top
     }
 
-    @objc func newWindowRequested(_ n: Notification) {
-        let root = (n.userInfo?["root"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        newWindow(project: root)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
-
-    /// ⌘Q does not go through windowShouldClose: ask here, once, about every window's unsaved files.
-    func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
+    /// ⌘Q does not go through windowShouldClose: the host asks here, once, about every window's unsaved files.
+    func shouldTerminate() -> NSApplication.TerminateReply {
         let dirty = controllers.flatMap { c in c.ws.open.filter(\.dirty).map { "\(c.ws.projectName)/\($0.path)" } }
         if dirty.isEmpty { return .terminateNow }
         let a = NSAlert()
@@ -318,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         default: return .terminateCancel
         }
     }
-    func applicationWillTerminate(_ n: Notification) { controllers.forEach { $0.ws.shutdown() } }
+    func willTerminate() { controllers.forEach { $0.ws.shutdown() } }
 
     // MARK: menus (act on the focused window)
 
@@ -337,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     @objc func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "LLM Editor",
+            .applicationName: "LLMBar — Editor",
             .credits: NSAttributedString(string: "A light, native code editor with a local assistant.\nPart of AI-llm-Engine · Apache-2.0")])
     }
 
@@ -363,8 +354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if action != nil, action != #selector(NSApplication.terminate(_:)) { i.target = self }
             return i
         }
-        let quit = NSMenuItem(title: "Quit LLM Editor", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        add("LLM Editor", [item("About LLM Editor", #selector(showAbout)), .separator(), quit])
+        let quit = NSMenuItem(title: "Quit LLMBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        add("LLMBar", [item("About LLMBar", #selector(showAbout)), .separator(), quit])
         add("File", [item("New Window…", #selector(newEditorWindow), "n", [.command, .shift]),
                      item("Open Project…", #selector(chooseProject), "o"), .separator(),
                      item("Save", #selector(save), "s"), item("Save All", #selector(saveAll), "s", [.command, .option]),
@@ -389,14 +380,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         add("View", view)
         add("Window", [NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")])
-        NSApp.mainMenu = main
+        menu = main
     }
-}
-
-MainActor.assumeIsolated {
-    let app = NSApplication.shared
-    let delegate = AppDelegate()
-    app.delegate = delegate
-    app.setActivationPolicy(.regular)
-    app.run()
 }

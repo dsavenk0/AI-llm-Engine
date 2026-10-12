@@ -161,10 +161,10 @@ eq((emoji as NSString).substring(from: map.lineStart(3, in: emoji)), "last", "li
 eq(map.lineStart(9, in: emoji), (emoji as NSString).length, "past the end")
 
 // ── paths and backend url
-check(Paths.isInside("/a/b/c.txt", root: "/a/b"), "inside")
-check(!Paths.isInside("/a/bc/c.txt", root: "/a/b"), "sibling with a shared prefix is outside")
-check(Paths.isInside("/a/b/../b/x", root: "/a/b"), "dots are standardised")
-eq(Paths.displayName("src/ui/app.py"), "app.py", "display name")
+check(PathTools.isInside("/a/b/c.txt", root: "/a/b"), "inside")
+check(!PathTools.isInside("/a/bc/c.txt", root: "/a/b"), "sibling with a shared prefix is outside")
+check(PathTools.isInside("/a/b/../b/x", root: "/a/b"), "dots are standardised")
+eq(PathTools.displayName("src/ui/app.py"), "app.py", "display name")
 let u = parseBackendURL("Editor UI for /tmp/x\n  http://127.0.0.1:53114/?token=abc_DEF-123\n")
 check(u?.port == 53114 && u?.token == "abc_DEF-123", "backend url")
 check(parseBackendURL("nothing here") == nil, "no url")

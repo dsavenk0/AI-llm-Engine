@@ -395,7 +395,7 @@ private struct ChatRightPanel: View {
             VStack(spacing: 0) {
                 HStack {
                     Button { ws.activePath = nil } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain)
-                    Text(Paths.displayName(f.path)).bold().lineLimit(1)
+                    Text(PathTools.displayName(f.path)).bold().lineLimit(1)
                     DirtyMark(file: f)
                     Spacer()
                     Button { ws.save() } label: { Image(systemName: "square.and.arrow.down") }.buttonStyle(.plain).help("Save (⌘S)")
@@ -469,7 +469,7 @@ private struct TabButton: View {
     @ObservedObject var ws: Workspace
     var body: some View {
         HStack(spacing: 6) {
-            Text(Paths.displayName(file.path) + (file.dirty ? " ●" : "")).lineLimit(1)
+            Text(PathTools.displayName(file.path) + (file.dirty ? " ●" : "")).lineLimit(1)
             Button { ws.closeFile(file.path) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain)
         }
         .padding(.horizontal, 10).frame(height: 30)

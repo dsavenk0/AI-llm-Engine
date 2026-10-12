@@ -255,7 +255,7 @@ final class Workspace: ObservableObject {
             if let line { f.jumpLine = line }
             return
         }
-        guarded("Open \(Paths.displayName(path))") {
+        guarded("Open \(PathTools.displayName(path))") {
             let r: FileResponse = try await self.backend.get("/api/file?path=\(self.backend.encoded(path))")
             if r.binary == true { self.say("\(path) is a binary file", bad: true); return }
             if r.too_large == true { self.say("\(path) is too large to open", bad: true); return }
@@ -274,7 +274,7 @@ final class Workspace: ObservableObject {
         guard let f = open.first(where: { $0.path == path }) else { return }
         if f.dirty {
             let a = NSAlert()
-            a.messageText = "Discard unsaved changes in \(Paths.displayName(path))?"
+            a.messageText = "Discard unsaved changes in \(PathTools.displayName(path))?"
             a.addButton(withTitle: "Discard"); a.addButton(withTitle: "Cancel")
             if a.runModal() != .alertFirstButtonReturn { return }
         }
@@ -287,7 +287,7 @@ final class Workspace: ObservableObject {
         guard let f = active else { return }
         guarded("Save") {
             _ = try await self.write(f)
-            self.say("Saved \(Paths.displayName(f.path))")
+            self.say("Saved \(PathTools.displayName(f.path))")
             await self.refreshGit()
         }
     }
@@ -313,7 +313,7 @@ final class Workspace: ObservableObject {
     func saveAllAndWait() async -> Bool {
         var ok = true
         for f in open where f.dirty {
-            do { try await write(f) } catch { say("Save \(Paths.displayName(f.path)): \(error.localizedDescription)", bad: true); ok = false }
+            do { try await write(f) } catch { say("Save \(PathTools.displayName(f.path)): \(error.localizedDescription)", bad: true); ok = false }
         }
         await refreshGit()
         return ok
@@ -485,7 +485,7 @@ final class Workspace: ObservableObject {
         let a = NSAlert()
         a.alertStyle = .warning
         a.messageText = paths == nil ? "Discard all \(list.count) changes?"
-                                     : "Discard changes in \(Paths.displayName(list[0]))?"
+                                     : "Discard changes in \(PathTools.displayName(list[0]))?"
         var info = "Modified files go back to the last commit. This cannot be undone."
         if fresh > 0 { info += " \(fresh) new file(s) will be deleted." }
         if unsaved > 0 { info += " Unsaved edits to these files in the editor are lost too." }

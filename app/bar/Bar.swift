@@ -188,6 +188,14 @@ struct Paths {
 
     static let shared: Paths = {
         let fm = FileManager.default
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--llm-root"), i + 1 < args.count {      // a checkout named on the command line
+            return Paths(root: args[i + 1], home: args[i + 1])
+        }
+        if fm.fileExists(atPath: fm.currentDirectoryPath + "/llm.py"),
+           Bundle.main.object(forInfoDictionaryKey: "LLMRoot") == nil {           // run from a checkout, unbundled
+            return Paths(root: fm.currentDirectoryPath, home: fm.currentDirectoryPath)
+        }
         if let repo = Bundle.main.object(forInfoDictionaryKey: "LLMRoot") as? String,
            fm.fileExists(atPath: repo + "/llm.py") {
             return Paths(root: repo, home: repo)  // built from a checkout: share its .venv and config
@@ -198,77 +206,6 @@ struct Paths {
     }()
 
     var config: String { home + "/.llm/config.json" }
-}
-
-/// Opens LLMVoice.app (the voice assistant: speak, hear the model answer), like the editor a separate process
-/// that exists only while it is used.
-enum VoiceLauncher {
-    static let bundleID = "local.llm-engine.voice"
-
-    static func appURL() -> URL? {
-        var candidates: [URL] = []
-        if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("LLMVoice.app")) }
-        candidates.append(URL(fileURLWithPath: Paths.shared.root + "/LLMVoice.app"))
-        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
-    }
-
-    static func open(enginePort: Int, done: @escaping (String?) -> Void) {
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-            running.activate(options: [.activateIgnoringOtherApps])
-            done(nil)
-            return
-        }
-        guard let url = appURL() else {
-            done(L("The voice assistant is not built yet — run ./build-voice.sh (or ./build-app.sh)",
-                   "Голосовой помощник ещё не собран — выполните ./build-voice.sh (или ./build-app.sh)"))
-            return
-        }
-        let cfg = NSWorkspace.OpenConfiguration()
-        cfg.activates = true
-        cfg.arguments = ["--llm-root", Paths.shared.root, "--engine-port", String(enginePort)]
-        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
-            DispatchQueue.main.async { done(error?.localizedDescription) }
-        }
-    }
-}
-
-/// Opens LLMEditor.app (bundled next to this app's resources, or built in the checkout). The editor is a
-/// separate process, started only here on request; if it is already running it opens one more window.
-enum EditorLauncher {
-    static let bundleID = "local.llm-engine.editor"
-
-    static func appURL() -> URL? {
-        var candidates: [URL] = []
-        if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("LLMEditor.app")) }
-        candidates.append(URL(fileURLWithPath: Paths.shared.root + "/LLMEditor.app"))
-        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
-    }
-
-    /// `project` nil = the editor reopens its last project (or asks). Calls back with an error text, or nil.
-    static func open(enginePort: Int, project: String? = nil, done: @escaping (String?) -> Void) {
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-            // already running: one more window in it (it asks which project, or opens `project`)
-            DistributedNotificationCenter.default().postNotificationName(
-                Notification.Name("local.llm-engine.editor.new-window"), object: nil,
-                userInfo: ["root": project ?? ""], deliverImmediately: true)
-            running.activate(options: [.activateIgnoringOtherApps])
-            done(nil)
-            return
-        }
-        guard let url = appURL() else {
-            done(L("The editor is not built yet — run ./build-editor.sh (or ./build-app.sh)",
-                   "Редактор ещё не собран — выполните ./build-editor.sh (или ./build-app.sh)"))
-            return
-        }
-        let cfg = NSWorkspace.OpenConfiguration()
-        cfg.createsNewApplicationInstance = false
-        cfg.activates = true
-        cfg.arguments = ["--llm-root", Paths.shared.root, "--engine-port", String(enginePort)]
-            + (project.map { ["--root", $0] } ?? [])
-        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
-            DispatchQueue.main.async { done(error?.localizedDescription) }
-        }
-    }
 }
 
 enum CLI {
@@ -426,9 +363,7 @@ final class EngineState: ObservableObject {
         }
     }
 
-    func openEditor() {
-        EditorLauncher.open(enginePort: port) { err in if let err { self.message = err } }
-    }
+    func openEditor() { MainActor.assumeIsolated { AppHost.openEditor(project: nil) } }
 
     /// A star on a model (`./llm fav`): the list shows starred ones first, the other apps offer them for switching.
     func setFavorite(_ m: ModelInfo, _ on: Bool) {
@@ -436,9 +371,7 @@ final class EngineState: ObservableObject {
         CLI.run(["fav", m.path, on ? "--on" : "--off"]) { _, _ in self.loadModels() }
     }
 
-    func openVoice() {
-        VoiceLauncher.open(enginePort: port) { err in if let err { self.message = err } }
-    }
+    func openVoice() { MainActor.assumeIsolated { AppHost.openVoice() } }
 
     func command(_ args: [String], label: String, then: (() -> Void)? = nil) {
         busy = label
@@ -938,6 +871,13 @@ struct SettingsTab: View {
                               [("auto", L("System", "Системный")), ("en", "English"), ("ru", "Русский")])
                 labeledPicker(L("Theme", "Тема"), Binding(get: { e.g("theme", "system") }, set: { e.setG("theme", $0); e.loadConfig(); e.onTheme?() }),
                               [("system", L("System", "Системная")), ("dark", L("Dark", "Тёмная")), ("light", L("Light", "Светлая"))])
+                Hint(text: L("One theme for the panel, the editor and the voice chat", "Одна тема для панели, редактора и голосового чата"))
+                toggle(L("Code editor module", "Модуль: редактор кода"),
+                       Binding(get: { AppHost.enabled(.editor) }, set: { AppHost.setEnabled(.editor, $0); e.objectWillChange.send() }),
+                       hint: L("Off: no editor button, no editor window", "Выкл.: нет кнопки редактора и окна редактора"))
+                toggle(L("Voice chat module", "Модуль: голосовой чат"),
+                       Binding(get: { AppHost.enabled(.voice) }, set: { AppHost.setEnabled(.voice, $0); e.objectWillChange.send() }),
+                       hint: L("Off: no voice chat, and the widget's voice button does nothing", "Выкл.: нет голосового чата, кнопка виджета ничего не делает"))
                 toggle(L("Liquid glass background", "Фон «жидкое стекло»"), Binding(get: { e.g("glass", false) }, set: { e.setG("glass", $0) }),
                        hint: L("A lighter, see-through panel that lets the desktop show through. Off by default.",
                                "Более лёгкая прозрачная панель, сквозь которую виден рабочий стол. По умолчанию выключено."))
@@ -1452,6 +1392,7 @@ struct ModelsTab: View {
 
 struct ToolsTab: View {
     @ObservedObject var e: EngineState
+    @State private var connectOpen = false
     var body: some View {
         VStack(spacing: 10) {
             Card {
@@ -1466,24 +1407,44 @@ struct ToolsTab: View {
                      L("Generate an image from text with FLUX on MLX — installs on first use", "Картинка по тексту: FLUX на MLX — ставится при первом запуске")) {
                     CLI.terminal("./llm image || (./llm setup --images && ./llm image)")
                 }
-                tool("chevron.left.forwardslash.chevron.right", L("Code editor", "Редактор кода"),
-                     L("Native editor with the assistant, git, terminal and problems — opens on demand",
-                       "Нативный редактор с ассистентом, git, терминалом и проблемами — открывается по требованию")) {
-                    e.openEditor()
+                if AppHost.enabled(.editor) {
+                    tool("chevron.left.forwardslash.chevron.right", L("Code editor", "Редактор кода"),
+                         L("Native editor with the assistant, git, terminal and problems — a module, opens on demand",
+                           "Нативный редактор с ассистентом, git, терминалом и проблемами — модуль, открывается по требованию")) {
+                        e.openEditor()
+                    }
                 }
-                tool("waveform", L("Voice assistant", "Голосовой помощник"),
-                     L("Speak to the model and hear the answer — a small separate window, opens on demand",
-                       "Говорите с моделью и слушайте ответ — небольшое отдельное окно, открывается по требованию")) {
-                    e.openVoice()
+                if AppHost.enabled(.voice) {
+                    tool("waveform", L("Voice chat", "Голосовой чат"),
+                         L("Quick chat: speak (the default) or type, attach files — a module, opens on demand",
+                           "Быстрый чат: говорите (по умолчанию) или печатайте, прикладывайте файлы — модуль, открывается по требованию")) {
+                        e.openVoice()
+                    }
                 }
-                Menu {
-                    Button("Continue") { e.command(["connect", "continue"], label: "connect continue") }
-                    Button("Kilo Code") { e.command(["connect", "kilo"], label: "connect kilo") }
-                    Button("opencode") { e.command(["connect", "opencode"], label: "connect opencode") }
-                } label: {
-                    toolLabel("puzzlepiece.extension", L("Connect an editor", "Подключить редактор"), "Continue · Kilo Code · opencode")
-                }.menuStyle(.borderlessButton).menuIndicator(.hidden)
+                // an inline list, like the model settings: a Menu in this style lost the row's padding and chevron
+                Button(action: { connectOpen.toggle() }) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "puzzlepiece.extension").font(.system(size: 14)).foregroundColor(HUD.cyan).frame(width: 22)
+                            .shadow(color: HUD.cyan.opacity(0.7), radius: 3)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(L("Connect an editor", "Подключить редактор")).font(.system(size: 13, weight: .medium)).foregroundColor(HUD.text)
+                            Text("Continue · Kilo Code · opencode").font(.system(size: 10)).foregroundColor(HUD.dim).lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: connectOpen ? "chevron.down" : "chevron.right").font(.system(size: 10)).foregroundColor(HUD.dim)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain)
                     .help(L("Writes URL and limits into the editor config (.bak kept)", "Записывает адрес и лимиты в конфиг редактора (копия .bak)"))
+                if connectOpen {
+                    HStack(spacing: 8) {
+                        ForEach([("Continue", "continue"), ("Kilo Code", "kilo"), ("opencode", "opencode")], id: \.0) { name, key in
+                            Button(action: { e.command(["connect", key], label: "connect \(key)") }) {
+                                Text(name).font(HUD.mono(10, .semibold)).lineLimit(1).padding(.horizontal, 10).padding(.vertical, 5)
+                            }.buttonStyle(NeonButton(color: HUD.cyan)).fixedSize()
+                        }
+                        Spacer()
+                    }.padding(.leading, 32)
+                }
                 tool("link", L("Copy API URL", "Скопировать URL API"), e.apiURL) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(e.apiURL, forType: .string)
@@ -1732,11 +1693,20 @@ struct ContentView: View {
                     .font(HUD.mono(10)).tracking(0.6).foregroundColor(e.running ? HUD.cyan : HUD.dim)
             }
             Spacer()
-            Button(action: { e.openEditor() }) {
-                Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 12, weight: .semibold))
-                    .frame(width: 24, height: 22).contentShape(Rectangle())
-            }.buttonStyle(.plain).foregroundColor(HUD.cyan)
-                .help(L("Open the code editor", "Открыть редактор кода"))
+            if AppHost.enabled(.editor) {
+                Button(action: { e.openEditor() }) {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right").font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 22).contentShape(Rectangle())
+                }.buttonStyle(.plain).foregroundColor(HUD.cyan)
+                    .help(L("Open the code editor", "Открыть редактор кода"))
+            }
+            if AppHost.enabled(.voice) {
+                Button(action: { e.openVoice() }) {
+                    Image(systemName: "waveform").font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 22).contentShape(Rectangle())
+                }.buttonStyle(.plain).foregroundColor(HUD.cyan)
+                    .help(L("Open the voice chat", "Открыть голосовой чат"))
+            }
             Button(action: { e.onAbout?() }) {
                 Image(systemName: "info.circle").font(.system(size: 13, weight: .regular)).frame(width: 22, height: 22)
                     .contentShape(Rectangle())
@@ -1813,7 +1783,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     let engine = EngineState()
     let monitor = SystemMonitor()
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    lazy var item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var window: NSWindow?
     var aboutWindow: NSWindow?
     var hosting: NSHostingView<AnyView>?
@@ -1821,8 +1791,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hiddenAt = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        engine.onTheme = { [weak self] in self?.applyTheme() }
+        if AppHost.runModuleFromCommandLine() { return }          // `--module editor|voice …`: a module alone, for tests
+        engine.onTheme = { AppTheme.refresh() }                    // posts .appThemeChanged: every module follows
         engine.onAbout = { [weak self] in self?.showAbout() }
+        NotificationCenter.default.addObserver(forName: .appThemeChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.engine.loadConfig()                              // another module changed the theme: follow it
+            self?.applyTheme()
+        }
         applyTheme()
         item.autosaveName = "AI-llm-Engine"  // keeps a ⌘-dragged position across launches
         if let b = item.button {
@@ -1834,6 +1809,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         engine.poll()
         monitor.sample()
         refreshIcon()
+        // LLMBar opens expanded: a menu-bar app with no visible sign it started is easy to take for "nothing
+        // happened" (and the icon may sit under the notch). A launch from a link brings its own window instead.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, !AppHost.openedByLink, !self.uiVisible else { return }
+            self.reveal()
+        }
         // slow poll for the status icon; full sampling only while the UI is visible
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -1980,19 +1961,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if hasVisibleWindows { return true }                       // a module window is up: just bring it forward
         reveal()
         return false
     }
+
+    /// `llmbar://voice | editor?root=… | cli | toggle` — the widget's links, `./llm ui`, other apps.
+    func application(_ app: NSApplication, open urls: [URL]) {
+        for u in urls { AppHost.handle(u) }
+    }
+
+    /// ⌘Q asks once about the editor's unsaved files.
+    func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
+        EditorModule.shared.hasWindows ? EditorModule.shared.shouldTerminate() : .terminateNow
+    }
+
+    func applicationWillTerminate(_ n: Notification) { EditorModule.shared.willTerminate() }
 }
 
-/// A menu-bar app has no menu bar of its own, and key equivalents (⌘V, ⌘C, ⌘X, ⌘A, ⌘Z) are looked up in the
-/// main menu: without an Edit menu a text field cannot paste. The menu is never shown, it only routes keys.
-func installEditMenu() {
+/// The menu shown while no editor window is key. A menu-bar app has no menu bar of its own, and key equivalents
+/// (⌘V, ⌘C, ⌘X, ⌘A, ⌘Z) are looked up in the main menu: without an Edit menu a text field cannot paste. With the
+/// voice window open it also carries ⌘M / ⌘W.
+func makeBaseMenu() -> NSMenu {
     let main = NSMenu()
     let appItem = NSMenuItem()
     main.addItem(appItem)
     let appMenu = NSMenu()
-    appMenu.addItem(withTitle: L("Quit", "Выйти"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appMenu.addItem(withTitle: L("Quit LLMBar", "Выйти из LLMBar"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     appItem.submenu = appMenu
 
     let editItem = NSMenuItem()
@@ -2007,12 +2002,12 @@ func installEditMenu() {
     edit.addItem(withTitle: L("Paste", "Вставить"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
     edit.addItem(withTitle: L("Select All", "Выбрать всё"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
     editItem.submenu = edit
-    NSApp.mainMenu = main
-}
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-installEditMenu()
-app.run()
+    let winItem = NSMenuItem()
+    main.addItem(winItem)
+    let win = NSMenu(title: L("Window", "Окно"))
+    win.addItem(withTitle: L("Minimize", "Свернуть"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+    win.addItem(withTitle: L("Close", "Закрыть"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    winItem.submenu = win
+    return main
+}

@@ -105,7 +105,7 @@ struct OrbWidgetView: View {
     }
 
     private func launcher(_ symbol: String, _ en: String, _ ru: String, _ target: String) -> some View {
-        Link(destination: URL(string: "llmvoice://launch?target=\(target)")!) {
+        Link(destination: URL(string: "llmbar://launch?target=\(target)")!) {
             VStack(spacing: 2) {
                 Image(systemName: symbol).font(.system(size: 14, weight: .semibold))
                 Text((entry.russian ? ru : en).uppercased())
@@ -126,7 +126,7 @@ struct OrbWidgetView: View {
                         Text(entry.model.isEmpty ? (entry.russian ? "МОДЕЛЬ НЕ ВЫБРАНА" : "NO MODEL SELECTED") : entry.model)
                             .lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)
-                        Link(destination: URL(string: "llmvoice://toggle")!) {      // the model on / off, in the background
+                        Link(destination: URL(string: "llmbar://toggle")!) {      // the model on / off, in the background
                             HStack(spacing: 4) {
                                 Image(systemName: "power").font(.system(size: 10, weight: .bold))
                                 Text(toggleLabel.uppercased())
@@ -158,7 +158,7 @@ struct OrbWidgetView: View {
                 }
             }
         }
-        .widgetURL(URL(string: "llmvoice://launch?target=voice"))
+        .widgetURL(URL(string: "llmbar://launch?target=voice"))
         .containerBackground(for: .widget) {
             LinearGradient(colors: [Color(red: 0.02, green: 0.05, blue: 0.08), Color(red: 0.04, green: 0.10, blue: 0.14)],
                            startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -168,7 +168,7 @@ struct OrbWidgetView: View {
 
 struct OrbWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "local.llm-engine.voice.widget", provider: OrbProvider()) { OrbWidgetView(entry: $0) }
+        StaticConfiguration(kind: "local.llm-engine.llmbar.widget", provider: OrbProvider()) { OrbWidgetView(entry: $0) }
             .configurationDisplayName("LLM Voice")
             .description("The selected model, a power button that turns it on and off in the background, and the voice chat, editor and terminal — each one loads the model ahead of use.")
             .supportedFamilies([.systemSmall, .systemMedium])
@@ -176,6 +176,6 @@ struct OrbWidget: Widget {
 }
 
 @main
-struct LLMVoiceWidgetBundle: WidgetBundle {
+struct LLMBarWidgetBundle: WidgetBundle {
     var body: some Widget { OrbWidget() }
 }
