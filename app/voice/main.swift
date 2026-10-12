@@ -77,9 +77,9 @@ enum HUD {
     static var panel: Color { lightTheme ? Color.white : Color(red: 0.04, green: 0.07, blue: 0.11) }
     static var text: Color { lightTheme ? Color(red: 0.05, green: 0.09, blue: 0.13) : Color(red: 0.86, green: 0.95, blue: 0.98) }
     static var dim: Color { lightTheme ? Color(red: 0.36, green: 0.43, blue: 0.48) : Color(red: 0.45, green: 0.58, blue: 0.64) }
-    /// Window tint: this is a window people read and type in, so the backdrop must never show through at full
-    /// strength — even at the most transparent setting it stays 55 % tinted (0.55 … 0.90).
-    static var windowShade: Double { 0.55 + (0.85 - Setup.transparency) * (0.35 / 0.70) }
+    /// Window tint over the glass, which already blurs what is behind: 0.25 (most see-through setting) … 0.60 (densest).
+    /// Too low and the desktop reads through the text; too high and the window is just a dark rectangle.
+    static var windowShade: Double { 0.25 + (0.85 - Setup.transparency) * (0.35 / 0.70) }
     /// Card backing, denser than the window (0.22 … 0.62).
     static var cardShade: Double { 0.22 + (0.85 - Setup.transparency) * (0.40 / 0.70) + 0.2 }
     static var blue: Color { lightTheme ? Color(red: 0.10, green: 0.30, blue: 0.85) : Color(red: 0.20, green: 0.55, blue: 1.0) }
