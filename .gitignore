@@ -22,3 +22,12 @@ llama.cpp/
 .venv-images/
 .build-cache/
 docs/LLMBar-*-offline.dmg
+
+# editor / tooling leftovers
+*.fifo
+*.tmp
+*.ui-tmp
+.pytest_cache/
+.mypy_cache/
+node_modules/
+*.log

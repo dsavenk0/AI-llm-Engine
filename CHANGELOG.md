@@ -14,6 +14,19 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Editor remembers its sizes**: the widths of the columns (chats / conversation / files in the chat layout,
+  files / editor / outline+assistant in the editor layout), the height of the bottom panel and of the outline, and
+  the window's size and place are kept between launches (dividers are plain draggable handles that save what you
+  set; a saved place that no longer fits a connected screen is ignored).
+- **Extensions sheet administration**: on/off switches per extension, details (themes, every snippet prefix),
+  update checks, a category filter for the search and a plain "nothing here this editor can use" for extensions made
+  of their own code. Extensions that run their own code are not run by this editor (no foreign extension host).
+- **Voice**: a lookup on the web only happens on a clear request ("найди в интернете…", "search the web…") or a clear
+  sign that the answer changes (today, weather, price, score…) — never for a greeting, and without an extra model
+  call for them.
+- **Editor assistant**: an exact echo of the previous answer is never shown (it is asked again, with a note, then
+  without the copied conversation); a model under ~1 GB gets a short prompt and no tools, with a note, instead of
+  the tool loop it cannot drive.
 - **Editor assistant knows what is open**: the system prompt names the file that is open and the cursor line, and a
   message about "this code" / "check", "fix", "explain"… (EN/RU) with nothing attached sends that file along as the
   usual attachment chip (a small writable file, local model only) — so "проверь код" is about the code on screen
