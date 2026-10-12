@@ -827,14 +827,39 @@ def tail(path, n):
 
 
 # ─────────────────────────── engine ───────────────────────────
+def _python_ok(p):
+    """Is `p` a python >= 3.10? (/usr/bin/python3 is skipped without the Command Line Tools: running it
+    would open the macOS install dialog.)"""
+    if not p or not os.path.exists(p):
+        return False
+    if p == "/usr/bin/python3" and subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+        return False
+    try:
+        v = subprocess.run([p, "-c", "import sys; print(sys.version_info >= (3, 10))"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return v.stdout.strip() == "True"
+
+
 def find_python():
-    """A python3 >= 3.10 for the engine venv (the manager itself runs on 3.9+)."""
-    for p in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3", shutil.which("python3") or "", sys.executable):
-        if p and os.path.exists(p):
-            v = subprocess.run([p, "-c", "import sys; print(sys.version_info >= (3, 10))"], capture_output=True, text=True)
-            if v.stdout.strip() == "True":
-                return p
-    raise SystemExit(T("Python 3.10+ is required for the engine (e.g. brew install python)."))
+    """A python3 >= 3.10 for the engine venv (the manager itself runs on 3.9+). With none on the Mac, a
+    private copy is downloaded once into the data folder — a clean laptop needs nothing installed first."""
+    from engine import pyruntime
+    for p in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3", pyruntime.python_path(DATA),
+              shutil.which("python3") or "", sys.executable):
+        if _python_ok(p):
+            return p
+    print(Y(T("Python 3.10+ was not found — downloading a private copy (about 35 MB, once).")))
+    try:
+        p = pyruntime.install(DATA, log=lambda s: print(DIM("  " + s)))
+    except (pyruntime.PythonInstallError, OSError, urllib.error.URLError, ValueError) as e:
+        raise SystemExit(T("Could not install Python:") + f" {e}\n" +
+                         T("Python 3.10+ is required for the engine (e.g. brew install python)."))
+    if not _python_ok(p):
+        raise SystemExit(T("Python 3.10+ is required for the engine (e.g. brew install python)."))
+    print(G(T("Python installed:") + f" {p}"))
+    return p
 
 
 def setup(compat=False):

@@ -223,7 +223,8 @@ struct Paths {
 }
 
 enum CLI {
-    static func run(_ args: [String], done: @escaping (Int32, String) -> Void) {
+    /// `line` (main queue) gets each finished output line without colour codes — long first-run steps show progress.
+    static func run(_ args: [String], line: ((String) -> Void)? = nil, done: @escaping (Int32, String) -> Void) {
         DispatchQueue.global().async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: Paths.shared.root + "/llm")
@@ -238,7 +239,22 @@ enum CLI {
             p.standardError = pipe
             p.standardInput = FileHandle.nullDevice
             try? p.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            var data = Data(), pending = Data()
+            let handle = pipe.fileHandleForReading
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                data.append(chunk)
+                guard let line = line else { continue }
+                pending.append(chunk)
+                while let nl = pending.firstIndex(where: { $0 == 10 || $0 == 13 }) {
+                    let text = String(decoding: pending[pending.startIndex..<nl], as: UTF8.self)
+                        .replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+                        .trimmingCharacters(in: .whitespaces)
+                    pending.removeSubrange(pending.startIndex...nl)
+                    if !text.isEmpty { DispatchQueue.main.async { line(text) } }
+                }
+            }
             p.waitUntilExit()
             DispatchQueue.main.async { done(p.terminationStatus, String(decoding: data, as: UTF8.self)) }
         }
@@ -280,6 +296,7 @@ final class EngineState: ObservableObject {
     @Published var health: [String: Any]? = nil
     @Published var stats: [String: Any]? = nil
     @Published var busy: String? = nil
+    @Published var progress: String? = nil     // the last line `llm` printed while a command runs (first-run install)
     @Published var message: String? = nil
     @Published var models: [ModelInfo] = []
     @Published var config: [String: Any] = [:]
@@ -296,6 +313,9 @@ final class EngineState: ObservableObject {
         return L("READING PROMPT \(pct)% · \(done)/\(total) tok", "ЧИТАЮ ПРОМПТ \(pct)% · \(done)/\(total) ток")
     }
     var sleeping: Bool { (health?["state"] as? String) == "sleeping" }
+    /// No engine environment yet (a clean Mac): the first START creates it — and downloads Python if the
+    /// Mac has none that is new enough.
+    var needsSetup: Bool { !FileManager.default.fileExists(atPath: Paths.shared.home + "/.venv/bin/python") }
     var port: Int { config["port"] as? Int ?? 8090 }
     var apiURL: String { "http://localhost:\(port)/v1" }
 
@@ -401,8 +421,10 @@ final class EngineState: ObservableObject {
     func command(_ args: [String], label: String, then: (() -> Void)? = nil) {
         busy = label
         message = nil
-        CLI.run(args) { code, out in
+        progress = nil
+        CLI.run(args, line: { l in self.progress = l }) { code, out in
             self.busy = nil
+            self.progress = nil
             if code != 0 {
                 let tail = out.split(separator: "\n").suffix(3).joined(separator: "\n")
                 self.message = L("llm \(label) failed: ", "llm \(label): ошибка: ") + tail
@@ -1714,10 +1736,17 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text((e.health?["model"] as? String) ?? e.models.first(where: { $0.path == e.modelPath })?.name ?? L("No model", "Нет модели"))
                     .font(.system(size: 13, weight: .semibold)).foregroundColor(HUD.text).lineLimit(1)
-                Text(e.busy.map { L("EXEC llm \($0)…", "ВЫПОЛНЯЮ llm \($0)…") }
+                Text(e.busy.map { b in
+                        e.progress ?? (e.needsSetup && b == "start"
+                                       ? L("FIRST LAUNCH · installing the engine…", "ПЕРВЫЙ ЗАПУСК · ставлю движок…")
+                                       : L("EXEC llm \(b)…", "ВЫПОЛНЯЮ llm \(b)…")) }
                      ?? e.prefillText
-                     ?? (e.sleeping ? L("SLEEPING · wakes on request", "СПИТ · проснётся по запросу") : (e.running ? e.apiURL : L("OFFLINE", "НЕ В СЕТИ"))))
+                     ?? (e.sleeping ? L("SLEEPING · wakes on request", "СПИТ · проснётся по запросу") : (e.running ? e.apiURL
+                        : (e.needsSetup ? L("FIRST LAUNCH · START installs the engine (needs network)",
+                                            "ПЕРВЫЙ ЗАПУСК · ЗАПУСК установит движок (нужна сеть)")
+                                        : L("OFFLINE", "НЕ В СЕТИ")))))
                     .font(HUD.mono(10)).tracking(0.6).foregroundColor(e.running ? HUD.cyan : HUD.dim)
+                    .lineLimit(1).truncationMode(.tail)
             }
             Spacer()
             if AppHost.enabled(.editor) {

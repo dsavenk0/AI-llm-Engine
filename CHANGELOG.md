@@ -14,6 +14,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **First launch on a clean Mac**: with no Python 3.10+ (or only an outdated one) the manager downloads a private
+  CPython (python-build-standalone, ~35 MB, SHA-256 checked) into the data folder, then creates the engine environment.
+  The panel says "FIRST LAUNCH" and shows the install progress instead of a silent wait.
 - **Chat history in the terminal, shared with the editor**: `llm chat` saves every conversation per project in the
   same file the editor uses; `/history`, `/open <N>`, `/rename <N> <title>`, `/delete <N>` and `/new` list, continue,
   rename and delete chats, and a chat started in the editor continues in the terminal and back.

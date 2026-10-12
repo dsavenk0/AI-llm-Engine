@@ -99,7 +99,7 @@ PLIST
   <array><string>$LLM_HOME_DIR/.llm/</string></array>
 </dict></plist>
 PLIST
-  codesign --force --sign - --entitlements "$TMP/widget.entitlements" "$WIDGET" >/dev/null 2>&1 || true
+  codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" --entitlements "$TMP/widget.entitlements" "$WIDGET" >/dev/null 2>&1 || true
 else
   echo "  (the desktop widget was not built: $(tail -1 "$TMP/widget.log"))"
   rm -rf "$APP/Contents/PlugIns"
@@ -117,7 +117,7 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 echo "▸ Ad-hoc signing…"
-codesign --force --sign - "$APP"
+codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" "$APP"   # ad-hoc by default; a stable identity keeps the microphone permission across rebuilds
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
 rm -rf "$FINAL"
