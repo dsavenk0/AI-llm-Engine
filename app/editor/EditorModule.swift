@@ -182,7 +182,10 @@ final class EditorModule: NSObject, NSMenuItemValidation {
     /// The window that has the focus (or the newest one).
     var current: EditorWindowController? { controllers.first { $0.window?.isKeyWindow == true } ?? controllers.last }
 
-    func remove(_ c: EditorWindowController) { controllers.removeAll { $0 === c } }
+    func remove(_ c: EditorWindowController) {
+        controllers.removeAll { $0 === c }
+        AppHost.windowsChanged()                           // the last window gone: back to a menu-bar app
+    }
 
     /// `--snapshot out.png [--layout ide|chat] [--open-file rel] [--theme light|dark] [--bottom tab] [--size WxH] [--resize WxH]`: renders the
     /// window's own view hierarchy to a PNG (no screen-recording permission needed) and quits. For checking the

@@ -24,15 +24,38 @@ enum AppHost {
     static func openEditor(project: String?) {
         guard enabled(.editor) else { return }
         install()
+        becomeRegular()
         EditorModule.shared.open(project: project)
-        windowsChanged()
+        activate()
     }
 
     static func openVoice(listen: Bool = true) {
         guard enabled(.voice) else { return }
         install()
+        becomeRegular()
         VoiceModule.shared.show(listen: listen)
-        windowsChanged()
+        activate()
+    }
+
+    /// A menu-bar app turns into an ordinary one *before* its window appears; done after, the system keeps showing
+    /// the previous app's menu bar (Finder's) over a window that is already on screen.
+    private static func becomeRegular() {
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+    }
+
+    /// Brings the app (and its menu bar) to the front — twice, because the first request is made while the policy
+    /// change is still settling — and puts the menu that belongs to the key window in place.
+    static func activate() {
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NSApp.activate(ignoringOtherApps: true)
+            if let w = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) { mainMenu(for: w) }
+        }
+    }
+
+    private static func mainMenu(for w: NSWindow) {
+        if EditorModule.shared.owns(w) { NSApp.mainMenu = EditorModule.shared.mainMenu }
+        else { NSApp.mainMenu = baseMenu }
     }
 
     static func openTerminal(_ command: String = "./llm") { CLI.terminal(command) }
@@ -85,8 +108,7 @@ enum AppHost {
     static func windowsChanged() {
         DispatchQueue.main.async {
             let any = EditorModule.shared.hasWindows || VoiceModule.shared.isOpen
-            NSApp.setActivationPolicy(any ? .regular : .accessory)
-            if any { NSApp.activate(ignoringOtherApps: true) }
+            if any { becomeRegular(); activate() } else { NSApp.setActivationPolicy(.accessory) }
         }
     }
 
@@ -96,8 +118,7 @@ enum AppHost {
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { n in
             MainActor.assumeIsolated {
                 guard let w = n.object as? NSWindow else { return }
-                if EditorModule.shared.owns(w) { NSApp.mainMenu = EditorModule.shared.mainMenu }
-                else if VoiceModule.shared.owns(w) || w is PanelWindow { NSApp.mainMenu = baseMenu }
+                if EditorModule.shared.owns(w) || VoiceModule.shared.owns(w) || w is PanelWindow { mainMenu(for: w) }
             }
         }
     }
