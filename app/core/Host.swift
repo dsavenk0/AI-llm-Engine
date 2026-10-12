@@ -37,6 +37,10 @@ enum AppHost {
 
     static func openTerminal(_ command: String = "./llm") { CLI.terminal(command) }
 
+    /// The engine panel (the menu-bar window), brought forward.
+    static func openPanel() { bar?.reveal() }
+    static weak var bar: AppDelegate?
+
     /// The model on or off, in the background — what the widget's power button asks for.
     static func toggleModel() {
         Task { await VoiceModule.shared.voice.toggleModelInBackground() }
@@ -102,6 +106,9 @@ enum AppHost {
         baseMenu = makeBaseMenu()
         NSApp.mainMenu = baseMenu
     }
+
+    /// The base menu again (Voice, the panel): used when an editor window stops being key.
+    static var currentBaseMenu: NSMenu? { baseMenu }
 
     // MARK: development and tests
 

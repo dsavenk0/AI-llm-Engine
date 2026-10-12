@@ -321,15 +321,34 @@ final class EditorModule: NSObject, NSMenuItemValidation {
     @objc func toggleLayout() { if let ws = current?.ws { ws.mode = ws.mode == .chat ? .ide : .chat } }
     @objc func newChat() { current?.chat.newChat(); current?.ws.mode = .chat }
     @objc func togglePanel() { current?.ws.bottomVisible.toggle() }
-    @objc func showTerminal() { current?.ws.showPanel("terminal") }
+    @objc func showTerminal() {
+        if !ModuleSettings.shared.isOn(.terminal) { ModuleSettings.shared.toggle(.terminal) }
+        current?.ws.showPanel("terminal")
+    }
     @objc func showProblems() { current?.ws.showPanel("problems") }
+    @objc func showBrowser() {                                  // the opt-in Preview module: switching it on shows it
+        if !ModuleSettings.shared.isOn(.preview) { ModuleSettings.shared.toggle(.preview) }
+        current?.ws.showPanel("preview")
+    }
+    @objc func showFiles() {
+        guard let c = current else { return }
+        c.ws.mode = .ide
+        c.ws.leftTab = 0
+    }
+    @objc func showChanges() {
+        guard let c = current else { return }
+        if !ModuleSettings.shared.isOn(.git) { ModuleSettings.shared.toggle(.git) }
+        c.ws.mode = .ide
+        c.ws.leftTab = 1
+    }
+    @objc func toggleStatusBar() { ViewPrefs.shared.statusBar.toggle() }
+    @objc func zoomIn() { ViewPrefs.shared.zoom += 0.1 }
+    @objc func zoomOut() { ViewPrefs.shared.zoom -= 0.1 }
+    @objc func zoomReset() { ViewPrefs.shared.zoom = 1.0 }
+    @objc func openVoiceChat() { AppHost.openVoice() }
+    @objc func openPanel() { AppHost.openPanel() }
     @objc func toggleModule(_ sender: NSMenuItem) {
         if let m = sender.representedObject as? ModuleID { ModuleSettings.shared.toggle(m) }
-    }
-    @objc func showAbout() {
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "LLMBar — Editor",
-            .credits: NSAttributedString(string: "A light, native code editor with a local assistant.\nPart of AI-llm-Engine · Apache-2.0")])
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -337,11 +356,16 @@ final class EditorModule: NSObject, NSMenuItemValidation {
             item.state = ModuleSettings.shared.isOn(m) ? .on : .off
             return m != .files
         }
+        if item.action == #selector(toggleStatusBar) { item.state = ViewPrefs.shared.statusBar ? .on : .off }
+        if item.action == #selector(zoomIn) { return ViewPrefs.shared.zoom < 2.0 }
+        if item.action == #selector(zoomOut) { return ViewPrefs.shared.zoom > 0.7 }
         if item.action == #selector(save) || item.action == #selector(closeTab) { return current?.ws.active != nil }
         if item.action == #selector(chooseProject) || item.action == #selector(newChat) { return current != nil }
         return true
     }
 
+    /// App · File · Edit · View · Window · Help — the same set of menus a Mac editor has, so nothing a person
+    /// looks for in the menu bar is missing. Edit is titled "Edit" so the system adds Autofill, Dictation and Emoji.
     private func buildMenus() {
         let main = NSMenu()
         func add(_ title: String, _ items: [NSMenuItem]) {
@@ -351,35 +375,51 @@ final class EditorModule: NSObject, NSMenuItemValidation {
         func item(_ title: String, _ action: Selector?, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
             let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
             i.keyEquivalentModifierMask = mods
-            if action != nil, action != #selector(NSApplication.terminate(_:)) { i.target = self }
+            if action != nil { i.target = self }
             return i
         }
-        let quit = NSMenuItem(title: "Quit LLMBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        add("LLMBar", [item("About LLMBar", #selector(showAbout)), .separator(), quit])
-        add("File", [item("New Window…", #selector(newEditorWindow), "n", [.command, .shift]),
-                     item("Open Project…", #selector(chooseProject), "o"), .separator(),
+        main.addItem(AppMenus.applicationMenu())
+        add("File", [item("New Chat", #selector(newChat), "n"),
+                     item("New Window", #selector(newEditorWindow), "n", [.command, .shift]),
+                     item("Open Folder…", #selector(chooseProject), "o"), .separator(),
+                     item("New Terminal", #selector(showTerminal)),
+                     item("New Browser", #selector(showBrowser)), .separator(),
                      item("Save", #selector(save), "s"), item("Save All", #selector(saveAll), "s", [.command, .option]),
-                     item("Close Tab", #selector(closeTab), "w"), .separator(), item("New Chat", #selector(newChat), "n")])
-        let edit: [NSMenuItem] = [
+                     item("Close Tab", #selector(closeTab), "w"), .separator(),
+                     item("Open Voice Chat", #selector(openVoiceChat)),
+                     item("Open LLMBar Panel", #selector(openPanel))])
+        add("Edit", [
             NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"),
-            NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"), .separator(),
+            { let r = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+              r.keyEquivalentModifierMask = [.command, .shift]; return r }(), .separator(),
             NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"),
             NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"),
             NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
+            .separator(),
             NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"),
-        ]
-        add("Edit", edit)
-        var view = [item("Switch Chat / Editor", #selector(toggleLayout), "e"),
-                    item("Show / Hide Panel", #selector(togglePanel), "j"),
+        ])
+        var view = [item("Chat ⇄ Editor", #selector(toggleLayout), "e"),
+                    item("Files", #selector(showFiles), "e", [.command, .shift]),
+                    item("Changes", #selector(showChanges), "g", [.control, .shift]),
+                    item("Browser", #selector(showBrowser), "b", [.command, .shift]),
+                    item("Terminal", #selector(showTerminal), "`", .control),
                     item("Problems", #selector(showProblems), "m", [.command, .shift]),
-                    item("Terminal", #selector(showTerminal), "`", .control), .separator()]
+                    item("Show / Hide Panel", #selector(togglePanel), "j"), .separator(),
+                    item("Status Bar", #selector(toggleStatusBar)), .separator(),
+                    item("Zoom In", #selector(zoomIn), "+"), item("Zoom Out", #selector(zoomOut), "-"),
+                    item("Reset Zoom", #selector(zoomReset), "0"), .separator()]
+        let modulesItem = NSMenuItem(title: "Modules", action: nil, keyEquivalent: "")
+        let modulesMenu = NSMenu(title: "Modules")
         for m in ModuleID.allCases {
             let i = item(m.title, #selector(toggleModule(_:)))
             i.representedObject = m
-            view.append(i)
+            modulesMenu.addItem(i)
         }
+        modulesItem.submenu = modulesMenu
+        view.append(modulesItem)
         add("View", view)
-        add("Window", [NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")])
+        main.addItem(AppMenus.windowMenu())
+        main.addItem(AppMenus.helpMenu())
         menu = main
     }
 }

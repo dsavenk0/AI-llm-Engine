@@ -65,6 +65,19 @@ enum HUD {
     }
 }
 
+/// "Is the model on?" — a filled dot while it is, an empty ring while it is not.
+struct StateDot: View {
+    var active: Bool
+    var color: Color
+    var size: CGFloat = 8
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(color.opacity(0.75), lineWidth: 1.3).opacity(active ? 0 : 1)
+            Circle().fill(color).shadow(color: color.opacity(HUD.glow), radius: 3).opacity(active ? 1 : 0)
+        }.frame(width: size, height: size)
+    }
+}
+
 /// Hairline-framed glass card. In Liquid Glass mode the backing is a flat tint whose density follows
 /// the transparency slider (a graded fill with a sheen looked worse than a plain tone).
 struct Card<Content: View>: View {
@@ -1243,8 +1256,7 @@ struct ModelsTab: View {
                                     .foregroundColor(m.favorite ? HUD.yellow : HUD.dim)
                             }.buttonStyle(.plain)
                                 .help(m.favorite ? L("Remove from favourites", "Убрать из избранного") : L("Add to favourites", "Добавить в избранное"))
-                            Circle().fill(m.path == e.modelPath ? HUD.phosphor : HUD.track).frame(width: 7, height: 7)
-                                .shadow(color: HUD.phosphor.opacity(m.path == e.modelPath ? HUD.glow : 0), radius: 3)
+                            StateDot(active: m.path == e.modelPath, color: m.path == e.modelPath ? HUD.phosphor : HUD.dim, size: 8)
                             VStack(alignment: .leading, spacing: 1) {
                                 MarqueeText(text: m.name, font: .system(size: 12, weight: .medium), color: HUD.text,
                                             active: hoverRow == m.path)
@@ -1681,9 +1693,9 @@ struct ContentView: View {
     var header: some View {
         HStack(alignment: .center, spacing: 11) {
             ZStack {
-                Circle().fill(statusColor.opacity(0.25)).frame(width: 18, height: 18).blur(radius: 3)
-                Circle().fill(statusColor).frame(width: 8, height: 8).shadow(color: statusColor, radius: 5)
-            }
+                if e.running { Circle().fill(statusColor.opacity(0.25)).frame(width: 18, height: 18).blur(radius: 3) }
+                StateDot(active: e.running, color: statusColor)
+            }.frame(width: 18, height: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text((e.health?["model"] as? String) ?? e.models.first(where: { $0.path == e.modelPath })?.name ?? L("No model", "Нет модели"))
                     .font(.system(size: 13, weight: .semibold)).foregroundColor(HUD.text).lineLimit(1)
@@ -1791,6 +1803,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hiddenAt = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        AppHost.bar = self
         if AppHost.runModuleFromCommandLine() { return }          // `--module editor|voice …`: a module alone, for tests
         engine.onTheme = { AppTheme.refresh() }                    // posts .appThemeChanged: every module follows
         engine.onAbout = { [weak self] in self?.showAbout() }
@@ -1982,17 +1995,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 /// The menu shown while no editor window is key. A menu-bar app has no menu bar of its own, and key equivalents
 /// (⌘V, ⌘C, ⌘X, ⌘A, ⌘Z) are looked up in the main menu: without an Edit menu a text field cannot paste. With the
 /// voice window open it also carries ⌘M / ⌘W.
+@MainActor
 func makeBaseMenu() -> NSMenu {
     let main = NSMenu()
-    let appItem = NSMenuItem()
-    main.addItem(appItem)
-    let appMenu = NSMenu()
-    appMenu.addItem(withTitle: L("Quit LLMBar", "Выйти из LLMBar"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-    appItem.submenu = appMenu
+    main.addItem(AppMenus.applicationMenu())
 
     let editItem = NSMenuItem()
     main.addItem(editItem)
-    let edit = NSMenu(title: L("Edit", "Правка"))
+    let edit = NSMenu(title: "Edit")
     edit.addItem(withTitle: L("Undo", "Отменить"), action: Selector(("undo:")), keyEquivalent: "z")
     let redo = edit.addItem(withTitle: L("Redo", "Повторить"), action: Selector(("redo:")), keyEquivalent: "z")
     redo.keyEquivalentModifierMask = [.command, .shift]
@@ -2003,11 +2013,7 @@ func makeBaseMenu() -> NSMenu {
     edit.addItem(withTitle: L("Select All", "Выбрать всё"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
     editItem.submenu = edit
 
-    let winItem = NSMenuItem()
-    main.addItem(winItem)
-    let win = NSMenu(title: L("Window", "Окно"))
-    win.addItem(withTitle: L("Minimize", "Свернуть"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-    win.addItem(withTitle: L("Close", "Закрыть"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-    winItem.submenu = win
+    main.addItem(AppMenus.windowMenu())
+    main.addItem(AppMenus.helpMenu())
     return main
 }

@@ -122,7 +122,10 @@ struct OrbWidgetView: View {
             if family == .systemMedium {
                 VStack(spacing: 3) {
                     HStack(spacing: 5) {                                      // which model, and whether it is up
-                        Circle().fill(entry.running ? mint : Color.white.opacity(0.35)).frame(width: 6, height: 6)
+                        ZStack {                                           // filled while the model is on, an empty ring off
+                            Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 1.2).opacity(entry.running ? 0 : 1)
+                            Circle().fill(mint).opacity(entry.running ? 1 : 0)
+                        }.frame(width: 8, height: 8)
                         Text(entry.model.isEmpty ? (entry.russian ? "МОДЕЛЬ НЕ ВЫБРАНА" : "NO MODEL SELECTED") : entry.model)
                             .lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)

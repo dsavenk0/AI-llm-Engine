@@ -5,7 +5,7 @@ import SwiftUI
 enum Syntax {
     /// Medium weight: regular strokes of a monospaced face are ~1 px wide on a retina display and read as
     /// washed out once anti-aliased, whatever the colour.
-    static let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+    static var font: NSFont { NSFont.monospacedSystemFont(ofSize: 13 * CGFloat(ViewPrefs.shared.zoom), weight: .medium) }
 
     private static func ns(_ c: (CGFloat, CGFloat, CGFloat)) -> NSColor { NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1) }
 
@@ -239,6 +239,7 @@ struct CodeEditor: NSViewRepresentable {
         func themeChanged() {
             guard let tv = textView else { return }
             let dark = ThemeSettings.shared.isDark
+            tv.font = Syntax.font
             tv.textColor = Syntax.text(dark: dark)
             tv.backgroundColor = Palette.editorNS(isDark: dark)
             tv.enclosingScrollView?.backgroundColor = Palette.editorNS(isDark: dark)

@@ -5,6 +5,27 @@ import SwiftUI
 
 enum LayoutMode: String { case chat, ide }
 
+/// View → Zoom and Status Bar: one setting for every window, kept between runs.
+final class ViewPrefs: ObservableObject {
+    static let shared = ViewPrefs()
+    @Published var zoom: Double {
+        didSet {
+            zoom = min(2.0, max(0.7, (zoom * 10).rounded() / 10))
+            UserDefaults.standard.set(zoom, forKey: "editorZoom")
+            NotificationCenter.default.post(name: .themeChanged, object: nil)       // repaints the text with the new size
+        }
+    }
+    @Published var statusBar: Bool {
+        didSet { UserDefaults.standard.set(statusBar, forKey: "editorStatusBar") }
+    }
+
+    init() {
+        let z = UserDefaults.standard.double(forKey: "editorZoom")
+        zoom = z == 0 ? 1.0 : z
+        statusBar = UserDefaults.standard.object(forKey: "editorStatusBar") as? Bool ?? true
+    }
+}
+
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
@@ -122,6 +143,7 @@ final class Workspace: ObservableObject {
     var onAsk: (() -> Void)?                  // set by the shell: switch to the assistant and focus the composer
     @Published var bottomVisible = false
     @Published var bottomTab = "problems"
+    @Published var leftTab = 0                // 0 Files, 1 Changes (the IDE layout's left column)
     private var terminal: TerminalSession?
 
     /// The shell is created the first time the panel asks for it (and only then started).

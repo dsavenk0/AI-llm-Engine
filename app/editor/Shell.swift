@@ -7,6 +7,7 @@ struct RootView: View {
     @ObservedObject var chat: ChatStore
     @ObservedObject var modules: ModuleSettings
     @ObservedObject private var theme = ThemeSettings.shared
+    @ObservedObject private var prefs = ViewPrefs.shared
 
     var body: some View {
         Group {
@@ -34,8 +35,10 @@ struct RootView: View {
                             BottomPanel(ws: ws, modules: modules).frame(minHeight: 120, idealHeight: 240)
                         }
                     }
-                    Divider()
-                    StatusBar(ws: ws)
+                    if prefs.statusBar {
+                        Divider()
+                        StatusBar(ws: ws)
+                    }
                 }
             }
         }
@@ -161,8 +164,12 @@ private struct Toolbar: View {
                 if let u = ws.remoteURL { Divider(); Text("Now: \(u)") }
             } label: {
                 HStack(spacing: 5) {
-                    Circle().fill(ws.engine == nil ? Palette.magenta : Palette.phosphor).frame(width: 8, height: 8)
-                        .shadow(color: (ws.engine == nil ? Palette.magenta : Palette.phosphor).opacity(0.7), radius: 3)
+                    // filled while the model answers, an empty ring while it is off
+                    ZStack {
+                        Circle().strokeBorder(Palette.magenta, lineWidth: 1.3).opacity(ws.engine == nil ? 1 : 0)
+                        Circle().fill(Palette.phosphor).shadow(color: Palette.phosphor.opacity(0.7), radius: 3)
+                            .opacity(ws.engine == nil ? 0 : 1)
+                    }.frame(width: 8, height: 8)
                     if ws.remoteURL != nil { Image(systemName: "cloud").font(.caption) }
                     if ws.engineBusy != nil { ProgressView().controlSize(.mini) }
                     Text(ws.engineBusy ?? ws.engine.map { ($0.model ?? "model") + ($0.state == "sleeping" ? " · sleeping" : "") }
@@ -421,17 +428,15 @@ private struct IDELayout: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var chat: ChatStore
     @ObservedObject var modules: ModuleSettings
-    @State private var leftTab = 0
-
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
                 if modules.isOn(.git) {
-                    Picker("", selection: $leftTab) { Text("Files").tag(0); Text("Changes").tag(1) }
+                    Picker("", selection: $ws.leftTab) { Text("Files").tag(0); Text("Changes").tag(1) }
                         .pickerStyle(.segmented).labelsHidden().padding(6)
                     Divider()
                 }
-                if leftTab == 0 || !modules.isOn(.git) { FilesModuleView(ws: ws) } else { GitModuleView(ws: ws) }
+                if ws.leftTab == 0 || !modules.isOn(.git) { FilesModuleView(ws: ws) } else { GitModuleView(ws: ws) }
             }.frame(minWidth: 190, idealWidth: 250, maxWidth: 400)
             EditorArea(ws: ws).frame(minWidth: 380)
             if modules.isOn(.outline) || modules.isOn(.chat) {
