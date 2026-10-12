@@ -86,6 +86,30 @@ func runSelfTest(_ ws: Workspace, root: String) {
         ws.askAboutTerminal(term.buffer.text)
         check(ws.draft.contains("pty_42_ok") && ws.draft.contains("terminal"), "terminal output can be sent to the assistant")
 
+        // the pty has a real size and follows the panel; a full-screen program (vim) runs on the alternate screen
+        term.send("stty size\r")
+        for _ in 0..<50 where !term.buffer.text.contains("30 110") { try? await Task.sleep(nanoseconds: 100_000_000) }
+        check(term.buffer.text.contains("30 110"), "the pty starts at the size the screen model has")
+        term.resize(rows: 20, cols: 80)
+        for _ in 0..<20 where !term.buffer.text.contains("20 80") {      // the helper applies it a moment later
+            term.send("stty size\r")
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        check(term.buffer.text.contains("20 80"), "a resize reaches the pty (the helper applies it)")
+        if FileManager.default.isExecutableFile(atPath: "/usr/bin/vim") {
+            term.send("vim -u NONE -N\r")
+            for _ in 0..<80 where !term.buffer.alternateScreen { try? await Task.sleep(nanoseconds: 100_000_000) }
+            check(term.buffer.alternateScreen, "vim switches to the alternate screen")
+            term.send("ihello_vim_text\u{1B}")
+            for _ in 0..<60 where !term.buffer.text.contains("hello_vim_text") { try? await Task.sleep(nanoseconds: 100_000_000) }
+            check(term.buffer.text.contains("hello_vim_text") && term.buffer.lines.count == 20, "vim draws on a grid of the pty's size")
+            term.send(":q!\r")
+            for _ in 0..<80 where term.buffer.alternateScreen { try? await Task.sleep(nanoseconds: 100_000_000) }
+            check(!term.buffer.alternateScreen && !term.buffer.text.contains("hello_vim_text")
+                  && term.buffer.text.contains("pty_42_ok"), "leaving vim restores the scrollback, nothing of the editor stays")
+        }
+        term.resize(rows: 30, cols: 110)
+
         // a second terminal is its own shell: its output does not appear in the first, and closing it keeps the first
         ws.newTerminal()
         let term2 = ws.terminalSession()

@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Editor terminal runs full-screen programs** (vim, less, htop, nano): the screen model has the alternate
+  screen, scroll regions, insert/delete lines, saved cursor, application cursor keys, bracketed paste and DEC line
+  drawing; the pty has a real size that follows the panel (the shell is told with SIGWINCH), F-keys and Page
+  Up/Down are sent. Leaving a program restores the scrollback exactly as it was.
 - **`./llm inspect [<#|name|path>] [--json]`**: what is inside a model, from its headers only (a 27B in a blink,
   no MLX needed) — architecture, layers, heads, vocabulary, context, experts, parameters and bits per weight (PTQ1 /
   TQ1 counted at 128 weights per 28 bytes), storage types, the largest tensor groups with layer numbers folded, and

@@ -7,7 +7,9 @@ import SwiftUI
 final class TerminalSession: ObservableObject {
     @Published var revision = 0
     @Published var running = false
-    let buffer = TermBuffer(maxLines: 2000, screenRows: 30)
+    let buffer = TermBuffer(maxLines: 2000, screenRows: 30, screenCols: 110)
+    private(set) var cols = 110, rows = 30
+    private var resizePipe: String?                       // a named pipe the shell's helper reads "rows cols" from
     private var process: Process?
     private var input: FileHandle?
     private var utf8 = UTF8Stream()
@@ -21,11 +23,29 @@ final class TerminalSession: ObservableObject {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        p.arguments = ["-q", "/dev/null", shell, "-i"]
+        // The pty starts at 0x0: set its size first, then keep a small helper that applies later sizes from the
+        // named pipe (stty on the controlling tty makes the kernel send SIGWINCH to vim, htop, less…). The helper
+        // ends with the shell, or on "q".
+        let fifo = NSTemporaryDirectory() + "llmbar-term-\(getpid())-\(UInt32.random(in: 0...UInt32.max)).fifo"
+        mkfifo(fifo, 0o600)
+        resizePipe = fifo
+        let wrapper = """
+        stty rows "$3" cols "$4" 2>/dev/null
+        ( me=$$; exec 9<>"$2"
+          trap '' TTOU TTIN                  # this helper is a background job: the kernel refuses a window-size
+          while kill -0 $me 2>/dev/null; do  # change from one (EIO) unless the signal is ignored
+            if read -t 1 -u 9 r c; then
+              [ "$r" = q ] && break
+              stty rows "$r" cols "$c" </dev/tty 2>/dev/null
+            fi
+          done ) &
+        exec "$1" -i
+        """
+        p.arguments = ["-q", "/dev/null", "/bin/bash", "-c", wrapper, "bash", shell, fifo, String(rows), String(cols)]
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
-        env["COLUMNS"] = "110"; env["LINES"] = "30"
+        env["COLUMNS"] = String(cols); env["LINES"] = String(rows)
         env["PROMPT_EOL_MARK"] = ""                          // zsh's '%' marker for a missing newline is noise here
         env["LLM_EDITOR_TERMINAL"] = "1"
         p.environment = env
@@ -41,6 +61,7 @@ final class TerminalSession: ObservableObject {
         }
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async { MainActor.assumeIsolated {
+                self?.closePipe()
                 self?.buffer.feed("\r\n[process exited]\r\n")
                 self?.running = false
                 self?.process = nil
@@ -69,9 +90,34 @@ final class TerminalSession: ObservableObject {
 
     func send(_ s: String) { if running, let d = s.data(using: .utf8) { try? input?.write(contentsOf: d) } }
 
+    /// The panel changed size: the screen model and the pty follow, so full-screen programs redraw to fit.
+    func resize(rows r: Int, cols c: Int) {
+        let r = max(5, min(r, 200)), c = max(20, min(c, 400))
+        guard r != rows || c != cols else { return }
+        rows = r; cols = c
+        buffer.resize(rows: r, cols: c)
+        if running, let fifo = resizePipe {
+            let fd = open(fifo, O_WRONLY | O_NONBLOCK)
+            if fd >= 0 {
+                let msg = "\(r) \(c)\n"
+                _ = msg.withCString { write(fd, $0, strlen($0)) }
+                close(fd)
+            }
+        }
+    }
+
+    private func closePipe() {
+        guard let fifo = resizePipe else { return }
+        let fd = open(fifo, O_WRONLY | O_NONBLOCK)
+        if fd >= 0 { _ = "q\n".withCString { write(fd, $0, 2) }; close(fd) }
+        unlink(fifo)
+        resizePipe = nil
+    }
+
     func restart() { stop(); utf8 = UTF8Stream(); start() }
 
     func stop() {
+        closePipe()
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
@@ -81,6 +127,8 @@ final class TerminalSession: ObservableObject {
 
 final class TerminalTextView: NSTextView {
     var onInput: ((String) -> Void)?
+    var applicationCursorKeys = false      // the program asked for ESC O A style arrows (?1)
+    var bracketedPaste = false             // ... and for pasted text to be wrapped (?2004)
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -94,12 +142,26 @@ final class TerminalTextView: NSTextView {
         case 117: out = "\u{1B}[3~"
         case 48: out = flags.contains(.shift) ? "\u{1B}[Z" : "\t"
         case 53: out = "\u{1B}"
-        case 123: out = "\u{1B}[D"
-        case 124: out = "\u{1B}[C"
-        case 125: out = "\u{1B}[B"
-        case 126: out = "\u{1B}[A"
-        case 115: out = "\u{1B}[H"
-        case 119: out = "\u{1B}[F"
+        case 123: out = applicationCursorKeys ? "\u{1B}OD" : "\u{1B}[D"
+        case 124: out = applicationCursorKeys ? "\u{1B}OC" : "\u{1B}[C"
+        case 125: out = applicationCursorKeys ? "\u{1B}OB" : "\u{1B}[B"
+        case 126: out = applicationCursorKeys ? "\u{1B}OA" : "\u{1B}[A"
+        case 115: out = applicationCursorKeys ? "\u{1B}OH" : "\u{1B}[H"
+        case 119: out = applicationCursorKeys ? "\u{1B}OF" : "\u{1B}[F"
+        case 116: out = "\u{1B}[5~"                          // page up
+        case 121: out = "\u{1B}[6~"                          // page down
+        case 122: out = "\u{1B}OP"                           // F1 … F4
+        case 120: out = "\u{1B}OQ"
+        case 99: out = "\u{1B}OR"
+        case 118: out = "\u{1B}OS"
+        case 96: out = "\u{1B}[15~"                          // F5 …
+        case 97: out = "\u{1B}[17~"
+        case 98: out = "\u{1B}[18~"
+        case 100: out = "\u{1B}[19~"
+        case 101: out = "\u{1B}[20~"
+        case 109: out = "\u{1B}[21~"
+        case 103: out = "\u{1B}[23~"
+        case 111: out = "\u{1B}[24~"
         default:
             if flags.contains(.control), let c = e.charactersIgnoringModifiers?.unicodeScalars.first {
                 let v = c.value
@@ -111,7 +173,9 @@ final class TerminalTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        if let s = NSPasteboard.general.string(forType: .string) { onInput?(s.replacingOccurrences(of: "\n", with: "\r")) }
+        guard let s = NSPasteboard.general.string(forType: .string) else { return }
+        let text = s.replacingOccurrences(of: "\n", with: "\r")
+        onInput?(bracketedPaste ? "\u{1B}[200~" + text + "\u{1B}[201~" : text)
     }
     override func insertText(_ string: Any, replacementRange: NSRange) {}      // typing goes through keyDown only
 }
@@ -140,6 +204,15 @@ struct TerminalView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         _ = session.revision
         guard let tv = context.coordinator.tv, let storage = tv.textStorage else { return }
+        tv.applicationCursorKeys = session.buffer.applicationCursorKeys
+        tv.bracketedPaste = session.buffer.bracketedPaste
+        // the character cell, from the font: how many columns and rows the visible area holds
+        let cell = ("M" as NSString).size(withAttributes: [.font: Syntax.font])
+        let lineH = (Syntax.font.ascender - Syntax.font.descender + Syntax.font.leading).rounded(.up)
+        let size = scroll.contentSize
+        if cell.width > 1, lineH > 1, size.width > 100, size.height > 40 {
+            session.resize(rows: Int((size.height - 12) / lineH), cols: Int((size.width - 12) / cell.width))
+        }
         let nearBottom = scroll.contentView.bounds.maxY >= (scroll.documentView?.frame.maxY ?? 0) - 40
         storage.setAttributedString(render(session.buffer))
         if nearBottom { tv.scrollToEndOfDocument(nil) }
@@ -167,14 +240,14 @@ struct TerminalView: NSViewRepresentable {
         for (i, line) in b.lines.enumerated() {
             var j = 0
             while j < line.count {
-                let isCursor = i == b.row && j == b.col
+                let isCursor = b.cursorVisible && i == b.row && j == b.col
                 var run = String(line[j].ch)
                 var k = j + 1
                 while k < line.count, line[k].style == line[j].style, !(i == b.row && k == b.col) { run.append(line[k].ch); k += 1 }
                 out.append(NSAttributedString(string: run, attributes: attrs(line[j].style, cursor: isCursor)))
                 j = k
             }
-            if i == b.row && b.col >= line.count {             // the cursor sits after the last character
+            if i == b.row && b.col >= line.count && b.cursorVisible {      // the cursor sits after the last character
                 let pad = String(repeating: " ", count: b.col - line.count)
                 out.append(NSAttributedString(string: pad, attributes: attrs(TermStyle(), cursor: false)))
                 out.append(NSAttributedString(string: " ", attributes: attrs(TermStyle(), cursor: true)))

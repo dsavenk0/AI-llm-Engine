@@ -307,19 +307,51 @@ final class TermBuffer {
     private(set) var col = 0
     private var style = TermStyle()
     let maxLines: Int
-    let screenRows: Int
+    private(set) var screenRows: Int
+    private(set) var screenCols: Int
+
+    /// Modes a program can switch with ESC [ ? … h / l; the view reads them.
+    private(set) var cursorVisible = true
+    private(set) var applicationCursorKeys = false      // ?1: arrows send ESC O A instead of ESC [ A
+    private(set) var bracketedPaste = false             // ?2004
+    /// Full-screen programs (vim, htop, less) switch to a second screen and back (?1049 / ?47 / ?1047).
+    private(set) var alternateScreen = false
+    private var mainLines: [[TermCell]] = [[]]
+    private var mainRow = 0, mainCol = 0
+    private var scrollTop = 0, scrollBottom = 0          // the scroll region, inclusive (full screen by default)
+    private var savedCursor: (row: Int, col: Int, style: TermStyle)?
+    private var g0Graphics = false, g1Graphics = false, shifted = false   // DEC line drawing (ESC ( 0)
 
     private enum State { case ground, esc, csi, osc, oscEsc, charset }
     private var state = State.ground
     private var params = ""
+    private var charsetSlot: Character = "("
 
-    init(maxLines: Int = 5000, screenRows: Int = 24) {
+    init(maxLines: Int = 5000, screenRows: Int = 24, screenCols: Int = 110) {
         self.maxLines = maxLines
         self.screenRows = screenRows
+        self.screenCols = screenCols
+        scrollBottom = screenRows - 1
     }
 
     var text: String { lines.map { String($0.map(\.ch)) }.joined(separator: "\n") }
     func lineText(_ i: Int) -> String { i < lines.count ? String(lines[i].map(\.ch)) : "" }
+
+    /// The window changed size: the screen model follows (a full-screen program is told by the pty itself).
+    func resize(rows: Int, cols: Int) {
+        let r = max(2, rows), c = max(10, cols)
+        screenRows = r
+        screenCols = c
+        if alternateScreen {
+            if lines.count > r { lines.removeFirst(lines.count - r) }
+            while lines.count < r { lines.append([]) }
+            for k in 0..<lines.count where lines[k].count > c { lines[k].removeSubrange(c...) }
+            row = min(row, r - 1)
+            col = min(col, c - 1)
+        }
+        scrollTop = 0
+        scrollBottom = r - 1
+    }
 
     // MARK: feeding
 
@@ -327,27 +359,50 @@ final class TermBuffer {
         for ch in s.unicodeScalars { step(ch) }
     }
 
+    private static let lineDrawing: [Character: Character] = [
+        "q": "─", "x": "│", "l": "┌", "k": "┐", "m": "└", "j": "┘", "t": "├", "u": "┤", "v": "┴", "w": "┬",
+        "n": "┼", "a": "▒", "`": "◆", "f": "°", "g": "±", "o": "⎺", "s": "⎽", "~": "·", "y": "≤", "z": "≥",
+        "{": "π", "|": "≠", "}": "£", "h": "▒", "p": "⎻", "r": "⎼", "0": "█"]
+
     private func step(_ u: Unicode.Scalar) {
         switch state {
         case .ground:
             switch u {
             case "\u{1B}": state = .esc
-            case "\n": lineFeed()
+            case "\n", "\u{0B}", "\u{0C}": lineFeed()
             case "\r": col = 0
             case "\u{08}": col = max(0, col - 1)
-            case "\t": put(" "); while col % 8 != 0 { put(" ") }
+            case "\t":
+                if alternateScreen { col = min(screenCols - 1, (col / 8 + 1) * 8) }
+                else { put(" "); while col % 8 != 0 { put(" ") } }
+            case "\u{0E}": shifted = true                       // SO: the G1 set
+            case "\u{0F}": shifted = false                      // SI: back to G0
             case "\u{07}", "\u{00}": break
             default:
-                if u.value >= 0x20 && u.value != 0x7F { put(Character(u)) }
+                if u.value >= 0x20 && u.value != 0x7F {
+                    var ch = Character(u)
+                    if (shifted ? g1Graphics : g0Graphics), let g = TermBuffer.lineDrawing[ch] { ch = g }
+                    put(ch)
+                }
             }
         case .esc:
+            state = .ground
             switch u {
             case "[": state = .csi; params = ""
             case "]": state = .osc
-            case "(", ")", "*", "+": state = .charset
-            default: state = .ground                             // ESC =, ESC >, ESC 7/8 …: ignored
+            case "(", ")", "*", "+": state = .charset; charsetSlot = Character(u)
+            case "7": savedCursor = (row, col, style)
+            case "8": restoreCursor()
+            case "M": reverseIndex()
+            case "D": lineFeed()
+            case "E": col = 0; lineFeed()
+            case "c": style = TermStyle(); g0Graphics = false; g1Graphics = false
+            default: break                                       // ESC = / > …: ignored
             }
-        case .charset: state = .ground
+        case .charset:
+            state = .ground
+            let graphics = u == "0"
+            if charsetSlot == "(" { g0Graphics = graphics } else if charsetSlot == ")" { g1Graphics = graphics }
         case .osc:
             if u == "\u{07}" { state = .ground } else if u == "\u{1B}" { state = .oscEsc }
         case .oscEsc: state = .ground
@@ -360,9 +415,16 @@ final class TermBuffer {
 
     // MARK: operations
 
-    private func ensure(row r: Int) { while lines.count <= r { lines.append([]) } }
+    private func ensure(row r: Int) {
+        if alternateScreen { return }                            // a fixed grid
+        while lines.count <= r { lines.append([]) }
+    }
 
     private func lineFeed() {
+        if alternateScreen {
+            if row == scrollBottom { scrollUp(1) } else if row < screenRows - 1 { row += 1 }
+            return
+        }
         row += 1
         ensure(row: row)
         if lines.count > maxLines {
@@ -372,7 +434,38 @@ final class TermBuffer {
         }
     }
 
+    private func reverseIndex() {
+        if alternateScreen {
+            if row == scrollTop { scrollDown(1) } else if row > 0 { row -= 1 }
+        } else { row = max(0, row - 1) }
+    }
+
+    private func scrollUp(_ n: Int) {
+        guard alternateScreen, scrollTop < lines.count else { return }
+        for _ in 0..<max(1, n) {
+            lines.remove(at: scrollTop)
+            lines.insert([], at: min(scrollBottom, lines.count))
+        }
+    }
+
+    private func scrollDown(_ n: Int) {
+        guard alternateScreen, scrollBottom < lines.count else { return }
+        for _ in 0..<max(1, n) {
+            lines.remove(at: scrollBottom)
+            lines.insert([], at: scrollTop)
+        }
+    }
+
+    private func restoreCursor() {
+        guard let s = savedCursor else { return }
+        row = alternateScreen ? min(s.row, screenRows - 1) : s.row
+        col = s.col
+        style = s.style
+        ensure(row: row)
+    }
+
     private func put(_ ch: Character) {
+        if alternateScreen && col >= screenCols { col = 0; lineFeed() }        // autowrap
         ensure(row: row)
         let cell = TermCell(ch: ch, style: style)
         if col < lines[row].count { lines[row][col] = cell }
@@ -391,9 +484,45 @@ final class TermBuffer {
         return clean.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? defaults }
     }
 
+    private func enterAlternate(clear: Bool = true) {
+        guard !alternateScreen else { return }
+        mainLines = lines; mainRow = row; mainCol = col
+        alternateScreen = true
+        lines = Array(repeating: [], count: screenRows)
+        row = 0; col = 0
+        scrollTop = 0; scrollBottom = screenRows - 1
+    }
+
+    private func leaveAlternate() {
+        guard alternateScreen else { return }
+        alternateScreen = false
+        lines = mainLines.isEmpty ? [[]] : mainLines
+        row = min(mainRow, lines.count - 1)
+        col = mainCol
+        mainLines = [[]]
+    }
+
+    private func privateMode(_ on: Bool) {
+        let list = params.dropFirst().split(separator: ";").compactMap { Int($0) }
+        for m in list {
+            switch m {
+            case 1: applicationCursorKeys = on
+            case 25: cursorVisible = on
+            case 2004: bracketedPaste = on
+            case 47, 1047, 1049: if on { enterAlternate() } else { leaveAlternate() }
+            default: break
+            }
+        }
+    }
+
     private func csi(final f: Character) {
-        if params.hasPrefix("?") || params.hasPrefix(">") || params.hasPrefix("=") { return }   // private modes
+        if params.hasPrefix("?") {
+            if f == "h" { privateMode(true) } else if f == "l" { privateMode(false) }
+            return
+        }
+        if params.hasPrefix(">") || params.hasPrefix("=") { return }
         let n = nums()
+        let amount = max(1, n[0])
         switch f {
         case "m": sgr(n)
         case "K":
@@ -405,6 +534,19 @@ final class TermBuffer {
             default: if col < lines[row].count { lines[row].removeSubrange(col...) }
             }
         case "J":
+            if alternateScreen {
+                switch n[0] {
+                case 0:
+                    if col < lines[row].count { lines[row].removeSubrange(col...) }
+                    for r in (row + 1)..<max(row + 1, lines.count) { lines[r] = [] }
+                case 1:
+                    for r in 0..<row { lines[r] = [] }
+                    for i in 0..<min(col + 1, lines[row].count) { lines[row][i] = TermCell(ch: " ", style: TermStyle()) }
+                default:
+                    for r in 0..<lines.count { lines[r] = [] }
+                }
+                return
+            }
             switch n[0] {
             case 0:
                 ensure(row: row)
@@ -418,28 +560,63 @@ final class TermBuffer {
                 }
                 col = 0
             }
-        case "A": row = max(0, row - max(1, n[0]))
-        case "B": row += max(1, n[0]); ensure(row: row)
-        case "C": col += max(1, n[0])
-        case "D": col = max(0, col - max(1, n[0]))
-        case "E": row += max(1, n[0]); ensure(row: row); col = 0
-        case "F": row = max(0, row - max(1, n[0])); col = 0
-        case "G": col = max(0, max(1, n[0]) - 1)
+        case "A": row = max(alternateScreen ? 0 : 0, row - amount)
+        case "B":
+            row += amount
+            if alternateScreen { row = min(row, screenRows - 1) } else { ensure(row: row) }
+        case "C": col = min(alternateScreen ? screenCols - 1 : Int.max / 2, col + amount)
+        case "D": col = max(0, col - amount)
+        case "E": row += amount; if alternateScreen { row = min(row, screenRows - 1) } else { ensure(row: row) }; col = 0
+        case "F": row = max(0, row - amount); col = 0
+        case "G", "`": col = min(alternateScreen ? screenCols - 1 : Int.max / 2, max(0, amount - 1))
+        case "d":                                               // line position absolute
+            row = alternateScreen ? min(screenRows - 1, amount - 1) : screenTop + amount - 1
+            ensure(row: row)
         case "H", "f":
             let r = max(1, n[0]), c = n.count > 1 ? max(1, n[1]) : 1
-            row = screenTop + r - 1
-            ensure(row: row)
-            col = c - 1
+            if alternateScreen {
+                row = min(screenRows - 1, r - 1)
+                col = min(screenCols - 1, c - 1)
+            } else {
+                row = screenTop + r - 1
+                ensure(row: row)
+                col = c - 1
+            }
+        case "r":                                               // DECSTBM: the scroll region
+            guard alternateScreen else { return }
+            let top = max(1, n[0]), bottom = n.count > 1 && n[1] > 0 ? n[1] : screenRows
+            if top < bottom && bottom <= screenRows { scrollTop = top - 1; scrollBottom = bottom - 1 }
+            else { scrollTop = 0; scrollBottom = screenRows - 1 }
+            row = 0; col = 0
+        case "L":                                               // insert lines at the cursor, inside the region
+            guard alternateScreen, row >= scrollTop, row <= scrollBottom else { return }
+            for _ in 0..<min(amount, scrollBottom - row + 1) {
+                lines.remove(at: scrollBottom)
+                lines.insert([], at: row)
+            }
+            col = 0
+        case "M":                                               // delete lines
+            guard alternateScreen, row >= scrollTop, row <= scrollBottom else { return }
+            for _ in 0..<min(amount, scrollBottom - row + 1) {
+                lines.remove(at: row)
+                lines.insert([], at: scrollBottom)
+            }
+            col = 0
+        case "S": scrollUp(amount)
+        case "T": scrollDown(amount)
+        case "s": savedCursor = (row, col, style)
+        case "u": restoreCursor()
         case "P":                                               // delete characters
             ensure(row: row)
-            if col < lines[row].count { lines[row].removeSubrange(col..<min(lines[row].count, col + max(1, n[0]))) }
+            if col < lines[row].count { lines[row].removeSubrange(col..<min(lines[row].count, col + amount)) }
         case "X":                                               // erase characters
             ensure(row: row)
-            for i in col..<min(lines[row].count, col + max(1, n[0])) { lines[row][i] = TermCell(ch: " ", style: TermStyle()) }
+            for i in col..<max(col, min(lines[row].count, col + amount)) { lines[row][i] = TermCell(ch: " ", style: TermStyle()) }
         case "@":                                               // insert blanks
             ensure(row: row)
             if col <= lines[row].count {
-                lines[row].insert(contentsOf: Array(repeating: TermCell(ch: " ", style: style), count: max(1, n[0])), at: col)
+                lines[row].insert(contentsOf: Array(repeating: TermCell(ch: " ", style: style), count: amount), at: col)
+                if alternateScreen && lines[row].count > screenCols { lines[row].removeSubrange(screenCols...) }
             }
         default: break
         }
