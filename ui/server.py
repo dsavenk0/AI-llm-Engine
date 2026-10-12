@@ -44,21 +44,31 @@ class Project:
     def __init__(self, root):
         self.root = os.path.realpath(root)
 
+    SEARCH_SECONDS = 10           # a search that has run this long returns what it has
+
     def search(self, pattern, rel=".", glob=None, limit=200):
         """path:line: text for lines matching a regex (a plain substring when it is not a valid regex)."""
+        return [f"{p}:{n}: {t}" for p, n, t in self.search_hits(pattern, rel, glob, limit)]
+
+    def search_hits(self, pattern, rel=".", glob=None, limit=200):
+        """[(path, line, text)] — structured, so a path that contains a colon is not cut in the wrong place."""
         import fnmatch
         # a quantified group that itself holds a quantifier — (a+)+ , (.*)* , (\\w+\\s*)* — is the classic shape of
         # catastrophic backtracking, and the pattern usually comes from a model: such a pattern is searched for
         # literally instead of being able to hold this server's thread for minutes
-        nested = re.search(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})", pattern)
+        nested = re.search(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})", pattern) \
+            or re.search(r"\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})", pattern)   # (a|aa)+
         try:
             rx = re.compile(re.escape(pattern) if nested else pattern)
         except re.error:
             rx = re.compile(re.escape(pattern))
         out = []
+        deadline = time.time() + self.SEARCH_SECONDS
         for d, dirs, files in os.walk(self.resolve(rel)):
             dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
             for f in sorted(files):
+                if time.time() > deadline:
+                    return out
                 if glob and not fnmatch.fnmatch(f, glob):
                     continue
                 full = os.path.join(d, f)
@@ -70,7 +80,7 @@ class Project:
                     with open(full, encoding="utf-8") as fh:
                         for n, line in enumerate(fh, 1):
                             if rx.search(line[:4000]):          # a minified file's one huge line is not scanned whole
-                                out.append(f"{self.rel(full)}:{n}: {line.rstrip()[:200]}")
+                                out.append((self.rel(full), n, line.rstrip()[:200]))
                                 if len(out) >= limit:
                                     return out
                 except (UnicodeDecodeError, OSError):
@@ -670,8 +680,8 @@ class Handler(BaseHTTPRequestHandler):
         pattern = q.get("q", "")
         if not pattern:
             raise ValueError("empty query")
-        hits = P.search(pattern, q.get("path", "."), q.get("glob"), limit=200)
-        return self._json(200, {"hits": [dict(zip(("path", "line", "text"), h.split(":", 2))) for h in hits]})
+        hits = P.search_hits(pattern, q.get("path", "."), q.get("glob"), limit=200)
+        return self._json(200, {"hits": [{"path": p, "line": n, "text": t} for p, n, t in hits]})
 
     def api_agent_answer(self, P, q, body):
         run = agentloop.RUNS.get(body.get("run", ""))

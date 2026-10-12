@@ -363,6 +363,30 @@ class TestReviewFixes(Base):
         self.assertTrue(Project(self.root).search("class +App", "src"))                   # a normal regex still works
         self.assertTrue(Project(self.root).search(r"(ab)+c|class", "src"))                # a safe group quantifier too
 
+    def test_an_alternation_inside_a_repeated_group_is_searched_literally_too(self):
+        import time
+        self.put("alt.txt", ("a" * 45 + "!\n") * 3 + "see (a|aa)+$ here\n")
+        t0 = time.time()
+        hits = Project(self.root).search("(a|aa)+$", ".")          # exponential as a regex
+        self.assertLess(time.time() - t0, 5)
+        self.assertEqual([h.split(":")[:2] for h in hits], [["alt.txt", "4"]])   # only the line that holds the text
+
+    def test_a_search_stops_at_its_time_budget_with_what_it_has(self):
+        for i in range(40):
+            self.put(f"many/f{i}.txt", "needle\n")
+        p = Project(self.root)
+        p.SEARCH_SECONDS = -1                                        # already over budget
+        self.assertEqual(p.search("needle", "many"), [])
+        p.SEARCH_SECONDS = 10
+        self.assertEqual(len(p.search("needle", "many")), 40)
+
+    def test_search_hits_keep_a_colon_in_a_path_in_the_path(self):
+        self.put("odd:name.txt", "needle here\n")
+        hits = Project(self.root).search_hits("needle", ".")
+        self.assertIn(("odd:name.txt", 1, "needle here"), hits)
+        code, r = self.call("GET", "/api/search?q=needle")
+        self.assertIn({"path": "odd:name.txt", "line": 1, "text": "needle here"}, r["hits"])
+
     def test_a_symlink_inside_the_project_is_still_fine(self):
         self.put("real.txt", "inside\n")
         os.symlink(os.path.join(self.root, "real.txt"), os.path.join(self.root, "alias.txt"))
