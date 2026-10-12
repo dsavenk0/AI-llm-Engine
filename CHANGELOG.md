@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Agent: parallel `delegate`**: one call can ask several workers the same task (`workers`) or hand different
+  jobs to different workers (`jobs`, up to 4); they run at the same time, one confirmation shows every destination
+  (and flags remote ones and command-line workers that may change files), and the answers come back together, one
+  labelled section per worker — a failure of one does not hide the others.
 - **Widget**: the wide widget stars a favourite model, and with two or more favourites a tap on the name switches to
   the next one (`./llm fav --next`; a running engine restarts on it).
 - **Editor: Command Palette** (⇧⌘P, View menu): type a few letters ("zi", "term", "newt") to find any command of the

@@ -194,37 +194,85 @@ def tools(root, workers, allow=lambda what: True):
         return {}
     catalog = "; ".join(f"{n} — {w.get('about') or w['type']}" for n, w in ready.items())
 
-    def delegate(worker, task, files=None):
-        spec = ready.get(worker)
-        if spec is None:
-            return f"error: unknown worker {worker!r}; available: {', '.join(ready)}"
-        if isinstance(files, str):
-            files = [files]
-        try:
-            attach(root, files)            # validate before asking the user anything
-        except (OSError, ValueError) as e:
-            return f"error: {e}"
-        sends = f"send this task to “{worker}”" + (f" with {len(files)} file(s): {', '.join(files)}" if files else "")
+    MAX_JOBS = 4
+
+    def describe_job(job):
+        spec, files = ready[job["worker"]], job["files"]
+        sends = f"send this task to “{job['worker']}”" + (f" with {len(files)} file(s): {', '.join(files)}" if files else "")
         if spec["type"] == "cli":
             sends += f" — runs `{' '.join(map(str, spec.get('command', [])))}` in the workspace and may change files itself"
         elif not is_local_url(spec.get("url", "")):
             sends += f" — leaves this machine ({spec.get('url')}" + (f", key ${spec['key_env']}" if spec.get("key_env") else "") + ")"
-        if not allow(sends + f"\n    task: {task.strip()[:300]}"):
-            return "user declined to delegate"
+        return sends + f"\n    task: {job['task'].strip()[:300]}"
+
+    def run_job(job):
         try:
-            return ask(worker, spec, task, root, files)
+            return ask(job["worker"], ready[job["worker"]], job["task"], root, job["files"])
         except (RuntimeError, OSError, ValueError) as e:
-            return f"error: {worker}: {e}"
+            return f"error: {job['worker']}: {e}"
+
+    def delegate(worker=None, task=None, files=None, workers=None, jobs=None):
+        """One worker, the same task for several workers, or different jobs — run at the same time."""
+        if isinstance(files, str):
+            files = [files]
+        if isinstance(workers, str):
+            workers = [workers]
+        todo = []
+        if jobs:
+            if not isinstance(jobs, list) or not all(isinstance(j, dict) for j in jobs):
+                return "error: jobs must be a list of {worker, task, files}"
+            for j in jobs:
+                f = j.get("files")
+                todo.append({"worker": j.get("worker"), "task": j.get("task") or "", "files": [f] if isinstance(f, str) else f})
+        elif workers:
+            todo = [{"worker": w, "task": task or "", "files": files} for w in workers]
+        elif worker:
+            todo = [{"worker": worker, "task": task or "", "files": files}]
+        if not todo:
+            return "error: name a worker (or workers, or jobs) and a task"
+        if len(todo) > MAX_JOBS:
+            return f"error: at most {MAX_JOBS} workers at once"
+        for job in todo:
+            if job["worker"] not in ready:
+                return f"error: unknown worker {job['worker']!r}; available: {', '.join(ready)}"
+            if not str(job["task"]).strip():
+                return f"error: no task for {job['worker']}"
+            try:
+                attach(root, job["files"])         # validate before asking the user anything
+            except (OSError, ValueError) as e:
+                return f"error: {e}"
+        what = "\n".join(describe_job(j) for j in todo)
+        if len(todo) > 1:
+            what = f"send {len(todo)} tasks at the same time:\n" + what
+            if sum(ready[j["worker"]]["type"] == "cli" for j in todo) > 1:
+                what += "\n  (several command-line workers may change files at the same time)"
+        if not allow(what):
+            return "user declined to delegate"
+        if len(todo) == 1:
+            return run_job(todo[0])
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(todo)) as pool:
+            answers = list(pool.map(run_job, todo))
+        return "\n\n".join(f"## {j['worker']}\n{a}" for j, a in zip(todo, answers))
 
     return {"delegate": ({"type": "function", "function": {
         "name": "delegate",
         "description": "Hand a self-contained sub-task to another model and get its answer back. The worker "
                        "does not see this conversation: write a complete task and list the files it needs. "
                        "Use it for what you do poorly (hard reasoning, a second opinion, review) — not for "
-                       "things you can do yourself. Workers: " + catalog,
+                       "things you can do yourself. To get several opinions at once pass `workers` (the same "
+                       "task to each, up to 4), or `jobs` for different tasks; they run in parallel and the "
+                       "answers come back together, one section per worker. Workers: " + catalog,
         "parameters": {"type": "object", "properties": {
             "worker": {"type": "string", "enum": list(ready)},
+            "workers": {"type": "array", "items": {"type": "string", "enum": list(ready)},
+                        "description": "ask all of these the same task at the same time"},
             "task": {"type": "string", "description": "complete instructions, with all needed context"},
             "files": {"type": "array", "items": {"type": "string"},
-                      "description": "workspace files to attach (max 60 KB total)"}},
-            "required": ["worker", "task"]}}}, delegate)}
+                      "description": "workspace files to attach (max 60 KB total)"},
+            "jobs": {"type": "array", "description": "different tasks for different workers, run at the same time",
+                     "items": {"type": "object", "properties": {
+                         "worker": {"type": "string", "enum": list(ready)}, "task": {"type": "string"},
+                         "files": {"type": "array", "items": {"type": "string"}}},
+                         "required": ["worker", "task"]}}},
+            "required": []}}}, delegate)}

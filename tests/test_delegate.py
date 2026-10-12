@@ -251,6 +251,73 @@ class TestDelegateDetails(Base):
             delegate.ask_cli({"command": [slow]}, "t", self.root, timeout=1)
 
 
+class TestParallel(Base):
+    def setUp(self):
+        super().setUp()
+        self.write_cfg({"a": {"type": "openai", "url": self.url, "model": "ma", "about": "first"},
+                        "b": {"type": "openai", "url": self.url, "model": "mb", "about": "second"},
+                        "c": {"type": "openai", "url": "https://api.example.com/v1", "model": "mc", "key_env": "K_PAR"}})
+        os.environ["K_PAR"] = "x"
+        self.addCleanup(os.environ.pop, "K_PAR", None)
+        self.asked = []
+        self.fn = delegate.tools(self.root, delegate.load(self.root), allow=lambda w: self.asked.append(w) or True)["delegate"][1]
+
+    def test_the_same_task_to_several_workers_comes_back_in_one_labelled_answer(self):
+        out = self.fn(workers=["a", "b"], task="Review this", files=["a.py"])
+        self.assertIn("## a\nANSWER: Review this", out)
+        self.assertIn("## b\nANSWER: Review this", out)
+        self.assertLess(out.index("## a"), out.index("## b"))
+        self.assertEqual(sorted(r["body"]["model"] for r in Fake.seen), ["ma", "mb"])
+        self.assertEqual(len(self.asked), 1)                       # one confirmation for the whole fan-out
+        self.assertIn("2 tasks at the same time", self.asked[0])
+
+    def test_different_jobs_and_one_failure_does_not_hide_the_others(self):
+        out = self.fn(jobs=[{"worker": "a", "task": "task one"}, {"worker": "b", "task": "task two", "files": "a.py"}])
+        self.assertIn("ANSWER: task one", out)
+        self.assertIn("ANSWER: task two", out)
+        Fake.status = 500
+        out = self.fn(workers=["a", "b"], task="t")
+        self.assertEqual(out.count("error: "), 2)
+        self.assertIn("## a\nerror: a:", out)
+
+    def test_they_really_run_at_the_same_time(self):
+        import time
+        started = []
+        orig = delegate.ask
+
+        def slow(name, spec, task, root, files=None):
+            started.append((name, time.time()))
+            time.sleep(0.4)
+            return "done " + name
+        delegate.ask = slow
+        self.addCleanup(setattr, delegate, "ask", orig)
+        t0 = time.time()
+        out = self.fn(workers=["a", "b"], task="t")
+        self.assertLess(time.time() - t0, 0.7)                     # two 0.4 s jobs: ~0.4, not ~0.8
+        self.assertIn("done a", out)
+        self.assertIn("done b", out)
+
+    def test_limits_and_bad_requests_are_refused_before_asking(self):
+        self.assertIn("at most 4", self.fn(workers=["a", "b", "a", "b", "a"], task="t"))
+        self.assertIn("name a worker", self.fn())
+        self.assertIn("unknown worker", self.fn(workers=["a", "zzz"], task="t"))
+        self.assertIn("no task for a", self.fn(jobs=[{"worker": "a", "task": "  "}]))
+        self.assertIn("jobs must be a list", self.fn(jobs=["a"]))
+        self.assertIn("outside the workspace", self.fn(workers=["a"], task="t", files=["../../etc/passwd"]))
+        self.assertEqual((self.asked, Fake.seen), ([], []))
+
+    def test_a_remote_worker_in_the_group_is_flagged_and_a_decline_sends_nothing(self):
+        fn = delegate.tools(self.root, delegate.load(self.root), allow=lambda w: self.asked.append(w) or False)["delegate"][1]
+        self.assertEqual(fn(workers=["a", "c"], task="t"), "user declined to delegate")
+        self.assertIn("leaves this machine", self.asked[-1])
+        self.assertEqual(Fake.seen, [])
+
+    def test_schema_offers_workers_and_jobs(self):
+        props = delegate.tools(self.root, delegate.load(self.root))["delegate"][0]["function"]["parameters"]["properties"]
+        self.assertEqual(props["workers"]["items"]["enum"], ["a", "b", "c"])
+        self.assertIn("jobs", props)
+
+
 class TestAgentWorkers(Base):
     def test_off_by_default_and_toggle(self):
         import agent
