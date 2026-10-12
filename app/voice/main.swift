@@ -177,6 +177,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var state: VoiceState = .idle
     @Published var level: Double = 0          // 0…1, what the orb moves with
     @Published var heard = ""                 // what is being recognised right now
+    @Published var modelLoading = false       // the engine is being started (listening goes on meanwhile)
     @Published var turns: [Turn] = []
     @Published var draft = ""
     @Published var attachments: [Attachment] = []
@@ -203,6 +204,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private let synth = AVSpeechSynthesizer()
     private var pendingUtterances = 0
     private var streamDone = true
+    private var modelTask: Task<Bool, Never>?
     private var speakCurrent = false           // the answer being streamed is read aloud
     private var levelTarget: Double = 0
 
@@ -241,12 +243,12 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// Listening starts at once — the microphone and the recogniser do not need the model — while the model is
+    /// brought up beside it; the question waits for the model only when it has been asked.
     func begin() {
         heard = ""
-        Task {
-            guard await ensureModel() else { return }
-            await startListening()
-        }
+        Task { await startListening() }
+        Task { _ = await ensureModel() }
     }
 
     /// Forget the conversation (what the model sees as history, and what is on the screen).
@@ -303,8 +305,18 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// Starts the model with the `llm` command when nothing answers (it picks the selected model, or the first
     /// one that fits), then waits for it.
     private func ensureModel() async -> Bool {
+        if let running = modelTask { return await running.value }      // one start at a time, however many ask
+        let t = Task { await self.loadModel() }
+        modelTask = t
+        let ok = await t.value
+        modelTask = nil
+        return ok
+    }
+
+    private func loadModel() async -> Bool {
         if await engineAnswers() { return true }
-        state = .starting
+        modelLoading = true
+        defer { modelLoading = false }
         let root = Setup.llmRoot
         await Task.detached {
             let p = Process()
@@ -318,9 +330,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             p.waitUntilExit()
         }.value
         for _ in 0..<5 {
-            if await engineAnswers() { state = .idle; return true }
+            if await engineAnswers() { return true }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
+        stopCapture()
         state = .failed("The model did not start. Open LLMBar and press Start, then try again.")
         return false
     }
@@ -378,7 +391,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 guard let self, self.state == .listening else { return }
                 let quiet = Date().timeIntervalSince(self.lastChange)
                 if !self.heard.isEmpty, quiet > 1.4 { self.finishListening() }
-                else if self.heard.isEmpty, quiet > 9 { self.stopCapture(); self.state = .idle }
+                else if self.heard.isEmpty, quiet > 25 { self.stopCapture(); self.state = .idle }
             }
         }
     }
@@ -422,6 +435,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     private func respond(spoken: Bool) async {
+        state = .thinking
+        guard await ensureModel() else { return }                       // still loading: the question waits for it
         let system = spoken ? Voice.spokenPrompt : Voice.chatPrompt
         let reply = Turn(role: "assistant", text: "", spoken: spoken)
         let history = turns.suffix(12).map { apiMessage($0) }
@@ -622,7 +637,7 @@ struct VoiceView: View {
         switch voice.state {
         case .idle: return (voice.turns.isEmpty ? "SPEAK OR TYPE · CLICK THE SPHERE" : "READY", HUD.dim)
         case .starting: return ("LOADING THE MODEL…", HUD.yellow)
-        case .listening: return ("LISTENING", HUD.cyan)
+        case .listening: return (voice.modelLoading ? "LISTENING · LOADING THE MODEL…" : "LISTENING", HUD.cyan)
         case .thinking: return ("THINKING", HUD.yellow)
         case .speaking: return ("SPEAKING", HUD.phosphor)
         case .failed: return ("PROBLEM", HUD.magenta)
