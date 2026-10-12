@@ -18,8 +18,18 @@ enum Setup {
         return root
     }()
 
+    /// Where `.llm/config.json` and `engine.pid` live: the checkout the app was built from (it shares its config
+    /// with `./llm` and LLMBar), else LLMBar's folder in Application Support.
+    static var home: String = {
+        let a = CommandLine.arguments
+        if let i = a.firstIndex(of: "--llm-home"), i + 1 < a.count { return a[i + 1] }
+        if let env = ProcessInfo.processInfo.environment["LLM_HOME"], !env.isEmpty { return env }
+        if FileManager.default.fileExists(atPath: llmRoot + "/llm.py") { return llmRoot }
+        return NSHomeDirectory() + "/Library/Application Support/LLMBar"
+    }()
+
     private static var userConfig: [String: Any] = {
-        let path = NSHomeDirectory() + "/.llm/config.json"
+        let path = home + "/.llm/config.json"
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
         return o
@@ -32,6 +42,8 @@ enum Setup {
     }()
 
     static var apiKey: String { userConfig["api_key"] as? String ?? "" }
+    /// The model chosen in LLMBar / `./llm use` (a folder or a .gguf file).
+    static var selectedModel: String { userConfig["model"] as? String ?? "" }
     static var theme: String { userConfig["theme"] as? String ?? "system" }
     /// LLMBar's transparency slider (0.15 … 0.85): how much of the desktop shows through the panel.
     static var transparency: Double { min(0.85, max(0.15, userConfig["glass_transparency"] as? Double ?? 0.55)) }
@@ -118,6 +130,15 @@ struct Attachment: Identifiable, Equatable {
     let payload: String                      // the file's text, or a data: URL
 }
 
+/// The model the engine serves (or will serve), and how far its loading into memory has got.
+struct ModelInfo: Equatable {
+    var name = ""
+    var path = ""
+    var bytes: Int64 = 0                      // weights on disk — what loading has to bring into RAM
+    var running = false                       // the engine answers
+    var asleep = false                        // it answers but the weights are unloaded (idle sleep)
+}
+
 /// One line of the conversation.
 struct Turn: Identifiable, Equatable {
     let id = UUID()
@@ -178,6 +199,9 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var level: Double = 0          // 0…1, what the orb moves with
     @Published var heard = ""                 // what is being recognised right now
     @Published var modelLoading = false       // the engine is being started (listening goes on meanwhile)
+    @Published var model = ModelInfo()
+    @Published var loadFraction: Double?      // 0…1 while the weights are being read into memory
+    @Published var loadDetail = ""
     @Published var turns: [Turn] = []
     @Published var draft = ""
     @Published var attachments: [Attachment] = []
@@ -248,6 +272,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     func begin() {
         heard = ""
         Task { await startListening() }
+        Task { await refreshModel() }                              // the model's name is on screen at once
         Task { _ = await ensureModel() }
     }
 
@@ -294,12 +319,78 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // ---- the model
 
-    private func engineAnswers() async -> Bool {
+    private func health() async -> [String: Any]? {
         var r = URLRequest(url: Setup.base.appendingPathComponent("health"))
         r.timeoutInterval = 1.5
-        guard let (_, resp) = try? await URLSession.shared.data(for: r),
-              (resp as? HTTPURLResponse)?.statusCode == 200 else { return false }
-        return true
+        if !Setup.apiKey.isEmpty { r.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+        guard let (data, resp) = try? await URLSession.shared.data(for: r),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func engineAnswers() async -> Bool { await health() != nil }
+
+    /// Weights on disk: the files that have to be read into memory to run the model.
+    nonisolated private static func weightBytes(_ path: String) -> Int64 {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDir) else { return 0 }
+        if !isDir.boolValue { return (try? fm.attributesOfItem(atPath: path)[.size] as? Int64) ?? 0 }
+        var total: Int64 = 0
+        if let e = fm.enumerator(atPath: path) {
+            for case let f as String in e where ["safetensors", "gguf", "bin", "npz"].contains((f as NSString).pathExtension) {
+                total += (try? fm.attributesOfItem(atPath: path + "/" + f)[.size] as? Int64) ?? 0
+            }
+        }
+        return total
+    }
+
+    /// Resident memory of the engine process, in bytes (0 when there is none).
+    nonisolated private static func engineResident(home: String) -> Int64 {
+        guard let text = try? String(contentsOfFile: home + "/.llm/engine.pid", encoding: .utf8),
+              let pid = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return 0 }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-o", "rss=", "-p", String(pid)]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return 0 }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let kb = Int64(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return kb * 1024
+    }
+
+    /// Which model is selected / loaded, from the engine when it answers and from the config when it does not.
+    func refreshModel() async {
+        var info = ModelInfo()
+        let h = await health()
+        info.running = h != nil
+        info.asleep = (h?["state"] as? String) == "sleeping"
+        info.path = (h?["model_path"] as? String) ?? Setup.selectedModel
+        info.name = (h?["model"] as? String) ?? ((info.path as NSString).lastPathComponent)
+        let path = info.path
+        info.bytes = path.isEmpty ? 0 : await Task.detached { Voice.weightBytes(path) }.value
+        model = info
+    }
+
+    /// While the model is read into memory: how many bytes of it the engine process holds so far.
+    private func watchLoading() async {
+        let home = Setup.home
+        while modelLoading, !Task.isCancelled {
+            let rss = await Task.detached { Voice.engineResident(home: home) }.value
+            if model.bytes > 0 {
+                loadFraction = min(0.98, Double(rss) / (Double(model.bytes) * 1.05))
+                loadDetail = String(format: "%.1f / %.1f GB", Double(rss) / 1e9, Double(model.bytes) / 1e9)
+            } else {
+                loadFraction = nil
+                loadDetail = rss > 0 ? String(format: "%.1f GB", Double(rss) / 1e9) : ""
+            }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        loadFraction = nil
+        loadDetail = ""
     }
 
     /// Starts the model with the `llm` command when nothing answers (it picks the selected model, or the first
@@ -314,9 +405,23 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     private func loadModel() async -> Bool {
-        if await engineAnswers() { return true }
+        await refreshModel()
+        if model.running, !model.asleep { return true }
         modelLoading = true
-        defer { modelLoading = false }
+        let watcher = Task { await watchLoading() }
+        defer { modelLoading = false; watcher.cancel(); Task { await self.refreshModel() } }
+        if model.running {                                          // asleep: the next request wakes it — make that one now
+            var r = URLRequest(url: Setup.base.appendingPathComponent("v1/chat/completions"))
+            r.httpMethod = "POST"
+            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if !Setup.apiKey.isEmpty { r.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+            r.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "model": "local", "max_tokens": 1, "temperature": 0,
+                "messages": [["role": "user", "content": "."]]] as [String: Any])
+            r.timeoutInterval = 600
+            _ = try? await URLSession.shared.data(for: r)
+            return true
+        }
         let root = Setup.llmRoot
         await Task.detached {
             let p = Process()
@@ -329,7 +434,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             try? p.run()
             p.waitUntilExit()
         }.value
-        for _ in 0..<5 {
+        for _ in 0..<8 {
             if await engineAnswers() { return true }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
@@ -636,8 +741,8 @@ struct VoiceView: View {
     private var label: (String, Color) {
         switch voice.state {
         case .idle: return (voice.turns.isEmpty ? "SPEAK OR TYPE · CLICK THE SPHERE" : "READY", HUD.dim)
-        case .starting: return ("LOADING THE MODEL…", HUD.yellow)
-        case .listening: return (voice.modelLoading ? "LISTENING · LOADING THE MODEL…" : "LISTENING", HUD.cyan)
+        case .starting: return ("STARTING…", HUD.yellow)
+        case .listening: return ("LISTENING", HUD.cyan)
         case .thinking: return ("THINKING", HUD.yellow)
         case .speaking: return ("SPEAKING", HUD.phosphor)
         case .failed: return ("PROBLEM", HUD.magenta)
@@ -694,6 +799,43 @@ struct VoiceView: View {
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
         .padding(.leading, 78).padding(.trailing, 14).padding(.top, 9)       // the system's window buttons sit at the left
+    }
+
+    /// Which model answers, and — while it is being read into memory — how far that has got.
+    private var modelLine: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu").font(.system(size: 9)).foregroundColor(HUD.dim)
+                if voice.model.name.isEmpty {
+                    Text("NO MODEL SELECTED · OPEN LLMBAR").foregroundColor(HUD.magenta)
+                } else {
+                    Text(voice.model.name).foregroundColor(HUD.text).lineLimit(1).truncationMode(.middle)
+                    if voice.modelLoading {
+                        Text(voice.model.running ? "· WAKING" : "· LOADING").foregroundColor(HUD.yellow)
+                    } else if voice.model.running {
+                        Text(voice.model.asleep ? "· ASLEEP" : "· READY").foregroundColor(voice.model.asleep ? HUD.dim : HUD.phosphor)
+                    } else {
+                        Text("· NOT RUNNING").foregroundColor(HUD.dim)
+                    }
+                    if voice.model.bytes > 0 {
+                        Text(String(format: "· %.1f GB", Double(voice.model.bytes) / 1e9)).foregroundColor(HUD.dim)
+                    }
+                }
+            }
+            .font(HUD.mono(9.5, .semibold)).tracking(0.6)
+            if voice.modelLoading {
+                VStack(spacing: 3) {
+                    if let f = voice.loadFraction {
+                        ProgressView(value: f).progressViewStyle(.linear).tint(HUD.yellow)
+                    } else {
+                        ProgressView().progressViewStyle(.linear).tint(HUD.yellow)
+                    }
+                    Text(voice.loadDetail.isEmpty ? "reading the weights into memory…" : "reading the weights into memory · " + voice.loadDetail)
+                        .font(HUD.mono(9)).foregroundColor(HUD.dim)
+                }
+                .padding(.horizontal, 30)
+            }
+        }
     }
 
     private var transcript: some View {
@@ -789,6 +931,7 @@ struct VoiceView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { voice.toggle() }
             Text(stateText).font(HUD.mono(10, .semibold)).tracking(1.8).foregroundColor(stateColor)
+            modelLine
             transcript
             composer
         }
@@ -944,6 +1087,13 @@ func renderSnapshot(_ args: [String]) {
     default: break
     }
     voice.level = Double(value("--level") ?? "0.5") ?? 0.5
+    voice.model = ModelInfo(name: "Bonsai-2-27B-CRACK-Ternary-JANG", path: "", bytes: 7_600_000_000,
+                            running: !args.contains("--loading"), asleep: false)
+    if args.contains("--loading") {
+        voice.modelLoading = true
+        voice.loadFraction = 0.46
+        voice.loadDetail = "3.6 / 7.6 GB"
+    }
     let w = makeWindow(voice: voice)
     installMenus()
     w.center()

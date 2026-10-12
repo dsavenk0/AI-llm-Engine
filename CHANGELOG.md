@@ -22,12 +22,15 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   MCP / parser / image edge cases. Full suite: 700+ tests.
 
 ### Changed
+- LLM Voice shows the selected model and its state, with a loading bar while the weights are read into memory;
+  it listens the moment it opens, the model starting beside the microphone.
 - Pictures sent to a model that cannot read them are dropped with a one-line note instead of a 400.
 - Request parameters that cannot be used (`max_tokens`, `temperature`, `stop`…) answer 400 before anything runs.
 - `--steer` on the mlx-lm backend is an error at start, not a silent no-op.
 - `build-dmg.sh` writes the installer to `docs/` — the file the site serves.
 
 ### Fixed
+- LLM Voice read LLMBar's settings (theme, transparency, port, key) from the wrong folder and used defaults.
 - Editor: the line-number gutter no longer covers the first characters of every line after the window is resized,
   and a file that ends with a newline no longer gets a phantom line number.
 - The Hugging Face token is no longer forwarded to the CDN a download redirects to.

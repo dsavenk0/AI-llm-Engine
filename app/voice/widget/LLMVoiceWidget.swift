@@ -1,4 +1,5 @@
-// The desktop / Notification Centre widget of LLM Voice: one tap opens the quick chat, which listens at once.
+// The desktop / Notification Centre widget of LLM Voice: one tap opens the quick chat — the app starts the model
+// and listens at once.
 // A WidgetKit extension cannot talk to the engine itself; it only draws the orb and carries the link.
 import SwiftUI
 import WidgetKit
@@ -52,14 +53,12 @@ struct StaticOrb: View {
 }
 
 struct OrbWidgetView: View {
-    @Environment(\.widgetFamily) private var family
-
     var body: some View {
         ZStack {
             StaticOrb()
             VStack {
                 Spacer()
-                Text(family == .systemSmall ? "SPEAK" : "TAP TO SPEAK OR TYPE")
+                Text("LLM VOICE")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .tracking(1.6)
                     .foregroundColor(Color(red: 0.0, green: 0.9, blue: 1.0).opacity(0.9))
@@ -77,8 +76,8 @@ struct OrbWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "local.llm-engine.voice.widget", provider: OrbProvider()) { _ in OrbWidgetView() }
             .configurationDisplayName("LLM Voice")
-            .description("One tap opens the quick chat — it listens at once.")
-            .supportedFamilies([.systemSmall, .systemMedium])
+            .description("One tap opens the quick chat: it starts the model and listens.")
+            .supportedFamilies([.systemSmall])
     }
 }
 

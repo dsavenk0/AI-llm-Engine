@@ -313,10 +313,12 @@ editor and only runs while you use it: LLMBar's tool row has a button for it, an
 supports it), spoken answers use the system voice; the model is the engine's usual one — the app starts the selected
 model (or the first installed one that fits) through the same `llm` command when none is running. It is an ordinary
 window — close and minimise buttons, resizable, *Keep on top* in its menu — in LLMBar's glass style (light, dark or
-system, with the same transparency setting). The first run asks for the microphone and speech-recognition permissions.
+system, with the same transparency setting), and it reads LLMBar's settings (`.llm/config.json`). Under the sphere it
+shows which model is selected and its state (ready / asleep / not running); while the weights are read into memory
+there is a progress bar with the bytes the engine process holds so far, and a sleeping engine is woken on open. The first run asks for the microphone and speech-recognition permissions.
 
-**Desktop widget** (macOS 14+): the app carries a WidgetKit extension — a small orb that opens the chat, already
-listening, on one click (the `llmvoice://listen` link). WidgetKit lists extensions only of apps that live in
+**Desktop widget** (macOS 14+): the app carries a small WidgetKit extension — an orb that, on one click (the
+`llmvoice://listen` link), opens the chat; the app starts the model and listens at once. WidgetKit lists extensions only of apps that live in
 `/Applications`, so `./build-voice.sh --install` builds the app, copies it there and registers the widget; then
 right-click the desktop → *Edit Widgets* → *LLM Voice*. It is signed ad hoc (no developer account), so it works on
 the Mac that built it.
