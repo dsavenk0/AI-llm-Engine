@@ -242,6 +242,74 @@ class TestGemma3(Base):
             gguf_tokenizer.GGUFTokenizer(path, gguf.read_header_full(path))
 
 
+class TestMixtureOfExperts(Base):
+    """Routed feed-forwards (Mixtral = llama + experts, Qwen3-MoE, Granite-MoE with its multipliers and a
+    dense Granite), checked against an independent numpy forward that loops over tokens and experts."""
+    IDS = [5, 40, 7, 257, 12, 99, 3, 260, 14, 15, 60, 61]
+
+    def logits(self, path, ids=None):
+        import mlx.core as mx
+        from engine import dense
+        model, cfg, gf = dense.build(path)
+        out = model(mx.array([ids or self.IDS]), model.make_cache())
+        return model, cfg, np.asarray(out[0].astype(mx.float32))
+
+    def check(self, arch, quant, moe=True, **kw):
+        path = os.path.join(self.dir, f"{arch}-{quant}-{int(moe)}.gguf")
+        values = S.write(path, seed=11, quant=quant, arch=arch, moe=moe)
+        _, cfg, got = self.logits(path)
+        want = S.reference_logits(values, self.IDS, arch=arch, moe=moe, **kw)
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0, err_msg=f"{arch} {quant}")
+        self.assertTrue((got.argmax(-1) == want.argmax(-1)).mean() > 0.8, f"{arch} {quant}")
+        return cfg
+
+    def test_mixtral_style_llama_with_experts(self):
+        from engine import gguf
+        cfg = self.check("llama", "F16")
+        self.assertEqual((cfg.n_expert, cfg.n_expert_used, cfg.expert_norm), (S.N_EXPERT, S.N_USED, True))
+        self.assertEqual(gguf.native_support(os.path.join(self.dir, "llama-F16-1.gguf")), (True, ""))
+
+    def test_experts_stay_quantized_and_match(self):
+        self.check("llama", "Q8_0")
+
+    def test_qwen3_moe_with_qk_norm(self):
+        self.check("qwen3moe", "F16")
+
+    def test_granite_moe_multipliers(self):
+        cfg = self.check("granitemoe", "F16")
+        self.assertEqual((cfg.embed_scale, cfg.residual_scale, cfg.logit_scale), (3.0, 0.5, 2.0))
+        self.assertAlmostEqual(cfg.attn_scale, 0.2, places=6)
+
+    def test_dense_granite(self):
+        cfg = self.check("granite", "F16", moe=False)
+        self.assertEqual(cfg.n_expert, 0)
+
+    def test_the_prefill_sorting_path_equals_token_by_token(self):
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "llama-F16-1.gguf")
+        model, _, _ = dense.build(path)
+        ids = list(range(10, 50))                             # 40 tokens x 2 experts: sorted-by-expert path
+        full = np.asarray(model(mx.array([ids]), model.make_cache())[0].astype(mx.float32))
+        cache = model.make_cache()
+        steps = np.concatenate([np.asarray(model(mx.array([[t]]), cache)[0].astype(mx.float32)) for t in ids])
+        np.testing.assert_allclose(full, steps, atol=0.05)
+
+    def test_refusals_are_named(self):
+        from engine import dense, gguf
+        plain = os.path.join(self.dir, "plain.gguf")
+        S.write(plain, extra_meta={"llama.expert_count": 4, "llama.expert_used_count": 2})   # no expert tensors
+        ok, why = gguf.native_support(plain)
+        self.assertFalse(ok)
+        self.assertIn("experts", why)
+        with self.assertRaises(dense.Unsupported):
+            dense.build(plain)
+        noused = os.path.join(self.dir, "noused.gguf")
+        S.write(noused, arch="llama", moe=True, extra_meta={"llama.expert_used_count": 0})
+        with self.assertRaises(dense.Unsupported):
+            dense.build(noused)
+
+
 class TestTokenizer(Base):
     def setUp(self):
         from engine import gguf, gguf_tokenizer

@@ -1,8 +1,10 @@
 """A dense decoder-only transformer on MLX, built from GGUF weights (no mlx-lm, no llama.cpp).
 
 One implementation covers the Llama family as ggml names it: llama (incl. Mistral, SmolLM2, Llama 3.x),
-qwen2 (incl. DeepSeek-R1-Distill-Qwen, MiMo's base), qwen3, and Gemma 3 (sliding-window layers in a 5:1 pattern,
-two rope bases, a norm after the attention and after the feed-forward, GeGLU). Weights stay in the quantized form of the
+qwen2 (incl. DeepSeek-R1-Distill-Qwen, MiMo's base), qwen3, granite, and Gemma 3 (sliding-window layers in a 5:1 pattern,
+two rope bases, a norm after the attention and after the feed-forward, GeGLU). Mixture-of-experts feed-forwards
+(Mixtral, Qwen3-MoE, Granite-MoE) keep the experts stacked and run only the routed ones with `gather_qmm`.
+Weights stay in the quantized form of the
 file (engine/gguf_tensors.py); the residual stream is float32, matmul inputs and the KV cache float16.
 
 Everything the architectures differ in is data in `Config`, so adding a family is a few lines there plus a
@@ -44,6 +46,9 @@ class Config:
     window_pattern: int = 0              # every `pattern`-th layer is global, the rest local (Gemma 3: 6)
     rope_base_local: float = 0.0         # rope base of the local layers
     rope_scale: float = 1.0              # linear position scaling of the global layers (Gemma 3 4B+: 1/8)
+    n_expert: int = 0                    # mixture of experts: experts per layer and how many a token uses
+    n_expert_used: int = 0
+    expert_norm: bool = True             # the chosen experts' weights are renormalised to sum to 1
     extra: dict = field(default_factory=dict)
 
     def is_local(self, i):
@@ -51,7 +56,8 @@ class Config:
 
 
 # ggml's rope type per architecture (llama.cpp: llama_model_rope_type)
-ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma3": False}
+ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma3": False,
+                    "granite": True, "granitemoe": True, "qwen3moe": False}
 SUPPORTED = tuple(ROPE_TRADITIONAL)
 
 
@@ -85,6 +91,31 @@ class Embedding:
 
     def as_linear(self):
         return QLinear(self.w, self.scales, self.biases, self.bits)
+
+
+class Experts:
+    """The stacked weights of one projection of all experts: [E, rows, packed cols] (+ scales, biases)."""
+
+    def __init__(self, w, scales=None, biases=None, bits=0):
+        self.w, self.scales, self.biases, self.bits = w, scales, biases, bits
+
+    def __call__(self, x, idx, sorted_idx):
+        if self.bits:
+            return mx.gather_qmm(x, self.w, self.scales, self.biases, rhs_indices=idx, transpose=True,
+                                 group_size=32, bits=self.bits, sorted_indices=sorted_idx)
+        return mx.gather_mm(x, self.w.swapaxes(-1, -2), rhs_indices=idx, sorted_indices=sorted_idx)
+
+    @property
+    def nbytes(self):
+        return self.w.nbytes + (self.scales.nbytes + self.biases.nbytes if self.bits else 0)
+
+
+def _gather_sort(x, indices):
+    """Order the (token, expert) pairs by expert so each expert's weights are read once per pass."""
+    *_, m = indices.shape
+    flat = indices.flatten()
+    order = mx.argsort(flat)
+    return x.flatten(0, -3)[order // m], flat[order], mx.argsort(order)
 
 
 class KVCache:
@@ -143,12 +174,20 @@ class Layer:
         self.q, self.k, self.v, self.o = (t(f"attn_{n}.weight") for n in ("q", "k", "v", "output"))
         self.q_norm = tensors.get(f"blk.{i}.attn_q_norm.weight")
         self.k_norm = tensors.get(f"blk.{i}.attn_k_norm.weight")
-        self.gate, self.up, self.down = t("ffn_gate.weight"), t("ffn_up.weight"), t("ffn_down.weight")
+        self.router = tensors.get(f"blk.{i}.ffn_gate_inp.weight")
+        if self.router is not None:                          # a mixture-of-experts layer
+            self.gate_e, self.up_e, self.down_e = (t(f"ffn_{n}_exps.weight") for n in ("gate", "up", "down"))
+            self.gate = self.up = self.down = None
+        else:
+            self.gate, self.up, self.down = t("ffn_gate.weight"), t("ffn_up.weight"), t("ffn_down.weight")
         self.post_attn_norm = tensors.get(f"blk.{i}.post_attention_norm.weight")
         self.post_ffn_norm = tensors.get(f"blk.{i}.post_ffw_norm.weight")
 
     def params(self):
-        return [m for m in (self.q, self.k, self.v, self.o, self.gate, self.up, self.down)]
+        ms = (self.q, self.k, self.v, self.o, self.gate, self.up, self.down)
+        if self.router is not None:
+            ms = (self.q, self.k, self.v, self.o, self.router, self.gate_e, self.up_e, self.down_e)
+        return [m for m in ms]
 
 
 class DenseModel:
@@ -185,6 +224,34 @@ class DenseModel:
 
     def make_cache(self):
         return [KVCache() for _ in self.layers]
+
+    def _moe(self, layer, h):
+        """Route each token to its top-k experts (softmax over all, optionally renormalised over the chosen),
+        run only those, and add their outputs weighted."""
+        c = self.cfg
+        M = self.act
+        R = mx.float32 if self.wide else mx.float16
+        logits = layer.router(h).astype(mx.float32)                        # [B, L, E]
+        probs = mx.softmax(logits, axis=-1)
+        k = c.n_expert_used
+        idx = mx.argpartition(-logits, kth=k - 1, axis=-1)[..., :k]        # [B, L, k]
+        w = mx.take_along_axis(probs, idx, axis=-1)
+        if c.expert_norm:
+            w = w / w.sum(-1, keepdims=True)
+        x = mx.expand_dims(h, (-2, -3))                                    # [B, L, 1, 1, D]
+        order = None
+        do_sort = idx.size >= 64                                           # prefill: group tokens by expert
+        sel = idx
+        if do_sort:
+            x, sel, order = _gather_sort(x, idx)
+        g = layer.gate_e(x, sel, do_sort).astype(R)
+        act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
+        inner = (act * layer.up_e(x, sel, do_sort).astype(R)).astype(M)
+        d = layer.down_e(inner, sel, do_sort)
+        if do_sort:
+            d = mx.unflatten(d[order], 0, idx.shape)
+        d = d.squeeze(-2).astype(R)                                        # [B, L, k, D]
+        return (d * w[..., None].astype(R)).sum(-2)
 
     def _rope(self, x, offset, local=False):
         c = self.cfg
@@ -252,10 +319,13 @@ class DenseModel:
                 o = _rms(o, layer.post_attn_norm, c.eps)
             x = x + st(o) * c.residual_scale
             h = _rms(x, layer.ffn_norm, c.eps).astype(M)
-            g = layer.gate(h).astype(R)
-            act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
-            inner = (act * layer.up(h).astype(R)).astype(M)
-            d = layer.down(inner).astype(R)
+            if layer.router is not None:
+                d = self._moe(layer, h)
+            else:
+                g = layer.gate(h).astype(R)
+                act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
+                inner = (act * layer.up(h).astype(R)).astype(M)
+                d = layer.down(inner).astype(R)
             if layer.post_ffn_norm is not None:
                 d = _rms(d, layer.post_ffn_norm, c.eps)
             x = x + st(d) * c.residual_scale
@@ -280,6 +350,19 @@ def _linear(gf, info, T, bias_info=None):
     return QLinear(mx.array(w), mx.array(s), mx.array(b), bits, bias)
 
 
+def _experts(gf, info, T):
+    """A stacked 3-D expert tensor [E, rows, cols] in MLX's quantized form, same layout per expert."""
+    n_exp, rows, cols = info.shape
+    name = info.type_name
+    if name in ("F32", "F16", "BF16"):
+        return Experts(mx.array(T.load_dense(gf, info)).astype(mx.float16))
+    # the loader works row by row: the stack is E*rows rows of `cols` (the bytes are contiguous in that order)
+    flat = T.TensorInfo(info.name, (cols, n_exp * rows), info.type, info.offset)
+    w, s, b, bits = T.load_matrix(gf, flat)
+    shape = lambda a: (n_exp, rows) + a.shape[1:]
+    return Experts(mx.array(w).reshape(shape(w)), mx.array(s).reshape(shape(s)), mx.array(b).reshape(shape(b)), bits)
+
+
 def build(path, log=print):
     """(DenseModel, Config, GGUFFile). Raises Unsupported for anything this decoder does not do — the caller
     then runs the file on llama.cpp instead."""
@@ -302,9 +385,12 @@ def build(path, log=print):
         raise Unsupported("llama3 rope scaling without its frequency table")
     if g("attention.sliding_window") and arch != "gemma3":
         raise Unsupported("sliding-window attention")
-    if g("expert_count"):
-        raise Unsupported("mixture of experts")
     names = gf.tensors
+    n_expert = int(g("expert_count", 0) or 0)
+    if n_expert and ("blk.0.ffn_gate_exps.weight" not in names or "blk.0.ffn_gate_inp.weight" not in names):
+        raise Unsupported("mixture of experts stored per expert (or with a shared expert)")
+    if any(n.startswith("blk.0.ffn_gate_shexp") or n.startswith("blk.0.ffn_up_shexp") for n in names):
+        raise Unsupported("mixture of experts with a shared expert")
     vocab = names["token_embd.weight"].shape[0]
     cfg = Config(
         arch=arch, n_layer=int(g("block_count")), n_embd=n_embd, n_head=n_head,
@@ -314,6 +400,20 @@ def build(path, log=print):
         qkv_bias="blk.0.attn_q.bias" in names, qk_norm="blk.0.attn_q_norm.weight" in names,
         tied_output="output.weight" not in names, context=int(g("context_length", 4096)),
     )
+    cfg.n_expert, cfg.n_expert_used = n_expert, int(g("expert_used_count", 0) or 0)
+    if n_expert:
+        if not 0 < cfg.n_expert_used <= n_expert:
+            raise Unsupported("the number of experts used per token is missing")
+        # Mixtral and Granite-MoE renormalise the chosen weights; Qwen3-MoE says so in its config
+        cfg.expert_norm = bool(g("expert_weights_norm", True)) if arch != "qwen3moe" else True
+    if g("attention.scale"):                                  # Granite family multipliers
+        cfg.attn_scale = float(g("attention.scale"))
+    if g("embedding_scale"):
+        cfg.embed_scale = float(g("embedding_scale"))
+    if g("residual_scale"):
+        cfg.residual_scale = float(g("residual_scale"))
+    if g("logit_scale"):
+        cfg.logit_scale = float(g("logit_scale"))
     if arch == "gemma3":
         n_layer = cfg.n_layer
         cfg.gelu = cfg.sandwich = True
@@ -342,10 +442,18 @@ def build(path, log=print):
         for n in ("attn_q_norm", "attn_k_norm", "post_attention_norm", "post_ffw_norm"):
             if f"blk.{i}.{n}.weight" in names:
                 tensors[f"blk.{i}.{n}.weight"] = mx.array(T.load_dense(gf, names[f"blk.{i}.{n}.weight"]))
+        moe = f"blk.{i}.ffn_gate_inp.weight" in names
         for n, bn in (("attn_q", "attn_q.bias"), ("attn_k", "attn_k.bias"), ("attn_v", "attn_v.bias"),
                       ("attn_output", None), ("ffn_gate", None), ("ffn_up", None), ("ffn_down", None)):
+            if moe and n.startswith("ffn_"):
+                continue
             bias = names.get(f"blk.{i}.{bn}") if bn else None
             tensors[f"blk.{i}.{n}.weight"] = _linear(gf, names[f"blk.{i}.{n}.weight"], T, bias)
+        if moe:
+            tensors[f"blk.{i}.ffn_gate_inp.weight"] = QLinear(
+                mx.array(T.load_dense(gf, names[f"blk.{i}.ffn_gate_inp.weight"])).astype(mx.float32))
+            for n in ("gate", "up", "down"):
+                tensors[f"blk.{i}.ffn_{n}_exps.weight"] = _experts(gf, names[f"blk.{i}.ffn_{n}_exps.weight"], T)
         if (i + 1) % 8 == 0:
             mx.eval([a for v in tensors.values() for a in (v if isinstance(v, list) else [v])
                      if isinstance(a, mx.array)])

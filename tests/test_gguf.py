@@ -537,7 +537,7 @@ class TestHeaderAndSupportDetails(unittest.TestCase):
     def test_native_support_names_why_not(self):
         self.assertEqual(gguf.native_support(self.write("fine.gguf")), (True, ""))
         ok, why = gguf.native_support(self.write("moe.gguf", extra_meta={"llama.expert_count": 8}))
-        self.assertEqual((ok, why), (False, "mixture of experts"))
+        self.assertEqual((ok, why), (False, "mixture of experts stored per expert"))
         ok, why = gguf.native_support(self.write("spm.gguf", extra_meta={"tokenizer.ggml.model": "llama"}))
         self.assertEqual((ok, why), (False, "tokenizer: SentencePiece with a dummy space prefix"))
         ok, why = gguf.native_support(self.write("pre.gguf", extra_meta={"tokenizer.ggml.pre": "weird"}))

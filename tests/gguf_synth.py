@@ -12,6 +12,8 @@ EPS, ROPE_BASE = 1e-5, 10000.0
 GEMMA_LAYERS = 6                 # five sliding-window layers and the first global one (Gemma 3's 5:1 pattern)
 GEMMA_WINDOW = 4
 GEMMA_GLOBAL_BASE = 100000.0     # the local layers keep the default 10000
+N_EXPERT, N_USED = 4, 2          # mixture-of-experts files: experts per layer, experts per token
+GRANITE_SCALES = {"embedding_scale": 3.0, "residual_scale": 0.5, "logit_scale": 2.0, "attention.scale": 0.2}
 CHATML = ("{% for m in messages %}{{ '<|im_start|>' + m.role + '\n' + m.content + '<|im_end|>\n' }}{% endfor %}"
           "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}")
 
@@ -105,7 +107,7 @@ def q8_0(w):
 
 
 def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_override=None, sharp=False,
-          rope_factors=None):
+          rope_factors=None, moe=False):
     """Write the file; returns {tensor name: the float32 values the file actually represents}."""
     rng = np.random.default_rng(seed)
     tokens, types, merges = vocab()
@@ -134,19 +136,26 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
             "gemma3.attention.key_length": HEAD_DIM, "gemma3.rope.freq_base": GEMMA_GLOBAL_BASE})
         for k in ("tokenizer.ggml.pre", "tokenizer.ggml.merges"):
             meta.pop(k, None)
+    if moe:
+        meta.update({f"{arch}.expert_count": N_EXPERT, f"{arch}.expert_used_count": N_USED})
+    if arch in ("granite", "granitemoe"):
+        meta.update({f"{arch}.{k}": v for k, v in GRANITE_SCALES.items()})
     meta.update(extra_meta or {})
     if rope_factors is not None:
         meta[f"{arch}.rope.scaling.type"] = "llama3"
     values, tensors = {}, []
 
-    def matrix(name, rows, cols, std=0.08):
-        w = (rng.standard_normal((rows, cols)) * std).astype(np.float32)
+    def matrix(name, rows, cols, std=0.08, experts=0):
+        shape = (experts, rows, cols) if experts else (rows, cols)
+        w = (rng.standard_normal(shape) * std).astype(np.float32)
+        dims = (cols, rows, experts) if experts else (cols, rows)
         if quant == "Q8_0":
-            raw, w = q8_0(w)
-            tensors.append((name, (cols, rows), 8, raw))
+            raw, w = q8_0(w.reshape(-1, cols))
+            tensors.append((name, dims, 8, raw))
+            w = w.reshape(shape)
         else:
             w = w.astype(np.float16).astype(np.float32)
-            tensors.append((name, (cols, rows), 1, w.astype(np.float16).tobytes()))
+            tensors.append((name, dims, 1, w.astype(np.float16).tobytes()))
         values[name] = w
 
     def vector(name, n, base=1.0):
@@ -167,16 +176,24 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
         if arch == "qwen2":                                    # Qwen2 has biases on q, k and v
             for n, rows in (("q", HEADS * HEAD_DIM), ("k", KV_HEADS * HEAD_DIM), ("v", KV_HEADS * HEAD_DIM)):
                 vector(f"blk.{i}.attn_{n}.bias", rows, base=0.0)
-        if arch in ("qwen3", "gemma3"):                        # q and k are normalised per head
+        if arch in ("qwen3", "gemma3", "qwen3moe"):            # q and k are normalised per head
             vector(f"blk.{i}.attn_q_norm.weight", HEAD_DIM)
             vector(f"blk.{i}.attn_k_norm.weight", HEAD_DIM)
         if gemma:                                              # norms on the attention and feed-forward outputs
             vector(f"blk.{i}.post_attention_norm.weight", HIDDEN)
             vector(f"blk.{i}.post_ffw_norm.weight", HIDDEN)
         matrix(f"blk.{i}.attn_output.weight", HIDDEN, HEADS * HEAD_DIM)
-        matrix(f"blk.{i}.ffn_gate.weight", FF, HIDDEN)
-        matrix(f"blk.{i}.ffn_up.weight", FF, HIDDEN)
-        matrix(f"blk.{i}.ffn_down.weight", HIDDEN, FF)
+        if moe:
+            router = (rng.standard_normal((N_EXPERT, HIDDEN)) * 0.5).astype(np.float32)
+            tensors.append((f"blk.{i}.ffn_gate_inp.weight", (HIDDEN, N_EXPERT), 0, router.tobytes()))
+            values[f"blk.{i}.ffn_gate_inp.weight"] = router
+            matrix(f"blk.{i}.ffn_gate_exps.weight", FF, HIDDEN, experts=N_EXPERT)
+            matrix(f"blk.{i}.ffn_up_exps.weight", FF, HIDDEN, experts=N_EXPERT)
+            matrix(f"blk.{i}.ffn_down_exps.weight", HIDDEN, FF, experts=N_EXPERT)
+        else:
+            matrix(f"blk.{i}.ffn_gate.weight", FF, HIDDEN)
+            matrix(f"blk.{i}.ffn_up.weight", FF, HIDDEN)
+            matrix(f"blk.{i}.ffn_down.weight", HIDDEN, FF)
     if rope_factors is not None:                              # per-dimension divisors of the rotation frequencies
         w = np.asarray(rope_factors, np.float32)
         tensors.append(("rope_freqs.weight", (len(w),), 0, w.tobytes()))
@@ -202,7 +219,7 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
 
 
 # ───────────────────────────── a plain numpy llama forward, the independent reference ─────────────────────────────
-def reference_logits(values, ids, arch="llama", rope_scale=1.0):
+def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_topk=True):
     """float32 logits [len(ids), V]. llama: ggml's NORM rope (adjacent pairs rotate); qwen2/qwen3: NEOX rope
     (first half with second half), qwen2 adds q/k/v biases, qwen3 an RMSNorm of q and k per head. gemma3: the
     qwen3 layout plus an embedding scaled by sqrt(hidden), norms after attention and feed-forward, GeGLU
@@ -222,7 +239,7 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0):
             inv = inv / values["rope_freqs.weight"]
         ang = pos[:, None] * inv[None, :]
         c, s = np.cos(ang)[:, None, :], np.sin(ang)[:, None, :]
-        if arch == "llama":
+        if arch in ("llama", "granite", "granitemoe"):
             a, b = x[..., 0::2], x[..., 1::2]
             out = np.empty_like(x)
             out[..., 0::2], out[..., 1::2] = a * c - b * s, a * s + b * c
@@ -233,9 +250,14 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0):
 
     T = len(ids)
     pos = np.arange(T)
+    granite = arch in ("granite", "granitemoe")
     x = values["token_embd.weight"][ids]
     if gemma:
         x = x * np.sqrt(HIDDEN)
+    if granite:
+        x = x * GRANITE_SCALES["embedding_scale"]
+    res = GRANITE_SCALES["residual_scale"] if granite else 1.0
+    att_scale = GRANITE_SCALES["attention.scale"] if granite else 1.0 / np.sqrt(HEAD_DIM)
     for i in range(n_layers):
         p = f"blk.{i}."
         local = gemma and i % 6 != 5
@@ -248,7 +270,7 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0):
         q = q.reshape(T, HEADS, HEAD_DIM)
         k = k.reshape(T, KV_HEADS, HEAD_DIM)
         v = v.reshape(T, KV_HEADS, HEAD_DIM)
-        if arch in ("qwen3", "gemma3"):
+        if arch in ("qwen3", "gemma3", "qwen3moe"):
             q, k = rms(q, values[p + "attn_q_norm.weight"]), rms(k, values[p + "attn_k_norm.weight"])
         if gemma:
             base, scale = (ROPE_BASE, 1.0) if local else (GEMMA_GLOBAL_BASE, rope_scale)
@@ -257,7 +279,7 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0):
             q, k = rope(q, pos), rope(k, pos)
         rep = HEADS // KV_HEADS
         k, v = np.repeat(k, rep, axis=1), np.repeat(v, rep, axis=1)
-        att = np.einsum("thd,shd->hts", q, k) / np.sqrt(HEAD_DIM)
+        att = np.einsum("thd,shd->hts", q, k) * att_scale
         att = att + np.triu(np.full((T, T), -np.inf), 1)[None]
         if local:                                          # only the last GEMMA_WINDOW positions (itself included)
             att = att + np.tril(np.full((T, T), -np.inf), -GEMMA_WINDOW)[None]
@@ -267,13 +289,27 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0):
         o = o @ values[p + "attn_output.weight"].T
         if gemma:
             o = rms(o, values[p + "post_attention_norm.weight"])
-        x = x + o
+        x = x + o * res
         h = rms(x, values[p + "ffn_norm.weight"])
-        g, u = h @ values[p + "ffn_gate.weight"].T, h @ values[p + "ffn_up.weight"].T
-        act = (0.5 * g * (1 + np.tanh(np.sqrt(2 / np.pi) * (g + 0.044715 * g ** 3)))) if gemma else g / (1 + np.exp(-g))
-        d = (act * u) @ values[p + "ffn_down.weight"].T
+        if moe:
+            logits = h @ values[p + "ffn_gate_inp.weight"].T                       # [T, E]
+            probs = np.exp(logits - logits.max(-1, keepdims=True))
+            probs /= probs.sum(-1, keepdims=True)
+            d = np.zeros_like(h)
+            for t in range(T):
+                top = np.argsort(-probs[t])[:N_USED]
+                wts = probs[t, top] / (probs[t, top].sum() if norm_topk else 1.0)
+                for e, wt in zip(top, wts):
+                    g = values[p + "ffn_gate_exps.weight"][e] @ h[t]
+                    u = values[p + "ffn_up_exps.weight"][e] @ h[t]
+                    d[t] += wt * (values[p + "ffn_down_exps.weight"][e] @ (g / (1 + np.exp(-g)) * u))
+        else:
+            g, u = h @ values[p + "ffn_gate.weight"].T, h @ values[p + "ffn_up.weight"].T
+            act = (0.5 * g * (1 + np.tanh(np.sqrt(2 / np.pi) * (g + 0.044715 * g ** 3)))) if gemma else g / (1 + np.exp(-g))
+            d = (act * u) @ values[p + "ffn_down.weight"].T
         if gemma:
             d = rms(d, values[p + "post_ffw_norm.weight"])
-        x = x + d
+        x = x + d * res
     head = values["token_embd.weight"] if gemma else values["output.weight"]
-    return rms(x, values["output_norm.weight"]) @ head.T
+    out = rms(x, values["output_norm.weight"]) @ head.T
+    return out / GRANITE_SCALES["logit_scale"] if granite else out

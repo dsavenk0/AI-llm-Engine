@@ -14,6 +14,12 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Mixture-of-experts GGUF on the engine's own decoder** (Mixtral-style llama, Qwen3-MoE, Granite-MoE) and dense
+  Granite: the experts stay stacked and quantized, a token runs only its top-k with `gather_qmm` (prefill groups
+  tokens by expert), Granite's embedding / residual / logit / attention multipliers are read from the file.
+  Granite-MoE 1B-A400M matches llama.cpp: identical token ids and, over 32 greedy tokens, identical text on two of
+  four prompts (the others differ at near-tied tokens, logprobs within ~0.3). Files with per-expert tensors or a
+  shared expert (Qwen2-MoE, DeepSeek) still go to llama.cpp.
 - **Gemma 3 on the engine's own decoder** (GGUF): sliding-window layers with their own rope base, norms after the
   attention and feed-forward, GeGLU, tied output, linear rope scaling for the global layers, and a SentencePiece
   tokenizer built from the file (merges ranked by piece score, byte fallback). Checked against llama.cpp: identical
