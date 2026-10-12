@@ -459,5 +459,105 @@ class TestLlmIntegration(unittest.TestCase):
         self.assertFalse(os.path.exists(self.m))
 
 
+class TestHeaderAndSupportDetails(unittest.TestCase):
+    """The reader's limits and every reason the own decoder gives for refusing a file (real GGUF bytes, via the
+    synthetic writer used for the decoder tests)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import gguf_synth
+        cls.S = gguf_synth
+        cls.dir = tempfile.mkdtemp()
+
+    def write(self, name, **kw):
+        path = os.path.join(self.dir, name)
+        self.S.write(path, **kw)
+        return path
+
+    def test_the_quantization_names_follow_llama_cpp_ftype_ids(self):
+        want = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1", 10: "Q2_K", 11: "Q3_K_S",
+                12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K",
+                19: "IQ2_XXS", 20: "IQ2_XS", 21: "Q2_K_S", 22: "IQ3_XS", 23: "IQ3_XXS", 24: "IQ1_S", 25: "IQ4_NL",
+                26: "IQ3_S", 27: "IQ3_M", 28: "IQ2_S", 29: "IQ2_M", 30: "IQ4_XS", 31: "IQ1_M", 32: "BF16"}
+        self.assertEqual(gguf.FTYPE, want)
+
+    def test_quant_is_guessed_from_a_file_name(self):
+        for name, q in (("m-Q4_K_M.gguf", "Q4_K_M"), ("m-q5_0.gguf", "Q5_0"), ("m-IQ3_XS.gguf", "IQ3_XS"),
+                        ("m-BF16.gguf", "BF16"), ("m-f16.gguf", "F16"), ("m-Q8_0.gguf", "Q8_0"),
+                        ("m-Q6_K.gguf", "Q6_K"), ("model.gguf", "?")):
+            self.assertEqual(gguf.guess_quant(name), q, name)
+
+    def test_projectors_and_plain_paths_are_told_apart(self):
+        self.assertTrue(gguf.is_projector("/x/mmproj-F16.gguf"))
+        self.assertTrue(gguf.is_projector("/x/MMPROJ-model.gguf"))
+        self.assertFalse(gguf.is_projector("/x/model.gguf"))
+        f = self.write("plain.gguf")
+        self.assertTrue(gguf.is_gguf_path(f))
+        self.assertFalse(gguf.is_gguf_path(self.dir))
+        self.assertFalse(gguf.is_gguf_path(os.path.join(self.dir, "none.gguf")))
+        other = os.path.join(self.dir, "x.bin")
+        open(other, "wb").close()
+        self.assertFalse(gguf.is_gguf_path(other))
+
+    def test_a_truncated_or_foreign_file_is_a_clean_error(self):
+        f = self.write("ok.gguf")
+        data = open(f, "rb").read()
+        bad = os.path.join(self.dir, "cut.gguf")
+        with open(bad, "wb") as fh:
+            fh.write(data[:40])
+        for fn in (gguf.read_header_full, lambda p: gguf.read_array(p, "tokenizer.ggml.tokens")):
+            with self.assertRaises(gguf.GGUFError):
+                fn(bad)
+        notgguf = os.path.join(self.dir, "not.gguf")
+        with open(notgguf, "wb") as fh:
+            fh.write(b"NOPE" + bytes(64))
+        with self.assertRaises(gguf.GGUFError):
+            gguf.read_header_full(notgguf)
+
+    def test_arrays_come_back_whole_and_a_missing_key_is_none(self):
+        f = self.write("arr.gguf")
+        toks = gguf.read_array(f, "tokenizer.ggml.tokens")
+        self.assertEqual(len(toks), len(self.S.vocab()[0]))
+        self.assertEqual(toks[:3], self.S.vocab()[0][:3])
+        self.assertEqual(gguf.read_array(f, "tokenizer.ggml.token_type")[:2], self.S.vocab()[1][:2])
+        self.assertIsNone(gguf.read_array(f, "no.such.key"))
+        with self.assertRaises(gguf.GGUFError):
+            gguf.read_array(f, "tokenizer.ggml.tokens", limit=3)             # larger than allowed
+
+    def test_directory_of_tensors_lists_types_and_names(self):
+        f = self.write("t.gguf", quant="Q8_0")
+        types = gguf.tensor_types(f)
+        self.assertIn(8, types)                                              # Q8_0 matrices
+        self.assertIn(0, types)                                              # F32 norms
+        names = gguf.tensor_names(f)
+        self.assertIn("token_embd.weight", names)
+        self.assertIn("blk.0.attn_q.weight", names)
+        self.assertIn("output.weight", names)
+
+    def test_native_support_names_why_not(self):
+        self.assertEqual(gguf.native_support(self.write("fine.gguf")), (True, ""))
+        ok, why = gguf.native_support(self.write("moe.gguf", extra_meta={"llama.expert_count": 8}))
+        self.assertEqual((ok, why), (False, "mixture of experts"))
+        ok, why = gguf.native_support(self.write("spm.gguf", extra_meta={"tokenizer.ggml.model": "llama"}))
+        self.assertEqual((ok, why), (False, "tokenizer 'llama'"))
+        ok, why = gguf.native_support(self.write("pre.gguf", extra_meta={"tokenizer.ggml.pre": "weird"}))
+        self.assertEqual((ok, why), (False, "pre-tokenizer 'weird'"))
+        ok, why = gguf.native_support(self.write("yarn.gguf", extra_meta={"llama.rope.scaling.type": "yarn"}))
+        self.assertEqual((ok, why), (False, "rope scaling 'yarn'"))
+        ok, why = gguf.native_support(self.write("sw.gguf", extra_meta={"llama.attention.sliding_window": 4096}))
+        self.assertEqual((ok, why), (False, "sliding-window attention"))
+        ok, why = gguf.native_support(self.write("l3.gguf", extra_meta={"llama.rope.scaling.type": "llama3"}))
+        self.assertEqual((ok, why), (False, "llama3 rope scaling without its frequency table"))
+        ok, why = gguf.native_support(self.write("l3ok.gguf", rope_factors=[1.0] * (self.S.HEAD_DIM // 2)))
+        self.assertEqual((ok, why), (True, ""))
+        ok, why = gguf.native_support(self.write("q.gguf", tensor_type_override=("blk.0.ffn_up.weight", 10)))
+        self.assertEqual((ok, why), (False, "quantization type(s) [10]"))
+        ok, why = gguf.native_support(self.write("gemma.gguf", arch="llama", extra_meta={"general.architecture": "gemma2"}))
+        self.assertEqual((ok, why), (False, "architecture 'gemma2'"))
+        ok, why = gguf.native_support(os.path.join(self.dir, "missing.gguf"))
+        self.assertFalse(ok)
+        self.assertTrue(why)
+
+
 if __name__ == "__main__":
     unittest.main()
