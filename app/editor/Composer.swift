@@ -293,10 +293,11 @@ struct Composer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             chips
-            ComposerTextView(text: $draft, placeholder: "Just chat, or describe a task…   Enter — send · Shift+Enter — new line",
+            ComposerTextView(text: $draft, placeholder: "Just chat, or describe a task…",
                              onSend: send, onImage: { addImage($0) }, onFiles: { addFiles($0) },
                              onCycleMode: { store.mode = store.mode.next })
                 .frame(height: 74)
+                .help("Enter — send · Shift+Enter — new line · Shift+Tab — next mode")
                 .padding(4)
                 .background(Palette.field, in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.hairline))

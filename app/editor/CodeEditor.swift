@@ -78,7 +78,7 @@ final class LineNumberRuler: NSRulerView {
         var index = lm.characterIndexForGlyph(at: visible.location)
         let origin = tv.textContainerOrigin
         let end = NSMaxRange(lm.characterRange(forGlyphRange: visible, actualGlyphRange: nil))
-        while index <= end && index <= text.length {
+        while index <= end && (index < text.length || (text.length == 0 && index == 0)) {
             let lineRange = text.lineRange(for: NSRange(location: min(index, text.length), length: 0))
             let glyph = lm.glyphIndexForCharacter(at: min(lineRange.location, max(text.length - 1, 0)))
             var frag = lm.lineFragmentRect(forGlyphAt: min(glyph, max(lm.numberOfGlyphs - 1, 0)), effectiveRange: nil)
@@ -112,20 +112,35 @@ final class LineNumberRuler: NSRulerView {
 /// that kept its old width when the window was widened).
 final class CodeScrollView: NSScrollView {
     private var gutterOverlap: CGFloat = -1
+    private var boundsObserver: NSObjectProtocol?
+
+    /// With a TextKit 1 text view the line-number ruler lies over the first 44 pt of the text instead of beside it.
+    /// Whether the text then starts under the ruler depends on where the clip view rests: at bounds.x = -44 the
+    /// system has already made room, at 0 (what it settles on when the document is narrower than the pane, e.g.
+    /// after the window was widened) the text sits under the gutter and loses its first characters. So the inset
+    /// follows the clip view's position — measured, not assumed — and is re-checked whenever that position changes.
+    private func updateGutterInset() {
+        guard let tv = documentView as? NSTextView, let r = verticalRulerView, rulersVisible,
+              contentView.bounds.origin.x <= 0 else { return }
+        let docOriginOnScreen = contentView.frame.minX - contentView.bounds.origin.x
+        let overlap = max(0, (r.frame.maxX - docOriginOnScreen).rounded())
+        if overlap != gutterOverlap {
+            gutterOverlap = overlap
+            tv.textContainerInset = NSSize(width: 6 + overlap, height: 8)
+        }
+    }
 
     override func layout() {
         super.layout()
         guard let tv = documentView as? NSTextView else { return }
-        // With a TextKit 1 text view this scroll view puts the line-number ruler over the first 44 pt of the text
-        // instead of beside it (a TextKit 2 one gets the inset on its own: bounds.origin.x = -44), which hid the
-        // first characters of every line. Measure the overlap and move the text over by that much.
-        if let r = verticalRulerView, rulersVisible, contentView.bounds.origin.x == 0 {
-            let overlap = max(0, r.frame.maxX - contentView.frame.minX)
-            if overlap != gutterOverlap {
-                gutterOverlap = overlap
-                tv.textContainerInset = NSSize(width: 6 + overlap, height: 8)
+        if boundsObserver == nil {
+            contentView.postsBoundsChangedNotifications = true
+            boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: contentView, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateGutterInset() }
             }
         }
+        updateGutterInset()
         let size = contentSize
         tv.minSize = NSSize(width: size.width, height: size.height)
         if tv.frame.width < size.width { tv.setFrameSize(NSSize(width: size.width, height: tv.frame.height)) }
