@@ -146,6 +146,9 @@ enum AppHost {
         case "voice":
             NSApp.setActivationPolicy(.regular)
             VoiceModule.shared.renderSnapshot(a)
+        case "panel":
+            NSApp.setActivationPolicy(.regular)
+            BarSnapshot.render(a)
         default:
             return false
         }

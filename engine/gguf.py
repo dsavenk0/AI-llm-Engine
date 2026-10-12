@@ -143,7 +143,7 @@ def read_array(path, key, limit=1 << 24):
 
 # ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K BF16
 NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 12, 13, 14, 30}
-NATIVE_ARCHS = ("llama", "qwen2", "qwen3")
+NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma3")
 # pre-tokenizer rules verified against llama.cpp (engine/gguf_tokenizer.py keeps the expressions)
 NATIVE_PRE = ("default", "gpt2", "llama-bpe", "llama3", "smaug-bpe", "qwen2", "qwen35", "deepseek-r1-qwen",
               "smollm", "refact")
@@ -189,14 +189,18 @@ def native_support(path):
             return False, f"architecture {arch!r}"
         if meta.get(f"{arch}.expert_count"):
             return False, "mixture of experts"
-        if meta.get("tokenizer.ggml.model") != "gpt2":
-            return False, f"tokenizer {meta.get('tokenizer.ggml.model')!r}"
-        if meta.get("tokenizer.ggml.pre", "default") not in NATIVE_PRE:
+        tk = meta.get("tokenizer.ggml.model")
+        if tk == "llama":                              # SentencePiece (Gemma): scored pieces, no dummy prefix
+            if meta.get("tokenizer.ggml.add_space_prefix", True):
+                return False, "SentencePiece with a dummy space prefix"
+        elif tk != "gpt2":
+            return False, f"tokenizer {tk!r}"
+        elif meta.get("tokenizer.ggml.pre", "default") not in NATIVE_PRE:
             return False, f"pre-tokenizer {meta.get('tokenizer.ggml.pre')!r}"
         scaling = meta.get(f"{arch}.rope.scaling.type")
-        if scaling not in (None, "none", "llama3"):
+        if scaling not in (None, "none", "llama3") and not (scaling == "linear" and arch == "gemma3"):
             return False, f"rope scaling {scaling!r}"
-        if meta.get(f"{arch}.attention.sliding_window"):
+        if meta.get(f"{arch}.attention.sliding_window") and arch != "gemma3":
             return False, "sliding-window attention"
         if scaling == "llama3" and "rope_freqs.weight" not in tensor_names(path):
             return False, "llama3 rope scaling without its frequency table"

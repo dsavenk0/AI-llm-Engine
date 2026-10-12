@@ -1161,13 +1161,19 @@ struct MarqueeText: View {
     private var overflow: CGFloat { max(0, natural - avail) }
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            Text(text).font(font).lineLimit(1).fixedSize().hidden()           // measures the natural width
-                .background(GeometryReader { g in Color.clear.preference(key: MarqueeWidth.self, value: g.size.width) })
-            Text(text).font(font).foregroundColor(color).lineLimit(1).fixedSize().offset(x: shift)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GeometryReader { g in Color.clear.preference(key: MarqueeAvail.self, value: g.size.width) })
+        // The layout size comes from a text that is simply cut (width = what the row offers). The full-width
+        // copies — the measuring one and the visible one — are drawn in background / overlay, which never
+        // take part in layout: a long name must not push the row wider than its card.
+        Text(text).font(font).lineLimit(1).hidden()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(GeometryReader { g in Color.clear.preference(key: MarqueeAvail.self, value: g.size.width) })
+            .background(alignment: .leading) {
+                Text(text).font(font).lineLimit(1).fixedSize().hidden()
+                    .background(GeometryReader { g in Color.clear.preference(key: MarqueeWidth.self, value: g.size.width) })
+            }
+            .overlay(alignment: .leading) {
+                Text(text).font(font).foregroundColor(color).lineLimit(1).fixedSize().offset(x: shift)
+            }
         .clipped()
         .mask(LinearGradient(stops: [.init(color: .black, location: 0),
                                      .init(color: .black, location: overflow > 1 && shift == 0 ? 0.88 : 1),
@@ -1659,7 +1665,13 @@ struct AboutView: View {
 struct ContentView: View {
     @ObservedObject var e: EngineState
     @ObservedObject var mon: SystemMonitor
-    @State private var tab = 0
+    @State private var tab: Int
+
+    init(e: EngineState, mon: SystemMonitor, tab: Int = 0) {
+        self.e = e
+        self.mon = mon
+        _tab = State(initialValue: tab)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2116,4 +2128,49 @@ func makeBaseMenu() -> NSMenu {
     main.addItem(AppMenus.windowMenu())
     main.addItem(AppMenus.helpMenu())
     return main
+}
+
+// MARK: - snapshot (development): `LLMBar --module panel --snapshot out.png [--tab N] [--demo]`
+
+enum BarSnapshot {
+    /// Renders the panel with made-up models of every awkward kind (long names, notes, favourites) into a PNG,
+    /// so layout problems show up without clicking through the app.
+    @MainActor static func render(_ args: [String]) {
+        func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        guard let out = value("--snapshot") else { return }
+        useRussian = args.contains("--ru")
+        let engine = EngineState()
+        if args.contains("--demo") {
+            func m(_ name: String, _ gb: Double, _ fmt: String, route: String = "native", fav: Bool = false, ok: Bool = true) -> ModelInfo {
+                ModelInfo(path: "/m/\(name)", name: name, format: fmt, size: gb, vision: false, thinking: true,
+                          thinkingDefault: false, supported: ok, efforts: [], route: route,
+                          problems: ok ? [] : ["architecture 'foo'"], favorite: fav)
+            }
+            engine.models = [
+                m("Bonsai-2-27B-1.75bit-JANG", 6.1, "JANG JANG_AFFINE_TERNARY_PACKED", route: "ptq1", fav: true),
+                m("Bonsai-2-27B-CRACK-PTQ1-MLX", 5.6, "PTQ1", route: "ptq1"),
+                m("Deepseek-R1-Distill-Qwen-1.5B Q4_K_M", 1.0, "GGUF Q4_K_M"),
+                m("granite-3.1-1b-a400m-instruct-Q4_K_M-with-a-very-long-name-indeed", 0.8, "GGUF Q4_K_M", ok: false),
+                m("Qwen2.5-0.5B-Instruct-4bit", 0.3, "MLX 4-bit", route: "mlxlm"),
+            ]
+            engine.config = ["model": "/m/Bonsai-2-27B-CRACK-PTQ1-MLX"]
+        }
+        let tab = Int(value("--tab") ?? "0") ?? 0
+        let host = NSHostingView(rootView: ContentView(e: engine, mon: SystemMonitor(), tab: tab).frame(width: 392))
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 392, height: 640), styleMask: [.titled],
+                         backing: .buffered, defer: false)
+        w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
+        w.contentView = host
+        w.center()
+        w.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { exit(3) }
+        let f = unsafeBitCast(sym, to: Capture.self)
+        guard let img = f(CGRect.null, 8, UInt32(w.windowNumber), 1)?.takeRetainedValue(),
+              let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { exit(4) }
+        try? png.write(to: URL(fileURLWithPath: out))
+        print("SNAPSHOT \(out) \(img.width)x\(img.height)")
+        exit(0)
+    }
 }

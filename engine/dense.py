@@ -1,7 +1,8 @@
 """A dense decoder-only transformer on MLX, built from GGUF weights (no mlx-lm, no llama.cpp).
 
 One implementation covers the Llama family as ggml names it: llama (incl. Mistral, SmolLM2, Llama 3.x),
-qwen2 (incl. DeepSeek-R1-Distill-Qwen, MiMo's base), qwen3. Weights stay in the quantized form of the
+qwen2 (incl. DeepSeek-R1-Distill-Qwen, MiMo's base), qwen3, and Gemma 3 (sliding-window layers in a 5:1 pattern,
+two rope bases, a norm after the attention and after the feed-forward, GeGLU). Weights stay in the quantized form of the
 file (engine/gguf_tensors.py); the residual stream is float32, matmul inputs and the KV cache float16.
 
 Everything the architectures differ in is data in `Config`, so adding a family is a few lines there plus a
@@ -37,11 +38,20 @@ class Config:
     embed_scale: float = 1.0             # granite / minicpm / gemma style multipliers
     logit_scale: float = 1.0
     residual_scale: float = 1.0
+    gelu: bool = False                   # GeGLU (tanh approximation) instead of SwiGLU
+    sandwich: bool = False               # extra norms on the attention and feed-forward outputs (Gemma 2/3)
+    window: int = 0                      # sliding-window size of the local layers, 0 = none
+    window_pattern: int = 0              # every `pattern`-th layer is global, the rest local (Gemma 3: 6)
+    rope_base_local: float = 0.0         # rope base of the local layers
+    rope_scale: float = 1.0              # linear position scaling of the global layers (Gemma 3 4B+: 1/8)
     extra: dict = field(default_factory=dict)
+
+    def is_local(self, i):
+        return bool(self.window and self.window_pattern and (i % self.window_pattern) != self.window_pattern - 1)
 
 
 # ggml's rope type per architecture (llama.cpp: llama_model_rope_type)
-ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False}
+ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma3": False}
 SUPPORTED = tuple(ROPE_TRADITIONAL)
 
 
@@ -122,6 +132,10 @@ def _rms(x, w, eps):
     return mx.fast.rms_norm(x, w, eps)
 
 
+def _gelu_tanh(x):
+    return 0.5 * x * (1.0 + mx.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
+
+
 class Layer:
     def __init__(self, cfg, tensors, i):
         t = lambda name: tensors[f"blk.{i}.{name}"]
@@ -130,6 +144,8 @@ class Layer:
         self.q_norm = tensors.get(f"blk.{i}.attn_q_norm.weight")
         self.k_norm = tensors.get(f"blk.{i}.attn_k_norm.weight")
         self.gate, self.up, self.down = t("ffn_gate.weight"), t("ffn_up.weight"), t("ffn_down.weight")
+        self.post_attn_norm = tensors.get(f"blk.{i}.post_attention_norm.weight")
+        self.post_ffn_norm = tensors.get(f"blk.{i}.post_ffw_norm.weight")
 
     def params(self):
         return [m for m in (self.q, self.k, self.v, self.o, self.gate, self.up, self.down)]
@@ -160,6 +176,8 @@ class DenseModel:
             L.attn_norm, L.ffn_norm = L.attn_norm.astype(R), L.ffn_norm.astype(R)
             if L.q_norm is not None:
                 L.q_norm, L.k_norm = L.q_norm.astype(M), L.k_norm.astype(M)
+            if L.post_attn_norm is not None:
+                L.post_attn_norm, L.post_ffn_norm = L.post_attn_norm.astype(R), L.post_ffn_norm.astype(R)
         self.norm = self.norm.astype(R)
         self.nbytes = (sum(m.nbytes for L in self.layers for m in L.params())
                        + self.embed.w.nbytes + (self.embed.scales.nbytes + self.embed.biases.nbytes if self.embed.bits else 0)
@@ -168,12 +186,16 @@ class DenseModel:
     def make_cache(self):
         return [KVCache() for _ in self.layers]
 
-    def _rope(self, x, offset):
+    def _rope(self, x, offset, local=False):
         c = self.cfg
         if self._freqs is not None:
             return mx.fast.rope(x, c.rope_dims, traditional=c.rope_traditional, base=None, scale=1.0,
                                 offset=offset, freqs=self._freqs)
-        return mx.fast.rope(x, c.rope_dims, traditional=c.rope_traditional, base=c.rope_base, scale=1.0, offset=offset)
+        if local and c.rope_base_local:                 # Gemma 3 local layers: their own base, no scaling
+            return mx.fast.rope(x, c.rope_dims, traditional=c.rope_traditional, base=c.rope_base_local,
+                                scale=1.0, offset=offset)
+        return mx.fast.rope(x, c.rope_dims, traditional=c.rope_traditional, base=c.rope_base,
+                            scale=c.rope_scale, offset=offset)
 
     def __call__(self, ids, cache=None):
         """The residual stream and the SwiGLU product are float32 (as in ggml: Llama 3.2 and others carry a few
@@ -197,8 +219,18 @@ class DenseModel:
             q_pos = mx.arange(off, off + L)[:, None]
             k_pos = mx.arange(off + L)[None, :]
             mask = mx.where(k_pos <= q_pos, 0.0, -mx.inf).astype(F16)
+        # sliding-window layers look at the last `window` keys only: slice them (and mask what is still too old)
+        w_start, w_mask = 0, None
+        if c.window and off + L > c.window:
+            w_start = max(0, off + 1 - c.window)
+            q_pos = mx.arange(off, off + L)[:, None]
+            k_pos = mx.arange(w_start, off + L)[None, :]
+            w_mask = mx.where((k_pos <= q_pos) & (q_pos - k_pos < c.window), 0.0, -mx.inf).astype(F16)
+        elif c.window:
+            w_mask = mask                       # nothing is older than the window yet
         scale = c.attn_scale or c.head_dim ** -0.5
-        for layer, kv in zip(self.layers, cache):
+        for li, (layer, kv) in enumerate(zip(self.layers, cache)):
+            local = c.is_local(li)
             h = _rms(x, layer.attn_norm, c.eps).astype(M)
             q = layer.q(h).reshape(B, L, c.n_head, c.head_dim)
             k = layer.k(h).reshape(B, L, c.n_head_kv, c.head_dim)
@@ -207,14 +239,26 @@ class DenseModel:
                 q = _rms(q, layer.q_norm, c.eps)
                 k = _rms(k, layer.k_norm, c.eps)
             q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
-            q, k = self._rope(q, off), self._rope(k, off)
+            q, k = self._rope(q, off, local), self._rope(k, off, local)
             k, v = kv.update_and_fetch(k.astype(F16), v.astype(F16))
-            a = mx.fast.scaled_dot_product_attention(q.astype(F16), k, v, scale=scale, mask=mask).astype(M)
-            x = x + st(layer.o(a.transpose(0, 2, 1, 3).reshape(B, L, -1)).astype(R)) * c.residual_scale
+            m = mask
+            if local:
+                m = w_mask
+                if w_start:
+                    k, v = k[..., w_start:, :], v[..., w_start:, :]
+            a = mx.fast.scaled_dot_product_attention(q.astype(F16), k, v, scale=scale, mask=m).astype(M)
+            o = layer.o(a.transpose(0, 2, 1, 3).reshape(B, L, -1)).astype(R)
+            if layer.post_attn_norm is not None:
+                o = _rms(o, layer.post_attn_norm, c.eps)
+            x = x + st(o) * c.residual_scale
             h = _rms(x, layer.ffn_norm, c.eps).astype(M)
             g = layer.gate(h).astype(R)
-            inner = (mx.sigmoid(g) * g * layer.up(h).astype(R)).astype(M)
-            x = x + st(layer.down(inner).astype(R)) * c.residual_scale
+            act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
+            inner = (act * layer.up(h).astype(R)).astype(M)
+            d = layer.down(inner).astype(R)
+            if layer.post_ffn_norm is not None:
+                d = _rms(d, layer.post_ffn_norm, c.eps)
+            x = x + st(d) * c.residual_scale
         x = _rms(x, self.norm, c.eps).astype(M)
         logits = self.head(x)
         return logits * (1.0 / c.logit_scale) if c.logit_scale != 1.0 else logits
@@ -252,11 +296,11 @@ def build(path, log=print):
     if g("attention.value_length", head_dim) != head_dim:
         raise Unsupported("different key and value head sizes")
     scaling = m.get(f"{arch}.rope.scaling.type")
-    if scaling not in (None, "none", "llama3"):
+    if scaling not in (None, "none", "llama3") and not (scaling == "linear" and arch == "gemma3"):
         raise Unsupported(f"rope scaling {scaling!r}")
     if scaling == "llama3" and "rope_freqs.weight" not in gf.tensors:
         raise Unsupported("llama3 rope scaling without its frequency table")
-    if g("attention.sliding_window"):
+    if g("attention.sliding_window") and arch != "gemma3":
         raise Unsupported("sliding-window attention")
     if g("expert_count"):
         raise Unsupported("mixture of experts")
@@ -270,6 +314,16 @@ def build(path, log=print):
         qkv_bias="blk.0.attn_q.bias" in names, qk_norm="blk.0.attn_q_norm.weight" in names,
         tied_output="output.weight" not in names, context=int(g("context_length", 4096)),
     )
+    if arch == "gemma3":
+        n_layer = cfg.n_layer
+        cfg.gelu = cfg.sandwich = True
+        cfg.embed_scale = n_embd ** 0.5
+        cfg.window, cfg.window_pattern = int(g("attention.sliding_window", 0)), 6
+        cfg.rope_base_local = float(g("rope.freq_base_swa", 10000.0))
+        if scaling == "linear":
+            cfg.rope_scale = 1.0 / float(g("rope.scaling.factor", 1.0))
+        # llama.cpp: the 27B scales queries by 1/sqrt(n_embd / n_head), the others by 1/sqrt(head_dim)
+        cfg.attn_scale = (n_embd / n_head) ** -0.5 if n_layer == 62 else 0.0
     if "rope_freqs.weight" in names:
         cfg.rope_freqs = T.load_dense(gf, names["rope_freqs.weight"])
     tensors = {}
@@ -285,7 +339,7 @@ def build(path, log=print):
     for i in range(cfg.n_layer):
         for n in ("attn_norm", "ffn_norm"):
             tensors[f"blk.{i}.{n}.weight"] = mx.array(T.load_dense(gf, names[f"blk.{i}.{n}.weight"]))
-        for n in ("attn_q_norm", "attn_k_norm"):
+        for n in ("attn_q_norm", "attn_k_norm", "post_attention_norm", "post_ffw_norm"):
             if f"blk.{i}.{n}.weight" in names:
                 tensors[f"blk.{i}.{n}.weight"] = mx.array(T.load_dense(gf, names[f"blk.{i}.{n}.weight"]))
         for n, bn in (("attn_q", "attn_q.bias"), ("attn_k", "attn_k.bias"), ("attn_v", "attn_v.bias"),

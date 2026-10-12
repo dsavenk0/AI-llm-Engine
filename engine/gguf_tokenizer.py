@@ -1,8 +1,8 @@
 """A tokenizer + chat template built from a GGUF file's own metadata (no llama.cpp, no transformers).
 
-Only byte-level BPE vocabularies are handled — the Llama 3 / Qwen / GPT-2 families — and only for the
-pre-tokenizer rules listed below; anything else raises `Unsupported`, and the caller runs the file on
-llama.cpp instead (never a silently wrong tokenization).
+Two kinds of vocabulary are handled: byte-level BPE (the Llama 3 / Qwen / GPT-2 families, only for the
+pre-tokenizer rules listed below) and SentencePiece ("llama" in ggml: Gemma). Anything else raises
+`Unsupported`, and the caller runs the file on llama.cpp instead (never a silently wrong tokenization).
 
 It offers what engine/compat.py needs from a tokenizer: encode, decode, chat_template, eos_token_ids,
 apply_chat_template and the (absent) reasoning / (JSON-in-tags) tool-call markers.
@@ -10,7 +10,7 @@ apply_chat_template and the (absent) reasoning / (JSON-in-tags) tool-call marker
 import json
 
 from jinja2.sandbox import ImmutableSandboxedEnvironment
-from tokenizers import AddedToken, Regex, Tokenizer, decoders, models, pre_tokenizers
+from tokenizers import AddedToken, Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers
 
 from . import gguf
 
@@ -29,7 +29,25 @@ PRE = {
     "smollm": _DIGITS_GPT2, "refact": _DIGITS_GPT2,
 }
 
-CONTROL, USER_DEFINED = 3, 4
+CONTROL, USER_DEFINED, BYTE = 3, 4, 6
+SPIECE = "\u2581"        # ▁, SentencePiece's whitespace
+
+
+def _spm_merges(tokens, scores, types):
+    """SentencePiece merges text greedily by the score of the merged piece (best first, leftmost on ties);
+    that is BPE whose merge ranks are the pieces' scores. Every piece that splits into two pieces of the
+    vocabulary is one merge."""
+    ids = {t: i for i, t in enumerate(tokens)}
+    cand = []
+    for i, t in enumerate(tokens):
+        if len(t) < 2 or (types and i < len(types) and types[i] in (CONTROL, BYTE)):
+            continue
+        for k in range(1, len(t)):
+            a, b = t[:k], t[k:]
+            if a in ids and b in ids:
+                cand.append((-scores[i], i, a, b))
+    cand.sort(key=lambda c: (c[0], c[1]))
+    return [(a, b) for _, _, a, b in cand]
 
 
 class Unsupported(ValueError):
@@ -51,26 +69,40 @@ class GGUFTokenizer:
 
     def __init__(self, path, meta):
         model = meta.get("tokenizer.ggml.model")
-        if model != "gpt2":
-            raise Unsupported(f"tokenizer model {model!r} (only byte-level BPE is built in)")
-        pre = meta.get("tokenizer.ggml.pre", "default")
-        if pre not in PRE:
-            raise Unsupported(f"pre-tokenizer {pre!r}")
+        if model not in ("gpt2", "llama"):
+            raise Unsupported(f"tokenizer model {model!r} (byte-level BPE and SentencePiece are built in)")
         tokens = gguf.read_array(path, "tokenizer.ggml.tokens")
-        merges = gguf.read_array(path, "tokenizer.ggml.merges")
         types = gguf.read_array(path, "tokenizer.ggml.token_type") or []
-        if not tokens or not merges:
-            raise Unsupported("the file has no vocabulary or merges")
+        if not tokens:
+            raise Unsupported("the file has no vocabulary")
         vocab = {t: i for i, t in enumerate(tokens)}
-        pairs = []
-        for m in merges:
-            a, _, b = m.partition(" ")
-            pairs.append((a, b))
-        tok = Tokenizer(models.BPE(vocab=vocab, merges=pairs, byte_fallback=False, fuse_unk=False))
-        tok.pre_tokenizer = pre_tokenizers.Sequence(
-            [pre_tokenizers.Split(Regex(e), behavior="isolated", invert=False) for e in PRE[pre]]
-            + [pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
-        tok.decoder = decoders.ByteLevel()
+        if model == "gpt2":
+            pre = meta.get("tokenizer.ggml.pre", "default")
+            if pre not in PRE:
+                raise Unsupported(f"pre-tokenizer {pre!r}")
+            merges = gguf.read_array(path, "tokenizer.ggml.merges")
+            if not merges:
+                raise Unsupported("the file has no merges")
+            pairs = []
+            for m in merges:
+                a, _, b = m.partition(" ")
+                pairs.append((a, b))
+            tok = Tokenizer(models.BPE(vocab=vocab, merges=pairs, byte_fallback=False, fuse_unk=False))
+            tok.pre_tokenizer = pre_tokenizers.Sequence(
+                [pre_tokenizers.Split(Regex(e), behavior="isolated", invert=False) for e in PRE[pre]]
+                + [pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
+            tok.decoder = decoders.ByteLevel()
+        else:
+            scores = gguf.read_array(path, "tokenizer.ggml.scores")
+            if not scores or len(scores) != len(tokens):
+                raise Unsupported("the SentencePiece vocabulary has no scores")
+            if meta.get("tokenizer.ggml.add_space_prefix", True):
+                raise Unsupported("SentencePiece with a dummy space prefix")
+            unk = tokens[int(meta.get("tokenizer.ggml.unknown_token_id", 0))]
+            tok = Tokenizer(models.BPE(vocab=vocab, merges=_spm_merges(tokens, scores, types), unk_token=unk,
+                                       byte_fallback=True, fuse_unk=True))
+            tok.normalizer = normalizers.Replace(" ", SPIECE)
+            tok.decoder = decoders.Sequence([decoders.Replace(SPIECE, " "), decoders.ByteFallback(), decoders.Fuse()])
         specials = [AddedToken(tokens[i], special=True, normalized=False)
                     for i, t in enumerate(types) if t in (CONTROL, USER_DEFINED) and i < len(tokens)]
         if specials:
@@ -85,7 +117,7 @@ class GGUFTokenizer:
         self.bos_token = tokens[self.bos_id] if self.bos_id is not None and self.bos_id < len(tokens) else ""
         self.eos_token = tokens[self.eos_id] if self.eos_id is not None and self.eos_id < len(tokens) else ""
         ends = {self.eos_id, tid("tokenizer.ggml.eot_token_id"), tid("tokenizer.ggml.eom_token_id")}
-        for name in ("<|im_end|>", "<|eot_id|>", "<|endoftext|>", "<|end_of_text|>", "<|eom_id|>"):
+        for name in ("<|im_end|>", "<|eot_id|>", "<|endoftext|>", "<|end_of_text|>", "<|eom_id|>", "<end_of_turn>"):
             if name in vocab:
                 ends.add(vocab[name])
         self.eos_token_ids = sorted(e for e in ends if e is not None)
