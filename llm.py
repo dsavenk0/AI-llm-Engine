@@ -15,6 +15,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
+  ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
   ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
   ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
   ./llm test                 engine tests (integration tests too when a model is selected)
@@ -903,6 +904,59 @@ def _python_probe():
         if _python_ok(p):
             return p
     return None
+
+
+def inspect_cmd(cfg, args):
+    """`./llm inspect <number|name|path> [--json] [--top N]`: what is inside a model, from its headers only
+    (layers, storage types, bits per weight, the biggest tensor groups, and which engine route runs it)."""
+    from engine import modelinfo
+    flags = {"--json"}
+    top, rest, i = 14, [], 0
+    while i < len(args):
+        if args[i] == "--top" and i + 1 < len(args):
+            try:
+                top = max(1, int(args[i + 1]))
+            except ValueError:
+                pass
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    key = next((a for a in rest if a not in flags), "")
+    path = None
+    if key:
+        if os.path.exists(os.path.expanduser(key)):
+            path = os.path.expanduser(key)
+        else:
+            models = scan_models(cfg)
+            if key.isdigit() and 1 <= int(key) <= len(models):
+                path = models[int(key) - 1]["path"]
+            else:
+                hits = [m for m in models if key.lower() in m["name"].lower()]
+                if len(hits) == 1:
+                    path = hits[0]["path"]
+                elif hits:
+                    print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits))); return False
+    elif cfg.get("model"):
+        path = cfg["model"]
+    if not path:
+        print(R(T("Model not found."))); return False
+    try:
+        info = modelinfo.inspect(path)
+    except (modelinfo.InspectError, OSError, ValueError) as e:
+        print(R(str(e))); return False
+    if info["kind"] == "mlx":
+        try:
+            info["route"] = engine_route(_json(os.path.join(path, "config.json")), jang=_json(os.path.join(path, "jang_config.json")))
+        except Exception:
+            info["route"] = None
+    if "--json" in rest:
+        print(json.dumps(info, ensure_ascii=False))
+    else:
+        print(modelinfo.render(info, top=top))
+        if info.get("route"):
+            print(f"  engine route: {info['route']}")
+    return True
 
 
 def web_cmd(args):
@@ -2259,6 +2313,7 @@ def main():
     actions = {
         "check": lambda: check_cmd(cfg, "--json" in sys.argv),
         "web": lambda: web_cmd(sys.argv[2:]),
+        "inspect": lambda: inspect_cmd(cfg, sys.argv[2:]),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
             setup_gguf() if "--gguf" in sys.argv else setup(compat="--compat" in sys.argv)),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),
