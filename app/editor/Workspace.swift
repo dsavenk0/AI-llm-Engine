@@ -145,6 +145,7 @@ final class Workspace: ObservableObject {
     @Published var bottomVisible = false
     @Published var bottomTab = "problems"
     @Published var leftTab = 0                // 0 Files, 1 Changes (the IDE layout's left column)
+    @Published var palette: [PaletteItem]?      // the command palette: set while it is shown
     @Published var terminalTabs = TerminalTabs()
     private var terminals: [Int: TerminalSession] = [:]      // by the tab's serial number
 

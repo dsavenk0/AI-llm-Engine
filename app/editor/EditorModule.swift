@@ -209,6 +209,14 @@ final class EditorModule: NSObject, NSMenuItemValidation {
                 if p.count == 2 { c.window.setContentSize(NSSize(width: p[0], height: p[1])) }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
+            if let q = self.value(after: "--palette") {                       // the command palette on its own, with a query
+                c.ws.palette = self.paletteItems()
+                let host = NSHostingView(rootView: PaletteSheet(ws: c.ws, query: q == "-" ? "" : q)
+                    .background(Palette.panel).environment(\.colorScheme, ThemeSettings.shared.isDark ? .dark : .light))
+                host.frame = NSRect(origin: .zero, size: NSSize(width: 520, height: 340))
+                c.window.contentView = host
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
             if CommandLine.arguments.contains("--modes-panel") {           // the Modes popover on its own
                 let store = ChatStore(ws: c.ws)
                 let host = NSHostingView(rootView: ModesPanel(ws: c.ws, store: store, shown: .constant(true))
@@ -345,6 +353,28 @@ final class EditorModule: NSObject, NSMenuItemValidation {
         c.ws.leftTab = 1
     }
     @objc func toggleStatusBar() { ViewPrefs.shared.statusBar.toggle() }
+    @objc func showPalette() { current?.ws.palette = paletteItems() }
+
+    /// Every command of the menus (File, View and the Modules switches), flattened to "View › Zoom In" with its
+    /// shortcut — the palette is the menu, so it never lists something the menus do not have.
+    private func paletteItems() -> [PaletteItem] {
+        var out: [PaletteItem] = []
+        func walk(_ m: NSMenu, _ path: [String]) {
+            for it in m.items where !it.isSeparatorItem && !it.isHidden {
+                if let sub = it.submenu {
+                    walk(sub, path + [it.title])
+                } else if it.action != nil, it.isEnabled, it.action != #selector(showPalette) {
+                    out.append(PaletteItem(title: (path + [it.title]).joined(separator: " › "),
+                                           shortcut: PaletteItem.shortcut(it), item: it))
+                }
+            }
+        }
+        for top in menu?.items ?? [] {
+            guard let sub = top.submenu, ["File", "View"].contains(sub.title) else { continue }
+            walk(sub, [sub.title])
+        }
+        return out
+    }
     @objc func zoomIn() { ViewPrefs.shared.zoom += 0.1 }
     @objc func zoomOut() { ViewPrefs.shared.zoom -= 0.1 }
     @objc func zoomReset() { ViewPrefs.shared.zoom = 1.0 }
@@ -408,6 +438,7 @@ final class EditorModule: NSObject, NSMenuItemValidation {
                     item("Terminal", #selector(showTerminal), "`", .control),
                     item("Problems", #selector(showProblems), "m", [.command, .shift]),
                     item("Show / Hide Panel", #selector(togglePanel), "j"), .separator(),
+                    item("Command Palette…", #selector(showPalette), "p", [.command, .shift]),
                     item("Status Bar", #selector(toggleStatusBar)), .separator(),
                     item("Zoom In", #selector(zoomIn), "+"), item("Zoom Out", #selector(zoomOut), "-"),
                     item("Reset Zoom", #selector(zoomReset), "0"), .separator()]

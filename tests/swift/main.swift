@@ -343,5 +343,21 @@ check(tabs.close(0), "closing a tab before the shown one")
 eq(tabs.activeSerial, 4, "keeps the shown terminal")
 eq(tabs.active, 0, "…whose index moved")
 
+// command palette
+let cmds = ["File › New Chat", "File › New Window", "File › Open Folder…", "File › New Terminal", "View › Zoom In",
+            "View › Zoom Out", "View › Reset Zoom", "View › Terminal", "View › Show / Hide Panel", "View › Modules › Preview"]
+func top(_ q: String) -> String? { PaletteMatch.rank(cmds, query: q).first.map { cmds[$0] } }
+eq(PaletteMatch.rank(cmds, query: "").count, cmds.count, "an empty query keeps everything")
+eq(top("zoom in"), "View › Zoom In", "the words as typed")
+eq(top("zi"), "View › Zoom In", "initials of the words")
+eq(top("term"), "View › Terminal", "a prefix of a word beats a letter inside another")
+eq(top("newt"), "File › New Terminal", "letters across words")
+eq(top("rz"), "View › Reset Zoom", "initials of two words")
+eq(PaletteMatch.rank(cmds, query: "qqq"), [], "nothing matches")
+eq(top("PREV"), "View › Modules › Preview", "case does not matter")
+check(PaletteMatch.score("zoom", in: "View › Zoom In")! > PaletteMatch.score("zoom", in: "View › Reset Zoom")!, "the word start scores higher")
+eq(PaletteMatch.score("xyz", in: "abc"), nil, "no match is nil")
+eq(PaletteMatch.rank(["b", "a"], query: "").map { $0 }, [0, 1], "stable for an empty query")
+
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

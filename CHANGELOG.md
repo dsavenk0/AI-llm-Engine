@@ -14,6 +14,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Editor: Command Palette** (⇧⌘P, View menu): type a few letters ("zi", "term", "newt") to find any command of the
+  File and View menus and the Modules switches — the list is the menus themselves, with their shortcuts, so it
+  never offers anything they do not.
 - **Editor**: several terminals (tabs in the bottom panel, "+" for another shell, each a real shell with its own
   output; the last one cannot be closed); large files (over 2 MB) open as a read-only head of 256 KB with a banner
   instead of being refused, and are never saved from the editor (the server refuses it too, so a head cannot

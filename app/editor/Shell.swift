@@ -58,6 +58,9 @@ struct RootView: View {
                 if !modules.isOn(.chat) { modules.toggle(.chat) }
             }
         }
+        .sheet(isPresented: Binding(get: { ws.palette != nil }, set: { if !$0 { ws.palette = nil } })) {
+            PaletteSheet(ws: ws)
+        }
         .sheet(isPresented: Binding(get: { ws.pendingApply != nil }, set: { if !$0 { ws.pendingApply = nil } })) {
             ApplySheet(ws: ws)
         }

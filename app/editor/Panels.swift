@@ -531,3 +531,101 @@ struct ExtensionsSheet: View {
         }
     }
 }
+
+// MARK: - the command palette (⇧⌘P)
+
+struct PaletteItem: Identifiable {
+    let id = UUID()
+    let title: String
+    let shortcut: String
+    let item: NSMenuItem
+
+    /// "⇧⌘P" from a menu item's key equivalent and modifiers.
+    static func shortcut(_ it: NSMenuItem) -> String {
+        guard !it.keyEquivalent.isEmpty else { return "" }
+        let m = it.keyEquivalentModifierMask
+        var s = ""
+        if m.contains(.control) { s += "⌃" }
+        if m.contains(.option) { s += "⌥" }
+        if m.contains(.shift) { s += "⇧" }
+        if m.contains(.command) { s += "⌘" }
+        return s + it.keyEquivalent.uppercased()
+    }
+}
+
+struct PaletteSheet: View {
+    @ObservedObject var ws: Workspace
+    @State private var query: String
+    @State private var selected = 0
+
+    init(ws: Workspace, query: String = "") {
+        self.ws = ws
+        _query = State(initialValue: query)
+    }
+    @State private var monitor: Any?
+    @FocusState private var focused: Bool
+
+    private var items: [PaletteItem] { ws.palette ?? [] }
+    private var shown: [PaletteItem] {
+        PaletteMatch.rank(items.map(\.title), query: query).map { items[$0] }
+    }
+
+    private func run(_ it: PaletteItem?) {
+        guard let it else { return }
+        ws.palette = nil
+        DispatchQueue.main.async {
+            if let action = it.item.action { NSApp.sendAction(action, to: it.item.target, from: it.item) }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right.2").foregroundColor(.secondary)
+                TextField("Type a command…", text: $query)
+                    .textFieldStyle(.plain).font(.system(size: 15))
+                    .focused($focused)
+                    .onSubmit { run(shown.indices.contains(selected) ? shown[selected] : nil) }
+                    .onChange(of: query) { _ in selected = 0 }
+            }.padding(12)
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { i, it in
+                            HStack {
+                                Text(it.title).lineLimit(1)
+                                Spacer()
+                                Text(it.shortcut).font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 5)
+                            .background(i == selected ? Palette.accent.opacity(0.22) : Color.clear)
+                            .contentShape(Rectangle())
+                            .onTapGesture { run(it) }
+                            .id(it.id)
+                        }
+                        if shown.isEmpty {
+                            Text("No command matches").foregroundColor(.secondary).padding(20)
+                        }
+                    }
+                }
+                .onChange(of: selected) { _ in
+                    if shown.indices.contains(selected) { proxy.scrollTo(shown[selected].id) }
+                }
+            }
+        }
+        .frame(width: 520, height: 340)
+        .onAppear {
+            focused = true
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+                switch e.keyCode {
+                case 125: selected = min(selected + 1, max(0, shown.count - 1)); return nil     // ↓
+                case 126: selected = max(selected - 1, 0); return nil                           // ↑
+                case 53: ws.palette = nil; return nil                                           // Esc
+                default: return e
+                }
+            }
+        }
+        .onDisappear { if let m = monitor { NSEvent.removeMonitor(m); monitor = nil } }
+    }
+}

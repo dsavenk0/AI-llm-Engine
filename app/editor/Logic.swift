@@ -752,3 +752,37 @@ struct TerminalTabs: Equatable {
         return serials[i] == 1 ? name : "\(name) \(serials[i])"
     }
 }
+
+// MARK: - the command palette: fuzzy matching of what is typed against command names
+
+enum PaletteMatch {
+    /// nil when the typed letters do not occur in the title in that order; otherwise higher = better: letters
+    /// that follow each other, letters that start a word, and shorter titles win.
+    static func score(_ query: String, in title: String) -> Int? {
+        let q = Array(query.lowercased().filter { !$0.isWhitespace })
+        if q.isEmpty { return 0 }
+        let t = Array(title.lowercased())
+        var score = 0, ti = 0, last = -2
+        for ch in q {
+            var found = -1
+            var j = ti
+            while j < t.count { if t[j] == ch { found = j; break }; j += 1 }
+            if found < 0 { return nil }
+            score += 1
+            if found == last + 1 { score += 8 }                                       // consecutive
+            if found == 0 || " ›-_/".contains(t[found - 1]) { score += 10 }             // starts a word
+            score -= min(3, found - ti)                                                // a small price for gaps
+            last = found
+            ti = found + 1
+        }
+        return score * 4 - min(t.count, 60) / 4
+    }
+
+    /// Indices of `titles` that match, best first (ties keep their order). An empty query keeps everything.
+    static func rank(_ titles: [String], query: String) -> [Int] {
+        var scored: [(Int, Int)] = []
+        for (i, t) in titles.enumerated() { if let s = score(query, in: t) { scored.append((i, s)) } }
+        if query.trimmingCharacters(in: .whitespaces).isEmpty { return scored.map { $0.0 } }
+        return scored.sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0 < $1.0 }.map { $0.0 }
+    }
+}
