@@ -107,6 +107,8 @@ PLAN_BLOCKED = ("edit_file", "write_file", "run")
 # commands that only read or check: Auto mode runs these without asking (anything else, or anything the
 # terminal agent's danger list flags, still pauses)
 _SAFE_GIT = {"status", "diff", "log", "show", "branch", "ls-files", "rev-parse", "blame", "describe", "remote"}
+_BRANCH_LISTING = {"-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes", "--verbose", "--show-current",
+                   "--no-color", "--color"}
 _SAFE_SIMPLE = {"ls", "cat", "head", "tail", "wc", "grep", "rg", "pwd", "echo", "which", "file", "stat", "tree",
                 "diff", "sort", "uniq", "date", "whoami", "du", "df", "true"}
 _SAFE_CHECK = {("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("python", "-m", "unittest"),
@@ -139,16 +141,28 @@ def safe_command(command):
             return False
         if any(w == "-o" or w.startswith("--output") or w.startswith("--ext-diff") for w in words):
             return False                               # these write files / run an external program
-        if words[1] == "branch":                       # listing only: a name argument would create or delete one
-            return all(w.startswith("-") and w not in ("-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy")
-                       for w in words[2:])
+        if words[1] == "branch":                       # listing only: a name argument would create or delete one,
+            return all(w in _BRANCH_LISTING for w in words[2:])        # and --set-upstream-to & co change the config
         if words[1] == "remote":                       # `git remote` / `git remote -v`; add / remove change config
             return all(w in ("-v", "--verbose") for w in words[2:])
         return True
     if head == "find":
-        return not any(w in ("-exec", "-execdir", "-delete", "-ok", "-fprint") for w in words)
+        # -exec & co run programs; -fprint / -fprint0 / -fprintf / -fls write files
+        return not any(w in ("-exec", "-execdir", "-delete", "-ok", "-okdir", "-fls") or w.startswith("-fprint")
+                       for w in words)
+    if head == "rg" and any(w.startswith(("--pre", "--hostname-bin")) for w in words):
+        return False                                   # these run a program of the model's choosing
     if head in _SAFE_SIMPLE:
-        return not (head == "sort" and "-o" in words)
+        flags = [w for w in words[1:] if w.startswith("-")]
+        positional = [w for w in words[1:] if not w.startswith("-")]
+        if head == "sort" and any(w.startswith("--output") or (not w.startswith("--") and "o" in w[1:]) for w in flags):
+            return False                               # sort -o FILE (also bundled: -ro) writes a file
+        if head == "tree" and any(w == "-o" or w.startswith("--output") or (not w.startswith("--") and "o" in w[1:])
+                                  for w in flags):
+            return False                               # tree -o FILE too
+        if head == "uniq" and len(positional) > 1:
+            return False                               # the second operand of uniq is an output file
+        return True
     return any(tuple(words[:len(c)]) == c for c in _SAFE_CHECK)
 
 

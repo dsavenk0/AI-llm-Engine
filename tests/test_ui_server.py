@@ -318,6 +318,18 @@ class TestReviewFixes(Base):
         for ok in ("cat src/app.py", "ls -la", "grep -rn TODO src", "git log --oneline -5", "head -n 20 README.md"):
             self.assertTrue(agentloop.safe_command(ok), ok)
 
+    def test_commands_that_write_or_run_programs_are_never_unasked(self):
+        from ui import agentloop
+        for bad in ("find . -fprint out.txt", "find . -fprint0 out", "find . -fprintf out %p", "find . -fls out",
+                    "find . -okdir rm {} +", "sort -ro out in", "sort --output=out in", "tree -o out.txt",
+                    "tree --output out", "uniq in out", "rg --pre ./evil x", "rg --hostname-bin=./x x",
+                    "git branch --set-upstream-to=origin/main", "git branch -u origin/main", "git branch -f main HEAD~1",
+                    "git branch --unset-upstream", "git branch --edit-description"):
+            self.assertFalse(agentloop.safe_command(bad), bad)
+        for ok in ("find . -name '*.py' -print", "sort file.txt", "sort -n file.txt", "tree -L 2", "uniq file.txt",
+                   "rg -n TODO src", "git branch -a", "git branch --list", "git branch --show-current", "git branch -vv"):
+            self.assertTrue(agentloop.safe_command(ok), ok)
+
     def test_an_endpoint_is_local_only_when_its_host_is(self):
         from ui import agentloop
         for url in ("http://127.0.0.1:8090/v1", "http://localhost:8090/v1", "http://[::1]:8090/v1"):
