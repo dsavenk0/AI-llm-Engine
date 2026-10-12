@@ -1182,6 +1182,12 @@ body.nav-scroll-lock {
   border-color: rgba(255, 163, 41, 0.3) !important;
 }
 
+.badge-phosphor {
+  background: rgba(76, 242, 194, 0.15) !important;
+  color: var(--hud-phosphor) !important;
+  border-color: rgba(76, 242, 194, 0.3) !important;
+}
+
 .badge-cyan {
   background: rgba(76, 242, 194, 0.15) !important;
   color: var(--hud-phosphor) !important;
@@ -1448,8 +1454,16 @@ body.nav-scroll-lock {
 
 .apple-models-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));   /* minmax(0, …): a long command must not widen a column */
   gap: 18px;
+  width: 100%;
+  margin-inline: auto;
+}
+.apple-model-card { min-width: 0; }
+.apple-model-card code, .apple-model-card .model-cmd-box {
+  white-space: normal;                 /* the whole command stays visible: it wraps instead of being cut */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .apple-model-card {
@@ -1851,4 +1865,60 @@ body.nav-scroll-lock {
 @media (max-width: 640px) {
   .hide-small { display: none !important; }
   .apple-stats-strip { grid-template-columns: 1fr; }
+}
+
+
+/* ==========================================================================
+   Carousels (gallery, architecture): scroll-snap rows with arrows and dots
+   ========================================================================== */
+.carousel { position: relative; }
+[data-carousel] {
+  display: flex !important;
+  gap: 24px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  padding: 4px 2px 8px;
+}
+[data-carousel]::-webkit-scrollbar { display: none; }
+[data-carousel] > * {
+  flex: 0 0 calc((100% - 48px) / 3);
+  min-width: 0;
+  scroll-snap-align: start;
+}
+.carousel-btn {
+  position: absolute;
+  top: 42%;
+  z-index: 3;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border-hairline);
+  background: rgba(10, 16, 22, 0.82);
+  color: var(--hud-cyan);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: border-color var(--transition-med), opacity var(--transition-med);
+}
+.carousel-btn:hover:not(:disabled) { border-color: var(--hud-cyan); }
+.carousel-btn:disabled { opacity: 0.25; cursor: default; }
+.carousel-prev { left: -14px; }
+.carousel-next { right: -14px; }
+.carousel-dots { display: flex; justify-content: center; gap: 8px; margin-top: 14px; }
+.carousel-dot {
+  width: 8px; height: 8px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border-hairline); background: transparent; cursor: pointer;
+}
+.carousel-dot.active { background: var(--hud-cyan); border-color: var(--hud-cyan); }
+.carousel.single .carousel-btn, .carousel.single .carousel-dots { display: none; }
+@media (max-width: 1024px) {
+  [data-carousel] > * { flex-basis: calc((100% - 24px) / 2); }
+  .carousel-prev { left: 4px; }
+  .carousel-next { right: 4px; }
+}
+@media (max-width: 640px) {
+  [data-carousel] > * { flex-basis: 100%; }
 }

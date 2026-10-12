@@ -32,7 +32,7 @@
       copied: "Copied",
 
       stat_spec_title: "Speculative Decoding",
-      stat_spec_desc: "2.5× faster code edits and tool calls via exact prompt-lookup verification.",
+      stat_spec_desc: "2.5× faster code edits and tool calls than plain decoding, via exact prompt-lookup verification.",
       stat_cold_title: "Instant Cold Start",
       stat_cold_desc: "From zero to first token in 4 seconds. 4.7× faster than standard vMLX.",
       stat_ram_title: "27B in Unified Memory",
@@ -98,7 +98,10 @@
       shot_4_desc: "Chat-first layout with Manual, Edit, Plan and Auto modes: the diff of every change is shown and nothing is written until you approve.",
       shot_5_badge: "LLM EDITOR · EDITOR",
       shot_5_title: "A Native Editor Next to the Assistant",
-      shot_5_desc: "File tree, syntax colours, problems, terminal and git with per-file discard, in a small Swift app that runs only while you use it.",
+      shot_5_desc: "File tree, syntax colours, problems, terminal and git with per-file discard — a module of the one LLMBar app that exists only while you use it.",
+      shot_6_badge: "LLM VOICE · CHAT",
+      shot_6_title: "A Quick Chat That Listens by Default",
+      shot_6_desc: "Speak or type, attach files and pictures, hear short answers. It shows which model answers and how far it is loaded, and follows LLMBar's light or dark theme.",
 
       arch_kicker: "// SILICON ARCHITECTURE",
       arch_headline: "Why it’s so fast on Apple Silicon.",
@@ -132,6 +135,8 @@
       p_decode: "Decode Speed (256 tokens)",
       p_decode_sub: "Pure autoregressive decoding",
       p_spec: "Code Edits (Speculative Decoding)",
+      p_spec_na: "— (no such feature)",
+      p_spec_delta: "only here · 2.5× over plain decode",
       p_spec_sub: "Prompt-lookup n-gram matches",
       p_prefill: "Prefill Speed (2.3K prompt)",
       p_prefill_sub: "Prompt ingestion rate",
@@ -183,7 +188,7 @@
 
       cta_title: "Run intelligence at the speed of silicon.",
       cta_sub: "Download LLMBar.app today. 100% on-device, private, and open source under Apache 2.0.",
-      cta_download: "Download on GitHub Releases",
+      cta_download: "Download",
       cta_github: "GitHub Repository"
     },
 
@@ -275,7 +280,10 @@
       shot_4_desc: "Чат-ориентированный вид с режимами Manual, Edit, Plan и Auto: diff каждого изменения виден, и ничего не записывается без вашего подтверждения.",
       shot_5_badge: "LLM EDITOR · РЕДАКТОР",
       shot_5_title: "Нативный редактор рядом с ассистентом",
-      shot_5_desc: "Дерево файлов, подсветка, проблемы, терминал и git с откатом по файлам — в небольшом Swift-приложении, которое работает только пока вы им пользуетесь.",
+      shot_5_desc: "Дерево файлов, подсветка, проблемы, терминал и git с откатом по файлам — модуль единого приложения LLMBar, которого нет, пока вы им не пользуетесь.",
+      shot_6_badge: "LLM VOICE · ЧАТ",
+      shot_6_title: "Быстрый чат, который по умолчанию слушает",
+      shot_6_desc: "Говорите или печатайте, прикладывайте файлы и картинки, слушайте короткие ответы. Видно, какая модель отвечает и насколько загружена, тема — как у LLMBar.",
 
       arch_kicker: "// АРХИТЕКТУРА КРЕМНИЯ",
       arch_headline: "Почему это работает так быстро на Apple Silicon.",
@@ -309,6 +317,8 @@
       p_decode: "Скорость декода (256 токенов)",
       p_decode_sub: "Обычное авторегрессионное декодирование",
       p_spec: "Правки кода (Спекуляция)",
+      p_spec_na: "— (такой функции нет)",
+      p_spec_delta: "только здесь · ×2,5 к обычному декоду",
       p_spec_sub: "Совпадения n-грамм по промпту",
       p_prefill: "Скорость префилла (2.3K промпт)",
       p_prefill_sub: "Скорость обработки входящего контекста",
@@ -360,7 +370,7 @@
 
       cta_title: "Локальный интеллект на скорости кремния.",
       cta_sub: "Скачайте LLMBar.app прямо сейчас. 100% на устройстве, приватно и бесплатно под лицензией Apache 2.0.",
-      cta_download: "Скачать из GitHub Releases",
+      cta_download: "Скачать",
       cta_github: "Репозиторий на GitHub"
     }
   };
@@ -723,3 +733,55 @@
   applyTheme(currentTheme);
   applyLanguage(currentLang);
 })();
+
+
+// Carousels: any element with data-carousel becomes a row of cards that scrolls sideways — arrows, dots, swipe.
+function initCarousels() {
+  document.querySelectorAll('[data-carousel]').forEach((rail) => {
+    if (rail.parentElement.classList.contains('carousel')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'carousel';
+    rail.parentNode.insertBefore(wrap, rail);
+    wrap.appendChild(rail);
+    const mk = (cls, label, text) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = cls; b.setAttribute('aria-label', label); b.textContent = text;
+      return b;
+    };
+    const prev = mk('carousel-btn carousel-prev', 'Previous', '‹');
+    const next = mk('carousel-btn carousel-next', 'Next', '›');
+    const dots = document.createElement('div');
+    dots.className = 'carousel-dots';
+    wrap.append(prev, next, dots);
+    const cards = () => Array.from(rail.children);
+    const step = () => {
+      const c = cards(); if (c.length < 2) return c[0] ? c[0].getBoundingClientRect().width : 0;
+      return c[1].offsetLeft - c[0].offsetLeft;
+    };
+    const perView = () => Math.max(1, Math.round(rail.clientWidth / (step() || rail.clientWidth)));
+    const pages = () => Math.max(1, cards().length - perView() + 1);
+    const current = () => Math.min(pages() - 1, Math.round(rail.scrollLeft / (step() || 1)));
+    const build = () => {
+      dots.textContent = '';
+      for (let i = 0; i < pages(); i++) {
+        const d = mk('carousel-dot', 'Go to ' + (i + 1), '');
+        d.addEventListener('click', () => rail.scrollTo({ left: i * step(), behavior: 'smooth' }));
+        dots.appendChild(d);
+      }
+      sync();
+    };
+    const sync = () => {
+      const i = current();
+      Array.from(dots.children).forEach((d, k) => d.classList.toggle('active', k === i));
+      prev.disabled = rail.scrollLeft <= 2;
+      next.disabled = rail.scrollLeft >= rail.scrollWidth - rail.clientWidth - 2;
+      wrap.classList.toggle('single', pages() <= 1);
+    };
+    prev.addEventListener('click', () => rail.scrollBy({ left: -step(), behavior: 'smooth' }));
+    next.addEventListener('click', () => rail.scrollBy({ left: step(), behavior: 'smooth' }));
+    rail.addEventListener('scroll', () => window.requestAnimationFrame(sync), { passive: true });
+    window.addEventListener('resize', build);
+    build();
+  });
+}
+document.addEventListener('DOMContentLoaded', initCarousels);

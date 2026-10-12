@@ -155,7 +155,7 @@
           <div class="stat-card">
             <div class="stat-number cyber-gradient-cyan">35 tok/s</div>
             <div class="stat-title" data-i18n="stat_spec_title">Speculative Decoding</div>
-            <div class="stat-desc" data-i18n="stat_spec_desc">2.5× faster code edits and tool calls via exact prompt-lookup verification.</div>
+            <div class="stat-desc" data-i18n="stat_spec_desc">2.5× faster code edits and tool calls than plain decoding, via exact prompt-lookup verification.</div>
           </div>
           <div class="stat-card">
             <div class="stat-number cyber-gradient-phosphor">4.0s</div>
@@ -537,7 +537,7 @@ Streaming: Enabled</code></pre>
         </div>
 
         <!-- Screenshots Showcase Grid -->
-        <div class="gallery-grid">
+        <div class="gallery-grid" data-carousel>
           <!-- Screenshot 1: Engine HUD -->
           <div class="gallery-card">
             <div class="gallery-image-wrapper">
@@ -603,7 +603,21 @@ Streaming: Enabled</code></pre>
             <div class="gallery-card-info">
               <h3 class="gallery-card-title" data-i18n="shot_5_title">A Native Editor Next to the Assistant</h3>
               <p class="gallery-card-desc" data-i18n="shot_5_desc">
-                File tree, syntax colours, problems, terminal and git with per-file discard, in a small Swift app that runs only while you use it.
+                File tree, syntax colours, problems, terminal and git with per-file discard — a module of the one LLMBar app that exists only while you use it.
+              </p>
+            </div>
+          </div>
+
+          <!-- Screenshot 6: Voice chat -->
+          <div class="gallery-card">
+            <div class="gallery-image-wrapper">
+              <img src="assets/screenshot-voice.png" alt="LLM Voice: a quick chat that listens by default, in dark and light themes" class="gallery-img" loading="lazy">
+              <div class="gallery-badge badge-phosphor" data-i18n="shot_6_badge">LLM VOICE · CHAT</div>
+            </div>
+            <div class="gallery-card-info">
+              <h3 class="gallery-card-title" data-i18n="shot_6_title">A Quick Chat That Listens by Default</h3>
+              <p class="gallery-card-desc" data-i18n="shot_6_desc">
+                Speak or type, attach files and pictures, hear short answers. It shows which model answers and how far it is loaded, and follows LLMBar's light or dark theme.
               </p>
             </div>
           </div>
@@ -622,7 +636,7 @@ Streaming: Enabled</code></pre>
           </p>
         </div>
 
-        <div class="arch-matrix-grid">
+        <div class="arch-matrix-grid" data-carousel>
           <!-- Card 1: Hadamard Transform -->
           <div class="arch-card">
             <div class="arch-card-top">
@@ -842,9 +856,9 @@ Streaming: Enabled</code></pre>
                   <div class="tbl-name" data-i18n="p_spec">Code Edits (Speculative Decoding)</div>
                   <div class="tbl-sub" data-i18n="p_spec_sub">Prompt-lookup n-gram matches</div>
                 </td>
-                <td class="tbl-standard dim">— (Not supported)</td>
+                <td class="tbl-standard dim" data-i18n="p_spec_na">— (no such feature)</td>
                 <td class="col-highlight"><strong class="cyber-gradient-cyan">27 – 35 tok/s</strong></td>
-                <td><span class="delta-pill text-cyan">2.5× faster</span></td>
+                <td><span class="delta-pill text-cyan" data-i18n="p_spec_delta">only here · 2.5× over plain decode</span></td>
               </tr>
               <tr>
                 <td>
@@ -1148,7 +1162,7 @@ Streaming: Enabled</code></pre>
               <svg class="apple-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
                 <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.66-.82 1.11-1.96.99-3.1-.96.04-2.13.65-2.81 1.45-.59.69-1.12 1.83-.98 2.94 1.08.08 2.15-.49 2.8-1.29z"/>
               </svg>
-              <span data-i18n="cta_download">Download on GitHub Releases</span>
+              <span data-i18n="cta_download">Download</span>
             </a>
             <a href="https://github.com/dsavenk0/AI-llm-Engine" target="_blank" rel="noopener noreferrer" class="apple-btn-secondary apple-btn-large">
               <span data-i18n="cta_github">GitHub Repository</span>
