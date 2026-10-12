@@ -18,6 +18,25 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
         super.init()
     }
 
+    private static let frameKey = "editorWindowFrame"
+
+    /// The last window frame, if it still fits a connected screen (a monitor may have been unplugged since).
+    static func savedFrame() -> NSRect? {
+        guard !CommandLine.arguments.contains("--module"),                       // tests and snapshots stay as they are
+              let s = UserDefaults.standard.string(forKey: frameKey) else { return nil }
+        let r = NSRectFromString(s)
+        guard r.width >= 700, r.height >= 450 else { return nil }
+        return NSScreen.screens.contains { $0.visibleFrame.intersects(r) } ? r : nil
+    }
+
+    private func rememberFrame() {
+        guard !CommandLine.arguments.contains("--module"), let w = window else { return }
+        UserDefaults.standard.set(NSStringFromRect(w.frame), forKey: EditorWindowController.frameKey)
+    }
+
+    func windowDidResize(_ notification: Notification) { rememberFrame() }
+    func windowDidMove(_ notification: Notification) { rememberFrame() }
+
     func show(near other: NSWindow?) {
         let host = NSHostingView(rootView: RootView(ws: ws, chat: chat, modules: ws.modules))
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 780),
@@ -32,6 +51,8 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
             window.setFrame(o.frame, display: false)
             let p = window.cascadeTopLeft(from: NSPoint(x: o.frame.minX, y: o.frame.maxY))
             window.setFrameTopLeftPoint(p)
+        } else if let saved = EditorWindowController.savedFrame() {
+            window.setFrame(saved, display: false)             // the size and place the person left it at
         } else {
             window.center()
         }
@@ -354,7 +375,6 @@ final class EditorModule: NSObject, NSMenuItemValidation {
     }
     @objc func toggleStatusBar() { ViewPrefs.shared.statusBar.toggle() }
     @objc func showPalette() { current?.ws.palette = paletteItems() }
-
     /// Every command of the menus (File, View and the Modules switches), flattened to "View › Zoom In" with its
     /// shortcut — the palette is the menu, so it never lists something the menus do not have.
     private func paletteItems() -> [PaletteItem] {
@@ -416,7 +436,8 @@ final class EditorModule: NSObject, NSMenuItemValidation {
                      item("New Window", #selector(newEditorWindow), "n", [.command, .shift]),
                      item("Open Folder…", #selector(chooseProject), "o"), .separator(),
                      item("New Terminal", #selector(showTerminal)),
-                     item("New Browser", #selector(showBrowser)), .separator(),
+                     item("New Browser", #selector(showBrowser)),
+                     .separator(),
                      item("Save", #selector(save), "s"), item("Save All", #selector(saveAll), "s", [.command, .option]),
                      item("Close Tab", #selector(closeTab), "w"), .separator(),
                      item("Open Voice Chat", #selector(openVoiceChat)),

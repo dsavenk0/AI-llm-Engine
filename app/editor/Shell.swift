@@ -8,6 +8,7 @@ struct RootView: View {
     @ObservedObject var modules: ModuleSettings
     @ObservedObject private var theme = ThemeSettings.shared
     @ObservedObject private var prefs = ViewPrefs.shared
+    @State private var bottomHeight = SplitPrefs.get("editor.bottom.height", 240)
 
     var body: some View {
         Group {
@@ -26,13 +27,18 @@ struct RootView: View {
                 VStack(spacing: 0) {
                     Toolbar(ws: ws, modules: modules).background(Palette.panel)
                     Divider()
-                    VSplitView {
-                        Group {
-                            if ws.mode == .chat { ChatLayout(ws: ws, chat: chat, modules: modules) }
-                            else { IDELayout(ws: ws, chat: chat, modules: modules) }
-                        }.frame(minHeight: 200)
-                        if ws.bottomVisible {
-                            BottomPanel(ws: ws, modules: modules).frame(minHeight: 120, idealHeight: 240)
+                    GeometryReader { g in
+                        VStack(spacing: 0) {
+                            Group {
+                                if ws.mode == .chat { ChatLayout(ws: ws, chat: chat, modules: modules) }
+                                else { IDELayout(ws: ws, chat: chat, modules: modules) }
+                            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                            if ws.bottomVisible {
+                                SplitHandle(axis: .rows, size: $bottomHeight, range: 120...max(120, g.size.height - 200),
+                                            growsWithDrag: false, key: "editor.bottom.height")
+                                BottomPanel(ws: ws, modules: modules)
+                                    .frame(height: SplitPrefs.clamp(bottomHeight, 120, g.size.height - 200))
+                            }
                         }
                     }
                     if prefs.statusBar {
@@ -411,16 +417,26 @@ private struct ChatLayout: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var chat: ChatStore
     @ObservedObject var modules: ModuleSettings
+    @State private var leftWidth = SplitPrefs.get("editor.chat.left", 210)
+    @State private var rightWidth = SplitPrefs.get("editor.chat.right", 380)
 
     var body: some View {
-        HSplitView {
-            SessionsModuleView(ws: ws, store: chat).frame(minWidth: 170, idealWidth: 210, maxWidth: 300)
-            Group {
-                if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat) }
-                else { Text("The assistant module is switched off (Modules menu)").foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity) }
-            }.frame(minWidth: 360)
-            ChatRightPanel(ws: ws, modules: modules).frame(minWidth: 260, idealWidth: 380)
+        GeometryReader { g in
+            let left = SplitPrefs.clamp(leftWidth, 150, min(320, g.size.width * 0.3))
+            let right = SplitPrefs.clamp(rightWidth, 240, g.size.width - left - 360 - 14)
+            HStack(spacing: 0) {
+                SessionsModuleView(ws: ws, store: chat).frame(width: left)
+                SplitHandle(axis: .columns, size: $leftWidth, range: 150...max(150, min(320, g.size.width * 0.3)),
+                            key: "editor.chat.left")
+                Group {
+                    if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat) }
+                    else { Text("The assistant module is switched off (Modules menu)").foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity) }
+                }.frame(minWidth: 360, maxWidth: .infinity)
+                SplitHandle(axis: .columns, size: $rightWidth, range: 240...max(240, g.size.width - left - 360 - 14),
+                            growsWithDrag: false, key: "editor.chat.right")
+                ChatRightPanel(ws: ws, modules: modules).frame(width: right)
+            }
         }
     }
 }
@@ -460,25 +476,49 @@ private struct IDELayout: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var chat: ChatStore
     @ObservedObject var modules: ModuleSettings
+    @State private var leftWidth = SplitPrefs.get("editor.ide.left", 250)
+    @State private var rightWidth = SplitPrefs.get("editor.ide.right", 360)
+    @State private var outlineHeight = SplitPrefs.get("editor.ide.outline", 150)
+
     var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
-                if modules.isOn(.git) {
-                    Picker("", selection: $ws.leftTab) { Text("Files").tag(0); Text("Changes").tag(1) }
-                        .pickerStyle(.segmented).labelsHidden().padding(6)
-                    Divider()
-                }
-                if ws.leftTab == 0 || !modules.isOn(.git) { FilesModuleView(ws: ws) } else { GitModuleView(ws: ws) }
-            }.frame(minWidth: 190, idealWidth: 250, maxWidth: 400)
-            EditorArea(ws: ws).frame(minWidth: 380)
-            if modules.isOn(.outline) || modules.isOn(.chat) {
-                // a split, so the outline's height is the person's to drag (it was a fixed stack that grew greedily)
-                VSplitView {
-                    if modules.isOn(.outline) {
-                        OutlineModuleView(ws: ws).frame(minHeight: 70, idealHeight: 150).clipped()
+        GeometryReader { g in
+            let hasRight = modules.isOn(.outline) || modules.isOn(.chat)
+            let left = SplitPrefs.clamp(leftWidth, 190, min(400, g.size.width * 0.3))
+            let right = SplitPrefs.clamp(rightWidth, 280, g.size.width - left - 380 - 14)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if modules.isOn(.git) {
+                        Picker("", selection: $ws.leftTab) { Text("Files").tag(0); Text("Changes").tag(1) }
+                            .pickerStyle(.segmented).labelsHidden().padding(6)
+                        Divider()
                     }
-                    if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat, showSwitcher: true).frame(minHeight: 160).clipped() }
-                }.frame(minWidth: 280, idealWidth: 360)
+                    if ws.leftTab == 0 || !modules.isOn(.git) { FilesModuleView(ws: ws) } else { GitModuleView(ws: ws) }
+                }.frame(width: left)
+                SplitHandle(axis: .columns, size: $leftWidth, range: 190...max(190, min(400, g.size.width * 0.3)),
+                            key: "editor.ide.left")
+                EditorArea(ws: ws).frame(minWidth: 380, maxWidth: .infinity)
+                if hasRight {
+                    SplitHandle(axis: .columns, size: $rightWidth, range: 280...max(280, g.size.width - left - 380 - 14),
+                                growsWithDrag: false, key: "editor.ide.right")
+                    GeometryReader { rg in
+                        VStack(spacing: 0) {
+                            if modules.isOn(.outline) {
+                                OutlineModuleView(ws: ws)
+                                    .frame(height: modules.isOn(.chat)
+                                           ? SplitPrefs.clamp(outlineHeight, 70, rg.size.height - 160) : rg.size.height)
+                                    .clipped()
+                            }
+                            if modules.isOn(.outline) && modules.isOn(.chat) {
+                                SplitHandle(axis: .rows, size: $outlineHeight, range: 70...max(70, rg.size.height - 160),
+                                            key: "editor.ide.outline")
+                            }
+                            if modules.isOn(.chat) {
+                                ChatModuleView(ws: ws, store: chat, showSwitcher: true)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+                            }
+                        }
+                    }.frame(width: right)
+                }
             }
         }
     }
