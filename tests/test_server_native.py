@@ -26,6 +26,18 @@ def free_port():
         return s.getsockname()[1]
 
 
+class TestFinishReason(unittest.TestCase):
+    """A reply cut off for looping must read as a clear reason, not a plain stop."""
+
+    def test_mapping(self):
+        from engine.server import finish_reason
+        self.assertEqual(finish_reason({"loop_stopped": True}, False), ("length", "repetition"))
+        self.assertEqual(finish_reason({"finish_reason": "length"}, False), ("length", None))
+        self.assertEqual(finish_reason({"finish_reason": "stop"}, False), ("stop", None))
+        self.assertEqual(finish_reason({}, False), ("stop", None))
+        self.assertEqual(finish_reason({"loop_stopped": True}, True), ("tool_calls", None))   # tool calls win
+
+
 class Server:
     def __init__(self, model, *extra):
         self.port = free_port()

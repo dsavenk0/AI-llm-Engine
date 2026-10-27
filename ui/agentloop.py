@@ -502,6 +502,8 @@ def _stream_chat(engine_port, messages, think, run, tools=None, effort=None):
                 if d.get("content"):
                     yield "content", d["content"]
                 calls += d.get("tool_calls") or []
+                if ch.get("stop_reason") == "repetition":     # the engine cut a runaway loop — say why
+                    yield "note", "The model was repeating itself, so the answer was stopped."
     finally:
         r.close()
     yield "calls", calls
@@ -614,6 +616,9 @@ def run_agent(project, engine_port, messages, emit, run, think=False, auto_edit=
         for kind, value in _stream_chat(engine_port, convo, think, run, [] if lite else tools.schemas(), effort):
             if kind == "calls":
                 calls = value
+                continue
+            if kind == "note":
+                emit({"type": "note", "text": value})
                 continue
             if kind == "content":
                 content.append(value)

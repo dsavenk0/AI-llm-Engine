@@ -441,9 +441,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ENGINE.parse_tool_calls if hasattr(ENGINE, "parse_tool_calls") else parse_tool_calls)
         parser = OutputParser(thinking_open, bool(tools), **markers)
 
-        def chunk(delta, finish=None, usage=None):
+        def chunk(delta, finish=None, usage=None, stop_reason=None):
+            choice = {"index": 0, "delta": delta, "finish_reason": finish}
+            if stop_reason is not None:               # why the answer ended, when it is not a plain stop
+                choice["stop_reason"] = stop_reason
             c = {"id": rid, "object": "chat.completion.chunk", "created": created, "model": ARGS.name,
-                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                 "choices": [choice]}
             if usage is not None:
                 c["usage"] = usage
             return c
@@ -503,7 +506,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._error(500, str(e), "server_error")
 
         calls = parse_calls(parser.tool_text, tools) if parser.tool_text else []
-        finish = "tool_calls" if calls else ("length" if stats.get("finish_reason") == "length" else "stop")
+        finish, stop_reason = finish_reason(stats, bool(calls))
         usage = {"prompt_tokens": stats.get("prompt_tokens", len(ids)),
                  "completion_tokens": stats.get("completion_tokens", 0),
                  "total_tokens": stats.get("prompt_tokens", len(ids)) + stats.get("completion_tokens", 0),
@@ -516,7 +519,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if stream:
             if calls:
                 send(chunk({"tool_calls": [dict(c, index=i) for i, c in enumerate(calls)]}))
-            send(chunk({}, finish))
+            send(chunk({}, finish, stop_reason=stop_reason))
             if include_usage:
                 last = chunk({}, None, usage)
                 last["choices"] = []
@@ -532,8 +535,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             msg["reasoning_content"] = "".join(reasoning)
         if calls:
             msg["tool_calls"] = calls
+        choice = {"index": 0, "message": msg, "finish_reason": finish}
+        if stop_reason is not None:
+            choice["stop_reason"] = stop_reason
         self._json(200, {"id": rid, "object": "chat.completion", "created": created, "model": ARGS.name,
-                         "choices": [{"index": 0, "message": msg, "finish_reason": finish}], "usage": usage})
+                         "choices": [choice], "usage": usage})
+
+
+def finish_reason(stats, has_calls):
+    """(finish_reason, stop_reason) for a reply. A reply cut off because the model was looping ends as
+    'length' (it was truncated, not a clean stop) and carries stop_reason 'repetition' so the UI can say
+    why, instead of looking like a normal finish."""
+    if has_calls:
+        return "tool_calls", None
+    if stats.get("loop_stopped"):
+        return "length", "repetition"
+    if stats.get("finish_reason") == "length":
+        return "length", None
+    return "stop", None
 
 
 def record_stats(st):
