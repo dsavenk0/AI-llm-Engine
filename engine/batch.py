@@ -52,23 +52,29 @@ def _assemble(caches, layer_idx, lmax):
     return merged
 
 
-def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy, on_token=None):
+def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy,
+                     samplers=None, should_stop=None, on_token=None):
     """Greedy/sampled continuation of several prompts at once.
 
-    `model`: a loaded engine model (engine/model.py). `prompts`: a list of token-id lists. `sampler`: a
-    callable (logits_row [V]) -> token id, applied per row. `on_token(i, tok)`: optional streaming callback.
-    Returns a list of generated-token lists, one per prompt, in the same order (stop tokens excluded)."""
+    `model`: a loaded engine model (engine/model.py). `prompts`: a list of token-id lists.
+    `sampler`: a callable (logits_row [V]) -> token id applied to every row; `samplers`: a per-row list that
+    overrides it (so each request keeps its own temperature/top-p). `should_stop`: an optional per-row list of
+    callables () -> bool, checked each step, to stop a row early (a client disconnected, a stop string matched).
+    `on_token(i, tok)`: optional streaming callback. Returns a list of generated-token lists, one per prompt,
+    in order (stop tokens excluded)."""
     B = len(prompts)
     if B == 0:
         return []
     eos = set(eos)
+    samp = samplers if samplers is not None else [sampler] * B
+    stops = should_stop if should_stop is not None else [None] * B
     # 1) prefill each request on its own (B=1): correct positions, and it tells us the per-request length
     per_caches, first = [], []
-    for ids in prompts:
+    for i, ids in enumerate(prompts):
         cache = model.make_cache()
         logits = model(mx.array([list(ids)]), cache, Positions(delta=0))
         per_caches.append(cache)
-        first.append(sampler(logits[0, -1]))
+        first.append(samp[i](logits[0, -1]))
 
     lens = [len(p) for p in prompts]
     lmax = max(lens)
@@ -78,10 +84,10 @@ def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy, on_tok
     delta = mx.array([n - lmax for n in lens])               # per-row rope offset: cache.offset + delta == len
 
     outputs = [[] for _ in range(B)]
-    done = [False] * B
+    done = [bool(stops[i] and stops[i]()) for i in range(B)]
     cur = list(first)
     for i, t in enumerate(cur):
-        if t in eos:
+        if done[i] or t in eos:
             done[i] = True
         else:
             outputs[i].append(t)
@@ -96,9 +102,12 @@ def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy, on_tok
         mask = mx.where(cols[None, None, None, :] < pad[:, None, None, None], NEG, 0.0).astype(mx.float16)
         ids = mx.array([[t] for t in cur])                   # [B, 1]
         logits = model(ids, cache, Positions(delta=delta), mask=mask)
-        nxt = [sampler(logits[b, -1]) for b in range(B)]
+        nxt = [samp[b](logits[b, -1]) for b in range(B)]
         for b in range(B):
             if done[b]:
+                continue
+            if stops[b] and stops[b]():
+                done[b] = True
                 continue
             t = nxt[b]
             if t in eos or len(outputs[b]) >= max_new:

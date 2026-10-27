@@ -89,6 +89,26 @@ class TestBatchedDecode(unittest.TestCase):
             streamed = [t for (r, t) in seen if r == i]
             self.assertEqual(streamed, got[i])
 
+    def test_per_request_sampler_is_used(self):
+        # row 0 greedy, row 1 forced to always emit token 77 — each row follows its own sampler
+        prompts = [[20, 21, 22], [30, 31, 32]]
+        samplers = [batch._greedy, lambda _row: 77]
+        got = batch.batched_generate(self.model, prompts, max_new=5, eos=set(), samplers=samplers)
+        self.assertEqual(got[1], [77, 77, 77, 77, 77])
+        self.assertNotEqual(got[0], [77, 77, 77, 77, 77])
+
+    def test_should_stop_ends_a_row_early(self):
+        prompts = [[20, 21, 22], [30, 31, 32]]
+        calls = {"n": 0}
+
+        def stop_row1():
+            calls["n"] += 1
+            return calls["n"] > 2                      # let a couple of tokens through, then stop row 1
+        got = batch.batched_generate(self.model, prompts, max_new=10, eos=set(),
+                                     should_stop=[None, stop_row1])
+        self.assertLess(len(got[1]), len(got[0]))
+        self.assertGreaterEqual(len(got[1]), 1)
+
     def test_single_request_batch_equals_the_reference(self):
         p = [7, 8, 9, 10]
         want = greedy_single(self.model, p, 8, self.eos)
