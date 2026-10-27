@@ -29,15 +29,14 @@ final class ViewPrefs: ObservableObject {
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
-    case files, outline, git, chat, problems, terminal, github, preview, extensions
+    case files, outline, git, chat, problems, terminal, github, preview
     var id: String { rawValue }
     /// Modules that start switched off: they bring a web view / network, so they are opt-in.
-    static let offByDefault: Set<ModuleID> = [.preview, .extensions]
+    static let offByDefault: Set<ModuleID> = [.preview]
     var title: String {
         switch self {
         case .github: return "GitHub"
         case .preview: return "Preview (browser)"
-        case .extensions: return "Extensions (Open VSX)"
         case .files: return "Files"
         case .outline: return "Outline"
         case .git: return "Changes (git)"
@@ -116,8 +115,6 @@ final class Workspace: ObservableObject {
     @Published var visionSwitching = false
     @Published var engineBusy: String?                // "Starting the model…" while the llm command works
     @Published var installed: [InstalledModel] = []   // models on this Mac the engine can run
-    @Published var snippets: [String: [Snippet]] = [:]  // language → snippets from installed extensions
-    private var snippetsAsked: Set<String> = []
     @Published var remoteURL: String?                 // set while the assistant talks to another server
     @Published var needsProject = false               // a window with no folder yet: the welcome screen
     var onChooseProject: (() -> Void)?                // the window controller asks for a folder (non-blocking)
@@ -486,32 +483,6 @@ final class Workspace: ObservableObject {
             await self.loadDir("")
             for d in self.expanded where !d.isEmpty { await self.loadDir(d) }
             await self.loadAllFiles()
-        }
-    }
-
-    // MARK: extensions (Open VSX): themes and snippets
-
-    /// Snippets for a language, asked once per language while the module is on.
-    func loadSnippets(for language: String) {
-        guard ModuleSettings.shared.isOn(.extensions), !language.isEmpty, !snippetsAsked.contains(language) else { return }
-        snippetsAsked.insert(language)
-        Task {
-            if let r: SnippetsResponse = try? await backend.get("/api/extensions/snippets?language=\(backend.encoded(language))") {
-                snippets[language] = r.snippets
-            }
-        }
-    }
-
-    /// Forget what was loaded (after an install or removal) so the next file asks again.
-    func resetSnippets() { snippets = [:]; snippetsAsked = [] }
-
-    func applyExtensionTheme(id: String, label: String) {
-        guarded("Theme") {
-            let t: ThemeOverride = try await self.backend.get(
-                "/api/extensions/theme?id=\(self.backend.encoded(id))&label=\(self.backend.encoded(label))")
-            ThemeSettings.shared.mode = t.dark ? .dark : .light
-            ThemeSettings.shared.custom = t
-            self.say("Theme: \(t.label)")
         }
     }
 

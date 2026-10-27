@@ -22,18 +22,8 @@ final class ThemeSettings: ObservableObject {
         }
     }
 
-    /// A colour theme taken from an installed Open VSX extension (nil = the built-in colours).
-    @Published var custom: ThemeOverride? {
-        didSet {
-            if let c = custom, let d = try? JSONEncoder().encode(c) { UserDefaults.standard.set(d, forKey: "customTheme") }
-            else { UserDefaults.standard.removeObject(forKey: "customTheme") }
-            apply()
-        }
-    }
-
     init() {
         mode = ThemeMode(rawValue: AppTheme.setting) ?? .system
-        custom = UserDefaults.standard.data(forKey: "customTheme").flatMap { try? JSONDecoder().decode(ThemeOverride.self, from: $0) }
         NotificationCenter.default.addObserver(forName: .appThemeChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.sync() }
         }
@@ -100,9 +90,6 @@ enum Palette {
     /// The code area is opaque on purpose: AppKit renders text on a non-opaque text view without font
     /// smoothing, which is what made the code look thin and washed out.
     static func editorNS(isDark: Bool) -> NSColor {
-        if let c = ThemeSettings.shared.custom, let v = ThemeOverride.rgb(c.background) {
-            return NSColor(srgbRed: v.0, green: v.1, blue: v.2, alpha: 1)
-        }
         return isDark ? NSColor(srgbRed: 0.066, green: 0.088, blue: 0.115, alpha: 1)
                : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1)
     }

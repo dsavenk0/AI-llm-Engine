@@ -87,48 +87,6 @@ struct InfoResponse: Decodable {
     let remote: Bool?, endpoint: String?
 }
 
-struct ExtensionHit: Decodable, Identifiable, Hashable {
-    let id: String, namespace: String, name: String, version: String
-    let displayName: String, description: String
-    let downloads: Int
-    let verified: Bool
-}
-struct ExtensionSearchResponse: Decodable { let results: [ExtensionHit] }
-struct ExtensionTheme: Decodable, Hashable { let label: String, uiTheme: String }
-struct ExtensionSnippetFile: Decodable, Hashable { let language: String }
-struct ExtensionSnippetItem: Decodable, Hashable { let language: String, prefix: String, description: String }
-struct ExtensionDetail: Decodable {
-    let themes: [String], languages: [String]
-    let snippets: [ExtensionSnippetItem]
-    let snippet_total: Int
-    let homepage: String?
-    let folder: String
-}
-struct ExtensionUpdate: Decodable, Hashable { let id: String, installed: String, latest: String }
-struct ExtensionUpdatesResponse: Decodable { let updates: [ExtensionUpdate] }
-
-struct InstalledExtension: Decodable, Identifiable, Hashable {
-    let id: String, name: String, displayName: String, version: String, description: String
-    let themes: [ExtensionTheme], snippets: [ExtensionSnippetFile]
-    let skipped: [String]
-    let has_code: Bool
-    var enabled: Bool? = nil
-    var usable: Bool? = nil
-    var homepage: String? = nil
-    var isEnabled: Bool { enabled ?? true }
-    var detail: String {
-        var parts: [String] = []
-        if !themes.isEmpty { parts.append("\(themes.count) theme\(themes.count == 1 ? "" : "s")") }
-        if !snippets.isEmpty { parts.append("snippets: " + Set(snippets.map(\.language)).sorted().joined(separator: ", ")) }
-        if parts.isEmpty { parts.append("nothing this editor can use") }
-        return parts.joined(separator: " · ")
-    }
-}
-struct InstalledExtensionsResponse: Decodable { let extensions: [InstalledExtension] }
-struct InstallExtensionResponse: Decodable { let extension_: InstalledExtension
-    enum CodingKeys: String, CodingKey { case extension_ = "extension" } }
-struct SnippetsResponse: Decodable { let snippets: [Snippet] }
-
 struct BackendError: LocalizedError {
     let message: String
     var errorDescription: String? { message }

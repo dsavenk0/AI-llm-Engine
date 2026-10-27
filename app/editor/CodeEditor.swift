@@ -26,16 +26,9 @@ enum Syntax {
     ]
 
     static func color(_ kind: String, dark isDark: Bool) -> NSColor? {
-        if let t = ThemeSettings.shared.custom {                // a theme from an extension: its colours, kind by kind
-            if let hex = t.kinds[kind], let v = ThemeOverride.rgb(hex) { return ns((CGFloat(v.0), CGFloat(v.1), CGFloat(v.2))) }
-            return nil
-        }
         return (isDark ? dark : light)[kind].map(ns)
     }
     static func text(dark isDark: Bool) -> NSColor {
-        if let t = ThemeSettings.shared.custom, let v = ThemeOverride.rgb(t.foreground) {
-            return ns((CGFloat(v.0), CGFloat(v.1), CGFloat(v.2)))
-        }
         return isDark ? ns((0.92, 0.96, 0.98)) : ns((0.02, 0.04, 0.07))
     }
 }
@@ -163,7 +156,6 @@ extension NSView {
 
 struct CodeEditor: NSViewRepresentable {
     @ObservedObject var file: OpenFile
-    var snippets: [Snippet] = []                // from installed extensions: a prefix + Tab expands
     var onEdit: (OpenFile) -> Void
     var onCursor: (Int, Int) -> Void
 
@@ -342,29 +334,8 @@ struct CodeEditor: NSViewRepresentable {
             parent.onCursor(line, col)
         }
 
-        /// A snippet prefix before the caret + Tab → the snippet body, caret at its first tab stop.
-        private func expandSnippet(in tv: NSTextView) -> Bool {
-            let snippets = parent.snippets
-            let sel = tv.selectedRange()
-            guard !snippets.isEmpty, sel.length == 0 else { return false }
-            let ns = tv.string as NSString
-            let lineStart = ns.lineRange(for: NSRange(location: sel.location, length: 0)).location
-            let before = ns.substring(with: NSRange(location: lineStart, length: sel.location - lineStart))
-            guard let snip = SnippetMatch.find(in: before, among: snippets) else { return false }
-            let indent = String(before.prefix { $0 == " " || $0 == "\t" })
-            let (text, caret) = SnippetExpander.expand(snip.body, indent: indent)
-            let prefixLen = (snip.prefix as NSString).length
-            let range = NSRange(location: sel.location - prefixLen, length: prefixLen)
-            guard tv.shouldChangeText(in: range, replacementString: text) else { return false }
-            tv.replaceCharacters(in: range, with: text)
-            tv.didChangeText()
-            tv.setSelectedRange(NSRange(location: range.location + caret, length: 0))
-            return true
-        }
-
         func textView(_ tv: NSTextView, doCommandBy sel: Selector) -> Bool {
             if sel == #selector(NSResponder.insertTab(_:)) {
-                if expandSnippet(in: tv) { return true }
                 tv.insertText("    ", replacementRange: tv.selectedRange())
                 return true
             }

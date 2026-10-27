@@ -120,7 +120,6 @@ private struct Toolbar: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var modules: ModuleSettings
     @State private var showRemote = false
-    @State private var showExtensions = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -187,7 +186,6 @@ private struct Toolbar: View {
                 }.foregroundColor(.secondary)
             }.menuStyle(.borderlessButton).fixedSize().help("Where the assistant's model runs")
             .sheet(isPresented: $showRemote) { RemoteSheet(ws: ws, shown: $showRemote) }
-            .sheet(isPresented: $showExtensions) { ExtensionsSheet(ws: ws, shown: $showExtensions) }
             .onAppear { Task { await ws.loadInstalled() } }
             Button { ws.bottomVisible.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }
                 .buttonStyle(.plain).foregroundColor(Palette.accent)          // the same accent as the Modules menu beside it
@@ -198,10 +196,6 @@ private struct Toolbar: View {
                         modules.toggle(m)
                         if m == .preview, modules.isOn(.preview) { ws.showPanel("preview") }      // switching it on shows it
                     })).disabled(m == .files)
-                }
-                if modules.isOn(.extensions) {
-                    Divider()
-                    Button("Extensions (Open VSX)…") { showExtensions = true }
                 }
             } label: { Image(systemName: "square.grid.2x2") }.menuStyle(.borderlessButton).fixedSize().help("Modules")
             Menu {
@@ -576,11 +570,9 @@ private struct EditorSurface: View {
                 Divider()
             }
             CodeEditor(file: file,
-                       snippets: ws.snippets[file.language] ?? [],
                        onEdit: { f in Task { await ws.analyze(f) } },
                        onCursor: { l, c in ws.cursor = (l, c) })
                 .id(file.path)
-                .onAppear { ws.loadSnippets(for: file.language) }
         }
     }
 }

@@ -803,69 +803,6 @@ class Handler(BaseHTTPRequestHandler):
         done = P.git_discard(body.get("paths"), bool(body.get("all")))
         return self._json(200, {"ok": True, "discarded": done, "git": P.git_status()})
 
-    # ---- Open VSX extensions (declarative parts only: themes, snippets; never runs their code)
-    def api_extensions_search(self, P, q, body):
-        from ui import extensions
-        query = (q.get("q") or "").strip()
-        if not query:
-            raise ValueError("a search text is required")
-        try:
-            return self._json(200, {"results": extensions.search(query, category=q.get("category") or None)})
-        except extensions.ExtensionError as e:
-            return self._error(502, str(e))
-
-    def api_extensions_installed(self, P, q, body):
-        from ui import extensions
-        return self._json(200, {"extensions": extensions.installed()})
-
-    def api_extensions_install(self, P, q, body):
-        from ui import extensions
-        if body.get("confirm") is not True:           # downloads from the internet and writes to ~/.llm
-            return self._error(400, "installing an extension needs an explicit confirmation")
-        try:
-            m = extensions.install(body.get("namespace"), body.get("name"), body.get("version"))
-        except extensions.ExtensionError as e:
-            return self._error(502 if "open-vsx.org" in str(e) else 400, str(e))
-        return self._json(200, {"ok": True, "extension": m})
-
-    def api_extensions_enable(self, P, q, body):
-        from ui import extensions
-        try:
-            on = extensions.set_enabled(body.get("id"), bool(body.get("enabled")))
-        except extensions.ExtensionError as e:
-            return self._error(400, str(e))
-        return self._json(200, {"ok": True, "enabled": on})
-
-    def api_extensions_detail(self, P, q, body):
-        from ui import extensions
-        try:
-            return self._json(200, extensions.detail(q.get("id", "")))
-        except extensions.ExtensionError as e:
-            return self._error(404, str(e))
-
-    def api_extensions_updates(self, P, q, body):
-        from ui import extensions
-        return self._json(200, {"updates": extensions.updates()})
-
-    def api_extensions_remove(self, P, q, body):
-        from ui import extensions
-        try:
-            n = extensions.remove(body.get("id"))
-        except extensions.ExtensionError as e:
-            return self._error(400, str(e))
-        return self._json(200, {"ok": True, "removed": n})
-
-    def api_extensions_theme(self, P, q, body):
-        from ui import extensions
-        try:
-            return self._json(200, extensions.theme(q.get("id", ""), q.get("label", "")))
-        except extensions.ExtensionError as e:
-            return self._error(404, str(e))
-
-    def api_extensions_snippets(self, P, q, body):
-        from ui import extensions
-        return self._json(200, {"snippets": extensions.snippets(q.get("language", ""))})
-
     def api_git_push(self, P, q, body):
         if body.get("confirm") is not True:           # a push leaves the machine: never implicit
             return self._error(400, "push needs an explicit confirmation")
