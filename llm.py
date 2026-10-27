@@ -13,6 +13,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
+  ./llm conduct ["<task>"]   optional orchestrator: split a task across models by role (set: conduct set …)
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
   ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
@@ -2335,6 +2336,103 @@ def open_window():
     return subprocess.run(["osascript", "-e", script], capture_output=True).returncode == 0
 
 
+# ───────────────────────────── the Conductor (optional) ─────────────────────────────
+def _conduct_local_fallback(cfg):
+    m = current_model(cfg)
+    return {"local": m["name"]} if m else None
+
+
+def _conduct_switch(cfg):
+    """A `switch_local(model)` for the Conductor: load `model` on the one engine, wait until it serves, and
+    return its local OpenAI endpoint. Reuses the normal select + (re)start + health path."""
+    def switch(model):
+        if not choose_model(cfg, model):
+            raise RuntimeError(f"cannot select model {model!r}")
+        if not (read_pid(ENGINE_PID) and health(cfg)) and not start(cfg, interactive=False):
+            raise RuntimeError(f"the engine did not start on {model!r}")
+        if not health(cfg, timeout=600):
+            raise RuntimeError(f"the engine is not answering on {model!r}")
+        return {"type": "openai", "url": f"http://127.0.0.1:{cfg['port']}/v1", "model": "local"}
+    return switch
+
+
+def _conduct_status(cfg, conductor, root):
+    from harness import delegate
+    roles, dropped = conductor.resolve_roles(root, local=_conduct_local_fallback(cfg))
+    print(B(T("Conductor") + " — " + T("optional; working with one model is unaffected")))
+    print(DIM(conductor.config_path(root)))
+    for r in conductor.ROLES:
+        if r in roles:
+            kind = T("local, takes turns") if conductor.is_local(roles[r]) else T("remote, parallel")
+            print(f"  {r:<5} → {conductor.where(roles[r])}   [{kind}]")
+        elif r in dropped:
+            print(f"  {r:<5} → " + Y(T("unusable")) + f": {dropped[r]}")
+        else:
+            print(f"  {r:<5} → " + DIM(T("not set — uses the selected model")))
+    installed = [m["name"] for m in scan_models(cfg) if m["supported"]]
+    print("\n" + T("Installed models:") + " " + (", ".join(installed) or T("none")))
+    workers = delegate.load(root)
+    print(T("Workers:") + " " + (", ".join(workers) or T("none")))
+    if "heavy" not in roles:
+        print(Y("• " + T("set 'heavy' (it plans and synthesizes): llm conduct set heavy <model|worker>")))
+    if roles and len({conductor.where(roles[r]) for r in roles}) == 1:
+        print(DIM("• " + T("all roles use one model — the Conductor adds little, which is fine")))
+    print(DIM("\n" + T("set:") + " llm conduct set <heavy|code|fast> <model|worker>    "
+              + T("run:") + " llm conduct \"<task>\""))
+    return True
+
+
+def _conduct_set(cfg, conductor, root, role, value):
+    from harness import delegate
+    if role not in conductor.ROLES:
+        print(R(T("role must be one of") + " " + ", ".join(conductor.ROLES))); return False
+    kind, name = None, value
+    if value.startswith("local:"):
+        kind, name = "local", value[6:].strip()
+    elif value.startswith("worker:"):
+        kind, name = "worker", value[7:].strip()
+    workers = delegate.load(root)
+    if kind in (None, "local"):
+        hits = [m for m in scan_models(cfg) if m["supported"]
+                and (name.lower() in m["name"].lower() or m["path"] == name)]
+        if len(hits) > 1 and kind != "local":
+            print(Y(T("Several models:") + " " + ", ".join(h["name"] for h in hits))); return False
+        if hits:
+            conductor.set_role(root, role, {"local": hits[0]["name"]})
+            print(G(f"{role} → {hits[0]['name']} " + T("(local)"))); return True
+        if kind == "local":
+            print(R(T("No installed model matches") + f" {name!r}")); return False
+    if kind in (None, "worker") and name in workers:
+        conductor.set_role(root, role, name)
+        print(G(f"{role} → {name} " + T("(worker)"))); return True
+    print(R(T("No installed model or worker matches") + f" {value!r}")); return False
+
+
+def conduct_cmd(cfg, args):
+    """Optional orchestrator: split a task across models by role. Opt-in — single-model work is unaffected."""
+    from harness import conductor
+    root = os.getcwd()
+    sub = args[0] if args else "status"
+    if sub in ("status", "roles", "show") and len(args) <= 1:
+        return _conduct_status(cfg, conductor, root)
+    if sub == "set":
+        if len(args) < 3:
+            print(R("usage: llm conduct set <heavy|code|fast> <model|worker>")); return False
+        return _conduct_set(cfg, conductor, root, args[1], " ".join(args[2:]))
+    if sub == "unset" and len(args) == 2:
+        conductor.set_role(root, args[1], None); print(G(f"{args[1]} cleared")); return True
+    task = " ".join(args).strip()
+    if not task:
+        return _conduct_status(cfg, conductor, root)
+    try:
+        answer = conductor.conduct(task, root, local=_conduct_local_fallback(cfg),
+                                   switch_local=_conduct_switch(cfg), emit=lambda line: print(DIM(line)))
+    except RuntimeError as e:
+        print(R(str(e))); return False
+    print("\n" + (answer or "(empty)"))
+    return True
+
+
 def main():
     cmd, arg = (sys.argv[1:] + ["", ""])[:2]
     cfg, tty = load_cfg(), sys.stdin.isatty()
@@ -2361,6 +2459,7 @@ def main():
         "eval": lambda: run_eval(sys.argv[2:]),
         "calibrate": lambda: run_calibrate(sys.argv[2:]),
         "agent": lambda: __import__("agent").main(sys.argv[2:]),
+        "conduct": lambda: conduct_cmd(cfg, sys.argv[2:]),
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
