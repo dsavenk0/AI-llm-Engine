@@ -392,18 +392,23 @@ class Attention(nn.Module):
         self.rope_base = float(rp.get("rope_theta", 1e7))
         self.mrope = MRoPE(self.rope_dims, self.rope_base, rp.get("mrope_section", [11, 11, 10]))
 
-    def __call__(self, x, nr, ops, cache, pos):
+    def __call__(self, x, nr, ops, cache, pos, mask=None):
         L = nr.shape[1]
         q, k, v, gate = ops.attn_pre(nr, *_w(self.qkv_proj), self.q_norm.weight, self.k_norm.weight)
         if pos.cos is not None:  # image prompt: explicit 3-D positions
             q = self.mrope.apply(q, pos.cos, pos.sin)
             k = self.mrope.apply(k, pos.cos, pos.sin)
         else:
+            # pos.delta is a scalar (single sequence) or a per-row array (batched decode: each row's
+            # position is its own length, so left-padded rows get the right rope offset)
             off = cache.offset + pos.delta
             q = mx.fast.rope(q, self.rope_dims, traditional=False, base=self.rope_base, scale=1.0, offset=off)
             k = mx.fast.rope(k, self.rope_dims, traditional=False, base=self.rope_base, scale=1.0, offset=off)
         k, v = cache.update(k, v)
-        o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal" if L > 1 else None)
+        # `mask` (an additive [B,1,Lq,Lk] array) comes from batched decode to hide other rows' padding;
+        # without it the single-sequence path keeps its plain causal / no-mask behaviour.
+        m = mask if mask is not None else ("causal" if L > 1 else None)
+        o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=m)
         return ops.attn_post(o, gate, x, *_w(self.o_proj))
 
 
@@ -461,12 +466,12 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(a["hidden_size"], a["rms_norm_eps"])
         self.mlp = MLP(a, q)
 
-    def __call__(self, x, ops, cache, pos):
+    def __call__(self, x, ops, cache, pos, mask=None):
         n, nr = ops.norm_had(x, self.input_layernorm.weight)
         if self.is_linear:
             h = self.linear_attn(x, n, nr, ops, cache)
         else:
-            h = self.self_attn(x, nr, ops, cache, pos)
+            h = self.self_attn(x, nr, ops, cache, pos, mask)
         return ops.mlp(h, self.post_attention_layernorm.weight,
                        *_w(self.mlp.gate_up_proj), *_w(self.mlp.down_proj))
 
@@ -605,7 +610,7 @@ class Model(nn.Module):
         for c in cache:
             c.commit(m)
 
-    def __call__(self, ids=None, cache=None, pos=None, embeds=None, last_only=True, verify=False):
+    def __call__(self, ids=None, cache=None, pos=None, embeds=None, last_only=True, verify=False, mask=None):
         lm = self.language_model
         if verify:
             for c in cache:
@@ -617,7 +622,7 @@ class Model(nn.Module):
         # token of the chunk) alive until the end — ~2 GB for 1024 tokens × 48 layers.
         step_eval = h.shape[1] > 64
         for layer, c in zip(lm.model.layers, cache):
-            h = layer(h, self.ops, c, pos)
+            h = layer(h, self.ops, c, pos, mask)
             if step_eval:
                 mx.eval(h, c.arrays if hasattr(c, "arrays") else c.state)
         if last_only:
