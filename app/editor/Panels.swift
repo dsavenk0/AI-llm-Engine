@@ -573,6 +573,95 @@ struct MCPSheet: View {
     }
 }
 
+// MARK: - Conductor: map the three roles to installed models or workers (optional, off by default)
+
+struct ConductorSheet: View {
+    @ObservedObject var ws: Workspace
+    @Binding var shown: Bool
+    @State private var status: ConductorStatus?
+    @State private var busy = false
+
+    private let roles = ["heavy", "code", "fast"]
+    private let about = ["heavy": "plans and synthesizes — architecture, hard reasoning",
+                         "code": "writes and fixes code to a spec",
+                         "fast": "routine, fast work — find files, simple edits, checks"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                AccentCaption(text: "Conductor · multi-model")
+                Spacer()
+                Button("Close") { shown = false }.keyboardShortcut(.cancelAction)
+            }
+            Text("Optional. Split one task across models by role. A remote (API) model runs in parallel; local "
+                 + "models take turns on the one engine — before a local subtask the engine switches to that "
+                 + "model. Off by default: nothing runs until you start it from a terminal.")
+                .font(.caption).foregroundColor(.secondary)
+            if let s = status {
+                List {
+                    Section("Roles") { ForEach(roles, id: \.self) { roleRow($0, s) } }
+                    Section {
+                        Text("Run it from a terminal (it switches the engine between local models, so the model "
+                             + "you have loaded will change):").font(.caption).foregroundColor(.secondary)
+                        Text("./llm conduct \"<task>\"").font(.system(size: 12, design: .monospaced))
+                            .textSelection(.enabled).foregroundColor(Palette.accent)
+                        if s.installed.count < 2 {
+                            Text("Only one model is installed — install more to give the roles different models "
+                                 + "(the Conductor still works with one).").font(.caption2).foregroundColor(Palette.yellow)
+                        }
+                    }
+                }.listStyle(.inset)
+            } else {
+                HStack { ProgressView().controlSize(.small); Text("Loading…").font(.caption) }
+            }
+        }
+        .padding(16).frame(minWidth: 640, minHeight: 460)
+        .onAppear { Task { await reload() } }
+    }
+
+    private func roleRow(_ role: String, _ s: ConductorStatus) -> some View {
+        let r = s.roles[role]
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(role.capitalized).bold().frame(width: 60, alignment: .leading)
+                Menu {
+                    Button("Not set (use the selected model)") { set(role, nil) }
+                    if !s.installed.isEmpty {
+                        Divider()
+                        ForEach(s.installed, id: \.self) { m in
+                            Button("\(m)  — local") { set(role, "local:\(m)") }
+                        }
+                    }
+                    if !s.workers.isEmpty {
+                        Divider()
+                        ForEach(s.workers, id: \.self) { w in
+                            Button("\(w)  — worker (API)") { set(role, "worker:\(w)") }
+                        }
+                    }
+                } label: {
+                    Text(r?.set == true ? r!.label : "not set")
+                        .foregroundColor(r?.set == true ? (r!.ok ? .primary : Palette.magenta) : .secondary)
+                }.disabled(busy)
+                Spacer()
+                if r?.set == true, r?.local == true { Text("switches").font(.caption2).foregroundColor(.secondary) }
+                else if r?.set == true, r?.ok == true { Text("parallel").font(.caption2).foregroundColor(.secondary) }
+            }
+            Text(about[role] ?? "").font(.caption2).foregroundColor(.secondary)
+        }.padding(.vertical, 2)
+    }
+
+    private func reload() async { status = await ws.conductorStatus() }
+
+    private func set(_ role: String, _ value: String?) {
+        busy = true
+        Task {
+            await ws.conductorSet(role, value)
+            await reload()
+            busy = false
+        }
+    }
+}
+
 // MARK: - the command palette (⇧⌘P)
 
 struct PaletteItem: Identifiable {

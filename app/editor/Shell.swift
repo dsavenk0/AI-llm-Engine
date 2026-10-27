@@ -121,6 +121,7 @@ private struct Toolbar: View {
     @ObservedObject var modules: ModuleSettings
     @State private var showRemote = false
     @State private var showMCP = false
+    @State private var showConductor = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -202,8 +203,13 @@ private struct Toolbar: View {
                     Divider()
                     Button("Assistant Tools (MCP)…") { showMCP = true }
                 }
+                if modules.isOn(.conductor) {
+                    if !modules.isOn(.mcp) { Divider() }
+                    Button("Conductor (multi-model)…") { showConductor = true }
+                }
             } label: { Image(systemName: "square.grid.2x2") }.menuStyle(.borderlessButton).fixedSize().help("Modules")
             .sheet(isPresented: $showMCP) { MCPSheet(ws: ws, shown: $showMCP) }
+            .sheet(isPresented: $showConductor) { ConductorSheet(ws: ws, shown: $showConductor) }
             Menu {
                 Picker("Theme", selection: Binding(get: { ThemeSettings.shared.mode }, set: { ThemeSettings.shared.mode = $0 })) {
                     ForEach(ThemeMode.allCases) { Text($0.title).tag($0) }

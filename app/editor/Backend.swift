@@ -110,6 +110,18 @@ struct MCPProbeResponse: Decodable {
     let tools: [MCPProbeTool]
 }
 
+// MARK: - Conductor (optional multi-model orchestrator)
+struct ConductorRole: Decodable, Hashable {
+    let set: Bool, ok: Bool, local: Bool
+    let label: String
+}
+struct ConductorStatus: Decodable {
+    let roles: [String: ConductorRole]
+    let installed: [String]
+    let workers: [String]
+    let configPath: String
+}
+
 struct BackendError: LocalizedError {
     let message: String
     var errorDescription: String? { message }

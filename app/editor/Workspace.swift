@@ -29,15 +29,16 @@ final class ViewPrefs: ObservableObject {
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
-    case files, outline, git, chat, problems, terminal, github, preview, mcp
+    case files, outline, git, chat, problems, terminal, github, preview, mcp, conductor
     var id: String { rawValue }
     /// Modules that start switched off: they bring a web view / network / external programs, so they are opt-in.
-    static let offByDefault: Set<ModuleID> = [.preview, .mcp]
+    static let offByDefault: Set<ModuleID> = [.preview, .mcp, .conductor]
     var title: String {
         switch self {
         case .github: return "GitHub"
         case .preview: return "Preview (browser)"
         case .mcp: return "Assistant Tools (MCP)"
+        case .conductor: return "Conductor (multi-model)"
         case .files: return "Files"
         case .outline: return "Outline"
         case .git: return "Changes (git)"
@@ -565,6 +566,24 @@ final class Workspace: ObservableObject {
               let line = text.split(separator: "\n").last(where: { $0.hasPrefix("[") }),
               let list = try? JSONDecoder().decode([InstalledModel].self, from: Data(line.utf8)) else { return }
         installed = list.filter { $0.supported != false }
+    }
+
+    // MARK: Conductor (optional multi-model orchestrator) — reads/writes .llm/conductor.json via the CLI
+    func conductorStatus() async -> ConductorStatus? {
+        let (ok, data) = await runCLI(["conduct", "--root", root, "--json"])
+        guard ok, let text = String(data: data, encoding: .utf8),
+              let line = text.split(separator: "\n").last(where: { $0.hasPrefix("{") }),
+              let s = try? JSONDecoder().decode(ConductorStatus.self, from: Data(line.utf8)) else { return nil }
+        return s
+    }
+
+    /// Map a role to a local model (`local:<name>`), a worker (`worker:<name>`), or clear it (value nil).
+    func conductorSet(_ role: String, _ value: String?) async {
+        if let v = value {
+            _ = await runCLI(["conduct", "--root", root, "set", role, v])
+        } else {
+            _ = await runCLI(["conduct", "--root", root, "unset", role])
+        }
     }
 
     /// A star on a model (`./llm fav`): starred ones lead the model menu and are offered by the other apps.

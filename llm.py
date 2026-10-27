@@ -2408,13 +2408,41 @@ def _conduct_set(cfg, conductor, root, role, value):
     print(R(T("No installed model or worker matches") + f" {value!r}")); return False
 
 
+def _conduct_status_json(cfg, conductor, root):
+    """The role mapping and the choices a UI offers, as one JSON line (for the editor's Conductor panel)."""
+    from harness import delegate
+    roles, dropped = conductor.resolve_roles(root, local=_conduct_local_fallback(cfg))
+    raw = conductor.load_mapping(root)
+    out = {"roles": {}, "installed": [m["name"] for m in scan_models(cfg) if m["supported"]],
+           "workers": list(delegate.load(root)),
+           "configPath": conductor.config_path(root)}
+    for r in conductor.ROLES:
+        if r in roles:
+            out["roles"][r] = {"set": r in raw, "ok": True, "local": conductor.is_local(roles[r]),
+                               "label": conductor.where(roles[r])}
+        else:
+            out["roles"][r] = {"set": r in raw, "ok": False, "local": False,
+                               "label": dropped.get(r, "not set — uses the selected model")}
+    print(json.dumps(out, ensure_ascii=False))
+    return True
+
+
 def conduct_cmd(cfg, args):
-    """Optional orchestrator: split a task across models by role. Opt-in — single-model work is unaffected."""
+    """Optional orchestrator: split a task across models by role. Opt-in — single-model work is unaffected.
+    `--root DIR` points at the project (the editor passes it); `--json` prints the status for a UI."""
     from harness import conductor
-    root = os.getcwd()
+    root, as_json, rest = os.getcwd(), False, []
+    i = 0
+    while i < len(args):
+        if args[i] == "--root" and i + 1 < len(args):
+            root = args[i + 1]; i += 2; continue
+        if args[i] == "--json":
+            as_json = True; i += 1; continue
+        rest.append(args[i]); i += 1
+    args = rest
     sub = args[0] if args else "status"
-    if sub in ("status", "roles", "show") and len(args) <= 1:
-        return _conduct_status(cfg, conductor, root)
+    if as_json or (sub in ("status", "roles", "show") and len(args) <= 1):
+        return _conduct_status_json(cfg, conductor, root) if as_json else _conduct_status(cfg, conductor, root)
     if sub == "set":
         if len(args) < 3:
             print(R("usage: llm conduct set <heavy|code|fast> <model|worker>")); return False
