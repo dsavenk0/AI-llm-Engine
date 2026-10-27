@@ -18,9 +18,12 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   files / editor / outline+assistant in the editor layout), the height of the bottom panel and of the outline, and
   the window's size and place are kept between launches (dividers are plain draggable handles that save what you
   set; a saved place that no longer fits a connected screen is ignored).
-- **Extensions sheet administration**: on/off switches per extension, details (themes, every snippet prefix),
-  update checks, a category filter for the search and a plain "nothing here this editor can use" for extensions made
-  of their own code. Extensions that run their own code are not run by this editor (no foreign extension host).
+- **Assistant tools over MCP** (opt-in *Assistant Tools (MCP)* module): a catalog (context7, Stitch) and your own
+  servers — a program over stdio or a streamable-HTTP URL — connected so the editor's assistant can use their tools
+  on the open project (they run with the project as their working directory). Every call is approved, a server is
+  contacted only on *Test* or use, and the servers live in the workspace `.llm/mcp.json`, trusted per content. This
+  replaces the VS Code (Open VSX) extensions feature, which is removed from the app and archived under
+  `legacy/vscode-extensions/` (it never shipped in a release).
 - **Voice**: a lookup on the web only happens on a clear request ("найди в интернете…", "search the web…") or a clear
   sign that the answer changes (today, weather, price, score…) — never for a greeting, and without an extra model
   call for them.

@@ -760,6 +760,9 @@ class Handler(BaseHTTPRequestHandler):
             emit({"type": "error", "message": str(e)})
         finally:
             run.cancel()
+            cb = getattr(run, "on_finish", None)
+            if cb:
+                cb()                                  # close any MCP servers connected for this run
             agentloop.RUNS.pop(run.id, None)
 
     def api_git_status(self, P, q, body):
@@ -802,6 +805,99 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "discarding changes needs an explicit confirmation")
         done = P.git_discard(body.get("paths"), bool(body.get("all")))
         return self._json(200, {"ok": True, "discarded": done, "git": P.git_status()})
+
+    # ---- Assistant tools over MCP (catalog, install, enable; safe launch only on confirmation).
+    # The editor manages only the workspace .llm/mcp.json (never the global ~/.llm one): a per-project
+    # file keeps a server from silently starting in every project, and the agent uses exactly this file.
+    def _mcp_list(self, P):
+        from harness import mcp, trust
+        path = mcp.workspace_config_path(P.root)
+        servers = []
+        for name, spec in mcp.load_config(P.root, path).items():
+            import re as _re
+            env = sorted(set(_re.findall(r"\$\{(\w+)\}", json.dumps(spec))))
+            servers.append({
+                "name": name,
+                "enabled": bool(spec.get("enabled", True)),
+                "kind": "http" if spec.get("url") else ("stdio" if spec.get("command") else "incomplete"),
+                "summary": (f"connects to {spec['url']}" if spec.get("url")
+                            else f"runs {spec['command']} {' '.join(map(str, spec.get('args') or []))}".strip()
+                            if spec.get("command") else "incomplete"),
+                "env": env,
+                "tools_off": sorted(k for k, v in (spec.get("tools") or {}).items() if v is False),
+            })
+        return {"servers": servers, "presets": sorted(mcp.PRESETS),
+                "trusted": trust.is_trusted(path, P.root), "configPath": path}
+
+    def api_mcp_servers(self, P, q, body):
+        return self._json(200, self._mcp_list(P))
+
+    def api_mcp_add(self, P, q, body):
+        from harness import mcp, trust
+        if body.get("confirm") is not True:           # may start a program / send secrets on next use
+            return self._error(400, "adding an MCP server needs an explicit confirmation")
+        path = mcp.workspace_config_path(P.root)
+        try:
+            preset = body.get("preset")
+            if preset:
+                mcp.add_preset(P.root, str(preset), path)
+            else:
+                spec = {}
+                if body.get("url"):
+                    spec["url"] = str(body["url"])
+                    if isinstance(body.get("headers"), dict):
+                        spec["headers"] = {str(k): str(v) for k, v in body["headers"].items()}
+                elif body.get("command"):
+                    spec["command"] = str(body["command"])
+                    if isinstance(body.get("args"), list):
+                        spec["args"] = [str(a) for a in body["args"]]
+                    if isinstance(body.get("env"), dict):
+                        spec["env"] = {str(k): str(v) for k, v in body["env"].items()}
+                mcp.set_server(P.root, body.get("name"), spec, path)
+        except ValueError as e:
+            return self._error(400, str(e))
+        trust.remember(path)                           # the person added it in the app: trust this exact file
+        return self._json(200, self._mcp_list(P))
+
+    def api_mcp_remove(self, P, q, body):
+        from harness import mcp, trust
+        path = mcp.workspace_config_path(P.root)
+        mcp.remove_server(P.root, body.get("name"), path)
+        if os.path.isfile(path):
+            trust.remember(path)
+        return self._json(200, self._mcp_list(P))
+
+    def api_mcp_enable(self, P, q, body):
+        from harness import mcp, trust
+        path = mcp.workspace_config_path(P.root)
+        try:
+            mcp.set_enabled(P.root, body.get("name"), bool(body.get("enabled")), path)
+        except ValueError as e:
+            return self._error(400, str(e))
+        trust.remember(path)
+        return self._json(200, self._mcp_list(P))
+
+    def api_mcp_tool(self, P, q, body):
+        from harness import mcp, trust
+        path = mcp.workspace_config_path(P.root)
+        try:
+            mcp.set_tool(P.root, body.get("name"), body.get("tool"), bool(body.get("enabled")), path)
+        except ValueError as e:
+            return self._error(400, str(e))
+        trust.remember(path)
+        return self._json(200, self._mcp_list(P))
+
+    def api_mcp_probe(self, P, q, body):
+        from harness import mcp, trust
+        if body.get("confirm") is not True:           # starts the program / contacts the address
+            return self._error(400, "testing an MCP server needs an explicit confirmation")
+        path = mcp.workspace_config_path(P.root)
+        try:
+            r = mcp.probe(P.root, body.get("name"), path)
+        except ValueError as e:
+            return self._error(404, str(e))
+        trust.remember(path)
+        return self._json(200, r)
 
     def api_git_push(self, P, q, body):
         if body.get("confirm") is not True:           # a push leaves the machine: never implicit

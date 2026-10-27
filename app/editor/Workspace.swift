@@ -29,14 +29,15 @@ final class ViewPrefs: ObservableObject {
 /// The optional building blocks of the window. Each one is a separate view; switching one off removes it
 /// and leaves the others working (e.g. no chat = a plain editor; no git = no Changes tab).
 enum ModuleID: String, CaseIterable, Identifiable {
-    case files, outline, git, chat, problems, terminal, github, preview
+    case files, outline, git, chat, problems, terminal, github, preview, mcp
     var id: String { rawValue }
-    /// Modules that start switched off: they bring a web view / network, so they are opt-in.
-    static let offByDefault: Set<ModuleID> = [.preview]
+    /// Modules that start switched off: they bring a web view / network / external programs, so they are opt-in.
+    static let offByDefault: Set<ModuleID> = [.preview, .mcp]
     var title: String {
         switch self {
         case .github: return "GitHub"
         case .preview: return "Preview (browser)"
+        case .mcp: return "Assistant Tools (MCP)"
         case .files: return "Files"
         case .outline: return "Outline"
         case .git: return "Changes (git)"

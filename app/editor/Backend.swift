@@ -87,6 +87,29 @@ struct InfoResponse: Decodable {
     let remote: Bool?, endpoint: String?
 }
 
+// MARK: - Assistant tools over MCP
+struct MCPServer: Decodable, Identifiable, Hashable {
+    let name: String
+    let enabled: Bool
+    let kind: String            // "http" | "stdio" | "incomplete"
+    let summary: String
+    let env: [String]           // ${VAR} names the server reads from the environment
+    let tools_off: [String]     // tools switched off by name
+    var id: String { name }
+}
+struct MCPServersResponse: Decodable {
+    let servers: [MCPServer]
+    let presets: [String]
+    let trusted: Bool
+    let configPath: String
+}
+struct MCPProbeTool: Decodable, Hashable { let name: String, description: String, enabled: Bool }
+struct MCPProbeResponse: Decodable {
+    let ok: Bool
+    let error: String?
+    let tools: [MCPProbeTool]
+}
+
 struct BackendError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -191,6 +214,11 @@ final class Backend: @unchecked Sendable {
     func post(_ path: String, body: [String: Any]) async throws {
         struct Ack: Decodable {}
         let _: Ack = try await request("POST", path, body: body)
+    }
+
+    /// POST whose JSON answer is decoded and returned (the MCP routes answer with the updated state).
+    func postJSON<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+        try await request("POST", path, body: body)
     }
 
     func encoded(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? s }

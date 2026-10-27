@@ -315,9 +315,11 @@ Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one se
   shown in the conversation.
 - **Pictures:** with the engine started `--images on` the assistant can draw (`generate_image`); the picture appears in
   the message and is saved under `.llm/images/`.
-- **Extensions** (opt-in module, *Extensions (Open VSX)* in the Modules menu): search open-vsx.org and install
-  `.vsix` packages. Colour themes and snippets (type a prefix, press Tab) are used; an extension's own code is never
-  run or even unpacked, the checksum open-vsx.org publishes is required, and Microsoft's marketplace is not used.
+- **Assistant tools (MCP)** (opt-in module, *Assistant Tools (MCP)* in the Modules menu): connect MCP servers so the
+  assistant can use their tools on the open project. A small catalog (context7, Stitch) and your own servers — a
+  program over stdio (`command`/`args`) or a streamable-HTTP URL. The tools run with the project as their working
+  directory, so they act on this code; every call asks for your approval, and a server is contacted only when you
+  press *Test* or the assistant uses it. The servers live in the workspace `.llm/mcp.json`, trusted per content.
 - **Model source:** the assistant can use another OpenAI-compatible server — another computer running this engine
   (`https://…/v1`, an API key), OpenRouter — from the toolbar menu. The key is kept in the Keychain; messages and
   attached files go to that server, which is why it asks.

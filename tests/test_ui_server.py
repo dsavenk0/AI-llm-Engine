@@ -1000,5 +1000,59 @@ class TestRun(unittest.TestCase):
         self.assertEqual(agentloop._short("abcd", 2), "ab…")
 
 
+class TestMCP(Base):
+    """The MCP tools panel: a catalog, install with confirmation, enable, per-tool switches."""
+
+    def servers(self):
+        code, r = self.call("GET", "/api/mcp/servers")
+        self.assertEqual(code, 200)
+        return r
+
+    def test_catalog_lists_presets_and_starts_empty(self):
+        r = self.servers()
+        self.assertEqual(r["servers"], [])
+        self.assertIn("context7", r["presets"])
+        self.assertTrue(r["trusted"])                       # no file yet is trusted (nothing to run)
+
+    def test_adding_needs_confirmation_and_then_appears_trusted(self):
+        self.assertEqual(self.call("POST", "/api/mcp/add", {"preset": "context7"})[0], 400)
+        code, r = self.call("POST", "/api/mcp/add", {"preset": "context7", "confirm": True})
+        self.assertEqual(code, 200)
+        names = {s["name"]: s for s in r["servers"]}
+        self.assertIn("context7", names)
+        self.assertEqual(names["context7"]["kind"], "http")
+        self.assertTrue(names["context7"]["enabled"])
+        self.assertTrue(r["trusted"])                       # the app wrote it, so the agent may use it
+        self.assertTrue(os.path.isfile(os.path.join(self.root, ".llm", "mcp.json")))
+
+    def test_unknown_preset_and_incomplete_custom_are_refused(self):
+        self.assertEqual(self.call("POST", "/api/mcp/add", {"preset": "nope", "confirm": True})[0], 400)
+        self.assertEqual(self.call("POST", "/api/mcp/add", {"name": "x", "confirm": True})[0], 400)   # no url/command
+        self.assertEqual(self.call("POST", "/api/mcp/add", {"name": "../bad", "command": "ls", "confirm": True})[0], 400)
+
+    def test_custom_stdio_add_enable_tool_toggle_and_remove(self):
+        code, r = self.call("POST", "/api/mcp/add",
+                            {"name": "files", "command": "npx", "args": ["-y", "srv", "."], "confirm": True})
+        self.assertEqual(code, 200)
+        files = next(s for s in r["servers"] if s["name"] == "files")
+        self.assertEqual(files["kind"], "stdio")
+        self.assertIn("runs npx", files["summary"])
+
+        r = self.call("POST", "/api/mcp/enable", {"name": "files", "enabled": False})[1]
+        self.assertFalse(next(s for s in r["servers"] if s["name"] == "files")["enabled"])
+
+        r = self.call("POST", "/api/mcp/tool", {"name": "files", "tool": "write_file", "enabled": False})[1]
+        self.assertIn("write_file", next(s for s in r["servers"] if s["name"] == "files")["tools_off"])
+        r = self.call("POST", "/api/mcp/tool", {"name": "files", "tool": "write_file", "enabled": True})[1]
+        self.assertEqual(next(s for s in r["servers"] if s["name"] == "files")["tools_off"], [])
+
+        r = self.call("POST", "/api/mcp/remove", {"name": "files"})[1]
+        self.assertEqual(r["servers"], [])
+
+    def test_probe_needs_confirmation_and_404s_for_an_unknown_server(self):
+        self.assertEqual(self.call("POST", "/api/mcp/probe", {"name": "ghost"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/mcp/probe", {"name": "ghost", "confirm": True})[0], 404)
+
+
 if __name__ == "__main__":
     unittest.main()

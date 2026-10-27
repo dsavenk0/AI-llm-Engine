@@ -120,6 +120,7 @@ private struct Toolbar: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var modules: ModuleSettings
     @State private var showRemote = false
+    @State private var showMCP = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -197,7 +198,12 @@ private struct Toolbar: View {
                         if m == .preview, modules.isOn(.preview) { ws.showPanel("preview") }      // switching it on shows it
                     })).disabled(m == .files)
                 }
+                if modules.isOn(.mcp) {
+                    Divider()
+                    Button("Assistant Tools (MCP)…") { showMCP = true }
+                }
             } label: { Image(systemName: "square.grid.2x2") }.menuStyle(.borderlessButton).fixedSize().help("Modules")
+            .sheet(isPresented: $showMCP) { MCPSheet(ws: ws, shown: $showMCP) }
             Menu {
                 Picker("Theme", selection: Binding(get: { ThemeSettings.shared.mode }, set: { ThemeSettings.shared.mode = $0 })) {
                     ForEach(ThemeMode.allCases) { Text($0.title).tag($0) }

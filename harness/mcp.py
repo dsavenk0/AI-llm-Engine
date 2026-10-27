@@ -59,9 +59,15 @@ def config_path(root):
     return os.path.join(root, ".llm", "mcp.json")
 
 
-def load_config(root):
-    """{name: spec} with `enabled` defaulting to True. Accepts the common {"mcpServers": …} spelling."""
-    p = config_path(root)
+def workspace_config_path(root):
+    """Only the project's own `.llm/mcp.json` (no `~/.llm` fallback) — what the editor's MCP panel edits."""
+    return os.path.join(root, ".llm", "mcp.json")
+
+
+def load_config(root, path=None):
+    """{name: spec} with `enabled` defaulting to True. Accepts the common {"mcpServers": …} spelling.
+    `path` reads a specific file (the editor passes the workspace one); None uses `config_path`."""
+    p = path or config_path(root)
     try:
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
@@ -91,10 +97,10 @@ def describe(root):
     return out
 
 
-def add_preset(root, name):
+def add_preset(root, name, path=None):
     if name not in PRESETS:
         raise ValueError(f"unknown preset {name!r}; available: {', '.join(PRESETS)}")
-    p = config_path(root)
+    p = path or config_path(root)
     try:
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
@@ -110,6 +116,114 @@ def add_preset(root, name):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     return p
+
+
+def _edit_config(root, mutate, path=None):
+    """Read `.llm/mcp.json`, let `mutate(servers)` change the servers dict in place, write it back
+    (keeping the file's `servers`/`mcpServers` spelling). Returns the written path."""
+    p = path or config_path(root)
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    key = "mcpServers" if "mcpServers" in data else "servers"
+    if not isinstance(data.get(key), dict):
+        data[key] = {}
+    mutate(data[key])
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, p)
+    return p
+
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$")
+
+
+def valid_spec(spec):
+    """A server spec is usable when it names either a URL or a command. Returns a reason it is not, or ''."""
+    if not isinstance(spec, dict):
+        return "the server description must be an object"
+    if spec.get("url"):
+        return "" if isinstance(spec["url"], str) else "`url` must be text"
+    if spec.get("command"):
+        return "" if isinstance(spec["command"], str) else "`command` must be text"
+    return "a server needs either `url` (streamable HTTP) or `command` (a program to run over stdio)"
+
+
+def set_server(root, name, spec, path=None):
+    """Add or replace one server. Raises ValueError for a bad name or incomplete spec."""
+    name = str(name).strip()
+    if not _NAME_RE.match(name):
+        raise ValueError("the name may hold letters, digits, spaces, '.', '_' and '-' (1–40 characters)")
+    bad = valid_spec(spec)
+    if bad:
+        raise ValueError(bad)
+    _edit_config(root, lambda servers: servers.__setitem__(name, spec), path)
+    return name
+
+
+def remove_server(root, name, path=None):
+    found = [False]
+
+    def mut(servers):
+        found[0] = servers.pop(name, None) is not None
+    _edit_config(root, mut, path)
+    return found[0]
+
+
+def set_enabled(root, name, on, path=None):
+    def mut(servers):
+        if name not in servers:
+            raise ValueError(f"no server named {name!r}")
+        servers[name] = dict(servers[name], enabled=bool(on))
+    _edit_config(root, mut, path)
+    return bool(on)
+
+
+def set_tool(root, name, tool, on, path=None):
+    """Switch one tool of a server on or off (default: all on)."""
+    def mut(servers):
+        if name not in servers:
+            raise ValueError(f"no server named {name!r}")
+        s = dict(servers[name])
+        toggles = dict(s.get("tools") or {})
+        if on:
+            toggles.pop(tool, None)                 # back to the default (on); keep the map small
+        else:
+            toggles[tool] = False
+        if toggles:
+            s["tools"] = toggles
+        else:
+            s.pop("tools", None)
+        servers[name] = s
+    _edit_config(root, mut, path)
+    return bool(on)
+
+
+def probe(root, name, path=None):
+    """Connect one configured server and report what it offers, for the UI's 'Test' button. Starts the
+    program / contacts the address, so callers gate this behind the person's confirmation."""
+    spec = load_config(root, path).get(name)
+    if spec is None:
+        raise ValueError(f"no server named {name!r}")
+    s = Server(name, spec, cwd=root)
+    try:
+        s.connect()
+    except MCPError as e:
+        return {"ok": False, "error": str(e), "tools": [], "info": {}}
+    toggles = spec.get("tools") or {}
+    only = spec.get("only")
+    tools_out = [{"name": t["name"], "description": (t.get("description") or "").strip().split("\n")[0][:200],
+                  "enabled": toggles.get(t["name"], True) and (only is None or t["name"] in only)}
+                 for t in s.tools_list]
+    info = s.info
+    s.close()
+    return {"ok": True, "error": None, "info": info, "tools": tools_out}
 
 
 # ───────────────────────────── transports ─────────────────────────────
@@ -356,10 +470,10 @@ def tool_name(server, tool):
     return f"{_safe(server)}__{_safe(tool)}"[:64]
 
 
-def load_servers(root, only=None):
+def load_servers(root, only=None, path=None):
     """Connect every enabled server (or just `only`). Returns ([Server…], {name: error})."""
     servers, failed = [], {}
-    for name, spec in load_config(root).items():
+    for name, spec in load_config(root, path).items():
         if not spec["enabled"] or (only and name not in only):
             continue
         s = Server(name, spec, cwd=root)

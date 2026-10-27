@@ -228,9 +228,10 @@ def _short(text, n=300):
 
 
 class Tools:
-    def __init__(self, project, run, emit, auto_edit=False, web=False, images=None, mode=None):
+    def __init__(self, project, run, emit, auto_edit=False, web=False, images=None, mode=None, mcp_servers=()):
         """`images`: the Endpoint of the engine when image generation is ready there, else None.
-        `mode`: manual | edit | plan | auto (see MODES); None keeps the old `auto_edit` switch."""
+        `mode`: manual | edit | plan | auto (see MODES); None keeps the old `auto_edit` switch.
+        `mcp_servers`: connected MCP servers whose tools the assistant may call (each call is approved)."""
         self.mode = mode if mode in MODES else ("edit" if auto_edit else "manual")
         self.P, self.run, self.emit = project, run, emit
         self.auto = self.mode in ("edit", "auto")          # file edits are applied without asking
@@ -239,13 +240,28 @@ class Tools:
         if web:                                   # the globe in the composer is the person's consent
             from harness import web as _web
             self.web = _web.tools()
+        self.mcp_servers = list(mcp_servers)
+        self.mcp = {}
+        if self.mcp_servers:                      # the approval happens in call(), so the client runs freely
+            from harness import mcp as _mcp
+            self.mcp = _mcp.tools(self.mcp_servers, allow=lambda _what: True)
 
     def schemas(self):
-        """The tool list sent to the model: the project tools, plus the web pair when the globe is on."""
-        tools = TOOLS + [schema for schema, _ in self.web.values()] + ([IMAGE_TOOL] if self.images_ep else [])
+        """The tool list sent to the model: the project tools, the web pair when the globe is on, and the
+        tools of the connected MCP servers."""
+        tools = (TOOLS + [schema for schema, _ in self.web.values()]
+                 + [schema for schema, _ in self.mcp.values()] + ([IMAGE_TOOL] if self.images_ep else []))
         if self.mode == "plan":                            # read-only: the plan comes before any change
-            tools = [t for t in tools if t["function"]["name"] not in PLAN_BLOCKED]
+            tools = [t for t in tools if t["function"]["name"] not in PLAN_BLOCKED and t["function"]["name"] not in self.mcp]
         return tools
+
+    def close(self):
+        for s in self.mcp_servers:
+            try:
+                s.close()
+            except Exception:
+                pass
+        self.mcp_servers = []
 
     def generate_image(self, prompt="", size=None, _call_id="", **_):
         import base64
@@ -376,8 +392,18 @@ class Tools:
         return ans.get("text") or "the user skipped the question"
 
     def call(self, name, args, call_id):
-        if self.mode == "plan" and name in PLAN_BLOCKED:
+        if self.mode == "plan" and (name in PLAN_BLOCKED or name in self.mcp):
             return "error: plan mode is on — editing and commands are off; present the plan first"
+        if name in self.mcp:
+            pretty = json.dumps(args, ensure_ascii=False)
+            if not self._approve(call_id, "run", command=f"{name}  {_short(pretty, 200)}",
+                                  dangerous="an MCP tool — it runs outside the project's file and command checks"):
+                return "the user declined this MCP tool"
+            try:
+                out = self.mcp[name][1](**args)
+            except TypeError as e:
+                return f"error: bad arguments: {e}"
+            return out if len(out) <= MAX_TOOL_OUTPUT else out[:MAX_TOOL_OUTPUT] + f"\n… [truncated, {len(out)} chars]"
         if name in self.web:
             try:
                 out = self.web[name][1](**args)
@@ -544,11 +570,34 @@ def _echo_nudge(messages, previous):
     return out
 
 
+def connect_mcp(project):
+    """Connect the enabled MCP servers of the *workspace* `.llm/mcp.json` (what the MCP panel manages), with
+    the project as their working directory so their tools act on this code. Returns ([Server…], {name: error});
+    ([], {}) when the file is absent or not trusted. The global `~/.llm/mcp.json` is the CLI agent's, not the
+    editor's — a per-project config keeps a server from silently starting in every project."""
+    try:
+        from harness import mcp as _mcp, trust as _trust
+        ws_cfg = _mcp.workspace_config_path(project.root)
+        if not os.path.isfile(ws_cfg) or not _trust.is_trusted(ws_cfg, project.root):
+            return [], {}
+        return _mcp.load_servers(project.root, path=ws_cfg)
+    except Exception:
+        return [], {}
+
+
 def run_agent(project, engine_port, messages, emit, run, think=False, auto_edit=False, system_extra="", web=False,
               mode=None, effort=None, lite=False):
     """True when the model finished; False when the loop ended on an error event (already emitted).
     `lite`: a tiny model — a short prompt and no tools, a plain chat that answers about what is attached."""
-    tools = Tools(project, run, emit, auto_edit, web, images=_images_endpoint(engine_port), mode=mode)
+    mcp_servers, mcp_failed = ([], {}) if lite else connect_mcp(project)
+    tools = Tools(project, run, emit, auto_edit, web, images=_images_endpoint(engine_port), mode=mode,
+                  mcp_servers=mcp_servers)
+    run.on_finish = tools.close
+    if mcp_servers or mcp_failed:
+        on = sum(len(s.enabled_tools()) for s in mcp_servers)
+        parts = [f"{len(mcp_servers)} MCP server(s), {on} tool(s) available to me"] if mcp_servers else []
+        parts += [f"{name} unavailable ({err})" for name, err in mcp_failed.items()]
+        emit({"type": "note", "text": "MCP: " + "; ".join(parts) + ". Each call asks for your approval."})
     if lite:
         emit({"type": "note", "text": "Small model: answering as a plain chat, without project tools — attach files "
                                       "or pick a larger model for work across the project."})

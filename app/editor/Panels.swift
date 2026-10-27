@@ -397,6 +397,182 @@ struct GitModuleView: View {
     }
 }
 
+// MARK: - Assistant tools over MCP: a catalog of servers, install, enable, and per-tool switches
+
+struct MCPSheet: View {
+    @ObservedObject var ws: Workspace
+    @Binding var shown: Bool
+    @State private var servers: [MCPServer] = []
+    @State private var presets: [String] = []
+    @State private var probed: [String: MCPProbeResponse] = [:]      // name → its last "Test" result
+    @State private var busy: String?
+    @State private var note: String?
+    @State private var showAdd = false
+    @State private var newName = ""
+    @State private var newKind = "stdio"                             // stdio | http
+    @State private var newCommand = ""
+    @State private var newArgs = ""
+    @State private var newURL = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                AccentCaption(text: "Assistant Tools · MCP")
+                Spacer()
+                Button("Close") { shown = false }.keyboardShortcut(.cancelAction)
+            }
+            Text("Connect MCP servers so the assistant can use their tools on this project. The tools run with "
+                 + "the project as their working directory, and every call asks for your approval. A server is "
+                 + "contacted only when you press Test or the assistant uses it.")
+                .font(.caption).foregroundColor(.secondary)
+            if let n = note { Text(n).font(.caption).foregroundColor(Palette.yellow) }
+            List {
+                if !servers.isEmpty {
+                    Section("Configured (.llm/mcp.json)") { ForEach(servers) { serverRow($0) } }
+                }
+                Section("Add from the catalog") {
+                    HStack {
+                        ForEach(presets, id: \.self) { p in
+                            Button("+ \(p)") { add(preset: p) }
+                                .buttonStyle(.bordered).controlSize(.small)
+                                .disabled(busy != nil || servers.contains { $0.name == p })
+                        }
+                        Spacer()
+                        Button(showAdd ? "Cancel" : "Add your own…") { showAdd.toggle() }.buttonStyle(.borderless)
+                    }
+                    if showAdd { customForm }
+                }
+            }.listStyle(.inset)
+            if let b = busy { HStack { ProgressView().controlSize(.small); Text(b).font(.caption) } }
+        }
+        .padding(16).frame(minWidth: 680, minHeight: 500)
+        .onAppear { Task { await reload() } }
+    }
+
+    private var customForm: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Name (e.g. files)", text: $newName).textFieldStyle(.roundedBorder)
+            Picker("", selection: $newKind) {
+                Text("Program (stdio)").tag("stdio"); Text("URL (HTTP)").tag("http")
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 260)
+            if newKind == "stdio" {
+                TextField("Command (e.g. npx)", text: $newCommand).textFieldStyle(.roundedBorder)
+                TextField("Arguments, space-separated", text: $newArgs).textFieldStyle(.roundedBorder)
+            } else {
+                TextField("https://…", text: $newURL).textFieldStyle(.roundedBorder)
+            }
+            Button("Add") { addCustom() }
+                .disabled(busy != nil || newName.trimmingCharacters(in: .whitespaces).isEmpty)
+        }.padding(.vertical, 4)
+    }
+
+    private func serverRow(_ s: MCPServer) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Toggle("", isOn: Binding(get: { s.enabled }, set: { setEnabled(s, $0) }))
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    .help(s.enabled ? "On: the assistant may use its tools" : "Off: kept, not used")
+                Text(s.name).bold().foregroundColor(s.enabled ? .primary : .secondary)
+                Text(s.kind).font(.caption2).foregroundColor(.secondary)
+                Spacer()
+                Button("Test") { test(s) }.buttonStyle(.borderless).disabled(busy != nil)
+                Button("Remove") { remove(s) }.buttonStyle(.borderless).disabled(busy != nil)
+            }
+            Text(s.summary).font(.caption).foregroundColor(.secondary)
+            if !s.env.isEmpty {
+                Text("Reads from the environment: " + s.env.map { "$\($0)" }.joined(separator: ", "))
+                    .font(.caption2).foregroundColor(Palette.yellow)
+            }
+            if let p = probed[s.name] {
+                if p.ok {
+                    ForEach(p.tools, id: \.name) { t in
+                        HStack(spacing: 6) {
+                            Toggle("", isOn: Binding(get: { !s.tools_off.contains(t.name) },
+                                                     set: { setTool(s, t.name, $0) }))
+                                .toggleStyle(.checkbox).labelsHidden().controlSize(.small)
+                            Text(t.name).font(.system(size: 11, design: .monospaced)).foregroundColor(Palette.accent)
+                            Text(t.description).font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                        }
+                    }
+                } else {
+                    Text(p.error ?? "could not connect").font(.caption2).foregroundColor(Palette.magenta)
+                }
+            }
+        }.padding(.vertical, 2)
+    }
+
+    // ---- actions
+    private func reload() async {
+        if let r: MCPServersResponse = try? await ws.backend.get("/api/mcp/servers") {
+            servers = r.servers; presets = r.presets
+        }
+    }
+
+    private func apply(_ body: [String: Any], _ busyText: String) {
+        busy = busyText; note = nil
+        Task {
+            defer { busy = nil }
+            do {
+                let r: MCPServersResponse = try await ws.backend.postJSON("/api/mcp/add", body: body)
+                servers = r.servers; presets = r.presets
+                showAdd = false; newName = ""; newCommand = ""; newArgs = ""; newURL = ""
+            } catch { note = error.localizedDescription }
+        }
+    }
+
+    private func add(preset: String) { apply(["preset": preset, "confirm": true], "Adding \(preset)…") }
+
+    private func addCustom() {
+        var body: [String: Any] = ["name": newName, "confirm": true]
+        if newKind == "http" {
+            body["url"] = newURL
+        } else {
+            body["command"] = newCommand
+            let a = newArgs.split(separator: " ").map(String.init)
+            if !a.isEmpty { body["args"] = a }
+        }
+        apply(body, "Adding \(newName)…")
+    }
+
+    private func setEnabled(_ s: MCPServer, _ on: Bool) {
+        Task {
+            if let r: MCPServersResponse = try? await ws.backend.postJSON("/api/mcp/enable",
+                                                                          body: ["name": s.name, "enabled": on]) {
+                servers = r.servers
+            }
+        }
+    }
+
+    private func setTool(_ s: MCPServer, _ tool: String, _ on: Bool) {
+        Task {
+            if let r: MCPServersResponse = try? await ws.backend.postJSON(
+                "/api/mcp/tool", body: ["name": s.name, "tool": tool, "enabled": on]) {
+                servers = r.servers
+            }
+        }
+    }
+
+    private func remove(_ s: MCPServer) {
+        Task {
+            if let r: MCPServersResponse = try? await ws.backend.postJSON("/api/mcp/remove", body: ["name": s.name]) {
+                servers = r.servers; probed[s.name] = nil
+            }
+        }
+    }
+
+    private func test(_ s: MCPServer) {
+        busy = "Contacting \(s.name)…"; note = nil
+        Task {
+            defer { busy = nil }
+            do {
+                let r: MCPProbeResponse = try await ws.backend.postJSON("/api/mcp/probe",
+                                                                        body: ["name": s.name, "confirm": true])
+                probed[s.name] = r
+            } catch { note = error.localizedDescription }
+        }
+    }
+}
+
 // MARK: - the command palette (⇧⌘P)
 
 struct PaletteItem: Identifiable {

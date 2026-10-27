@@ -123,7 +123,7 @@
       feat8_title: "A Native Code Editor, On Demand",
       feat8_desc: "A module of the one LLMBar app — nothing of it exists until you open it: chat-first and editor layouts, an agent with Manual / Edit / Plan / Auto modes and a reasoning-effort control, start and stop the model from the toolbar, git with per-file discard, GitHub, terminal, problems, a preview pane, dictation and a context ring that compacts the chat. Dark and light themes.",
       feat9_title: "Optional Modules, Off by Default",
-      feat9_desc: "ModelScope as a second model source, pictures drawn right in the chat through mflux, web search, Open VSX themes and snippets, activation edits, another OpenAI-compatible server as the assistant's model, proxy and CA settings. None of it runs until you ask.",
+      feat9_desc: "ModelScope as a second model source, pictures drawn right in the chat through mflux, web search, assistant tools over MCP servers, activation edits, another OpenAI-compatible server as the assistant's model, proxy and CA settings. None of it runs until you ask.",
       feat10_title: "GGUF on the Engine's Own Decoder",
       feat10_desc: "Llama, Qwen2 and Qwen3 GGUF files are repacked into MLX quantization on load and run by the engine itself — the same server, prompt cache and speculation as everything else, with logits that match llama.cpp's. Anything else falls back to llama.cpp, downloaded only when needed.",
 
@@ -311,7 +311,7 @@
       feat8_title: "Нативный редактор кода — по требованию",
       feat8_desc: "Модуль единого приложения LLMBar — пока вы его не открыли, от него ничего нет: чат-вид и вид редактора, агент с режимами Manual / Edit / Plan / Auto и управлением глубиной рассуждений, запуск и остановка модели из панели, git с откатом по файлам, GitHub, терминал, проблемы, панель предпросмотра, диктовка и кольцо контекста, которое сжимает чат. Тёмная и светлая темы.",
       feat9_title: "Необязательные модули — выключены по умолчанию",
-      feat9_desc: "ModelScope как второй источник моделей, картинки прямо в чате через mflux, поиск в интернете, темы и сниппеты Open VSX, правки активаций, другой OpenAI-совместимый сервер как модель ассистента, настройки прокси и CA. Ничего не работает, пока вы не попросите.",
+      feat9_desc: "ModelScope как второй источник моделей, картинки прямо в чате через mflux, поиск в интернете, инструменты ассистента через MCP-серверы, правки активаций, другой OpenAI-совместимый сервер как модель ассистента, настройки прокси и CA. Ничего не работает, пока вы не попросите.",
       feat10_title: "GGUF на собственном декодере движка",
       feat10_desc: "Файлы GGUF семейств Llama, Qwen2 и Qwen3 при загрузке перепаковываются в квантизацию MLX и исполняются самим движком — тот же сервер, кэш промпта и спекуляция, а логиты совпадают с llama.cpp. Всё остальное идёт через llama.cpp, который скачивается только по необходимости.",
 
