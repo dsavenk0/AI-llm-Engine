@@ -9,40 +9,45 @@ over `[B, 1]`, with a per-row rope offset (each row's position is its own length
 hides the padding at the front of shorter rows — so the result is bit-for-bit what each request would get
 alone (no cross-talk, no loss). Finished rows are carried as padding until the whole batch is done.
 
-Scope: attention-only models (the batched KV assembly below). Hybrid models with GatedDeltaNet/SSM layers
-raise `Unbatchable` for now — stacking recurrent state is the next increment. Memory is bounded by the
-caller (how many requests it admits at once): the batched KV is B × max_len, so the caller caps B.
+Works on attention and hybrid (GatedDeltaNet/SSM) native models: an attention layer's KV is left-padded and
+stacked, while an SSM layer's recurrent state is position-independent, so its conv tail and state are simply
+stacked over the batch. Memory is bounded by the caller (how many requests it admits at once): the batched KV
+is B × max_len, so the caller caps B.
 """
 import mlx.core as mx
 
-from .model import KVCache, Positions
+from .model import KVCache, Positions, SSMCache
 
 NEG = -30000.0          # additive mask value that zeroes a key in float16 softmax
-
-
-class Unbatchable(Exception):
-    pass
 
 
 def _greedy(logits_row):
     return int(mx.argmax(logits_row).item())
 
 
-def _assemble_kv(caches, layer_idx, lmax):
-    """Left-pad every request's KV for one layer to `lmax` and stack them into one [B, H, lmax, D] cache."""
-    ks, vs = [], []
-    for c in caches:
-        kv = c[layer_idx]
-        k, v = kv.keys[..., :kv.offset, :], kv.values[..., :kv.offset, :]
-        pad = lmax - k.shape[2]
-        if pad:
-            kz = mx.zeros((1, k.shape[1], pad, k.shape[3]), k.dtype)
-            vz = mx.zeros((1, v.shape[1], pad, v.shape[3]), v.dtype)
-            k, v = mx.concatenate([kz, k], axis=2), mx.concatenate([vz, v], axis=2)
-        ks.append(k)
-        vs.append(v)
-    merged = KVCache()
-    merged.keys, merged.values = mx.concatenate(ks, 0), mx.concatenate(vs, 0)
+def _assemble(caches, layer_idx, lmax):
+    """Combine one layer's per-request caches into a batched one. Attention: left-pad KV to `lmax` and stack.
+    SSM: stack the (position-independent) conv tail and recurrent state over the batch."""
+    sample = caches[0][layer_idx]
+    if isinstance(sample, KVCache):
+        ks, vs = [], []
+        for c in caches:
+            kv = c[layer_idx]
+            k, v = kv.keys[..., :kv.offset, :], kv.values[..., :kv.offset, :]
+            pad = lmax - k.shape[2]
+            if pad:
+                kz = mx.zeros((1, k.shape[1], pad, k.shape[3]), k.dtype)
+                vz = mx.zeros((1, v.shape[1], pad, v.shape[3]), v.dtype)
+                k, v = mx.concatenate([kz, k], axis=2), mx.concatenate([vz, v], axis=2)
+            ks.append(k)
+            vs.append(v)
+        merged = KVCache()
+        merged.keys, merged.values = mx.concatenate(ks, 0), mx.concatenate(vs, 0)
+        merged.offset = lmax
+        return merged
+    merged = SSMCache()
+    merged.conv = mx.concatenate([c[layer_idx].conv for c in caches], 0) if sample.conv is not None else None
+    merged.state = mx.concatenate([c[layer_idx].state for c in caches], 0) if sample.state is not None else None
     merged.offset = lmax
     return merged
 
@@ -61,8 +66,6 @@ def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy, on_tok
     per_caches, first = [], []
     for ids in prompts:
         cache = model.make_cache()
-        if any(not isinstance(c, KVCache) for c in cache):
-            raise Unbatchable("batched decode supports attention-only models so far (this one has SSM layers)")
         logits = model(mx.array([list(ids)]), cache, Positions(delta=0))
         per_caches.append(cache)
         first.append(sampler(logits[0, -1]))
@@ -70,7 +73,7 @@ def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy, on_tok
     lens = [len(p) for p in prompts]
     lmax = max(lens)
     n_layers = len(per_caches[0])
-    cache = [_assemble_kv(per_caches, li, lmax) for li in range(n_layers)]
+    cache = [_assemble(per_caches, li, lmax) for li in range(n_layers)]
     pad = mx.array([lmax - n for n in lens])                 # padding columns at the front of each row
     delta = mx.array([n - lmax for n in lens])               # per-row rope offset: cache.offset + delta == len
 

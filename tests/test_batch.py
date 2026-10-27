@@ -33,6 +33,35 @@ def greedy_single(model, ids, max_new, eos):
     return out
 
 
+def single_next_logits(model, ids):
+    """Prefill `ids` alone, feed the greedy first token, return (next-step logits row, that first token)."""
+    cache = model.make_cache()
+    logits = model(mx.array([list(ids)]), cache, Positions(delta=0))
+    tok = int(mx.argmax(logits[0, -1]).item())
+    logits2 = model(mx.array([[tok]]), cache, Positions(delta=0))
+    return logits2[0, -1], tok
+
+
+def batched_next_logits(model, prompts):
+    """The first batched decode step, built exactly as engine/batch.py does, returning [B, V] logits."""
+    per, first = [], []
+    for p in prompts:
+        c = model.make_cache()
+        lg = model(mx.array([list(p)]), c, Positions(delta=0))
+        per.append(c)
+        first.append(int(mx.argmax(lg[0, -1]).item()))
+    lens = [len(p) for p in prompts]
+    lmax = max(lens)
+    cache = [batch._assemble(per, i, lmax) for i in range(len(per[0]))]
+    pad = mx.array([lmax - n for n in lens])
+    delta = mx.array([n - lmax for n in lens])
+    lk = cache[0].offset + 1
+    cols = mx.arange(lk)
+    mask = mx.where(cols[None, None, None, :] < pad[:, None, None, None], batch.NEG, 0.0).astype(mx.float16)
+    logits = model(mx.array([[t] for t in first]), cache, Positions(delta=delta), mask=mask)
+    return logits[:, -1, :], first
+
+
 class TestBatchedDecode(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -66,13 +95,28 @@ class TestBatchedDecode(unittest.TestCase):
         got = batch.batched_generate(self.model, [p], max_new=8, eos=self.eos)
         self.assertEqual(got, [want])
 
-    def test_an_ssm_model_is_refused_clearly(self):
+    def test_batched_forward_matches_single_for_a_hybrid_ssm_model(self):
+        # A hybrid model (GatedDeltaNet/SSM layers): the batched step must reproduce each request's
+        # single-sequence logits. Greedy tokens can diverge on a random model when fp16 noise flips a
+        # near-tie, so this checks the logits agree within fp16 — the real losslessness guarantee.
         other = tempfile.mkdtemp()
         make_bundle(other, seed=6, attn_interval=2)         # every 2nd layer is a GatedDeltaNet (SSM)
         from engine.generate import Engine
         eng = Engine(other, vision=False, max_context=512, max_tokens=32, log=lambda *_: None)
-        with self.assertRaises(batch.Unbatchable):
-            batch.batched_generate(eng.model, [[1, 2, 3], [4, 5, 6]], max_new=4, eos=set())
+        prompts = [[20, 21, 22, 23, 24], [30, 31, 32], [40, 41, 42, 43]]
+        bl, _ = batched_next_logits(eng.model, prompts)
+        for i, p in enumerate(prompts):
+            sl, _ = single_next_logits(eng.model, p)
+            self.assertEqual(int(mx.argmax(bl[i]).item()), int(mx.argmax(sl).item()))
+            self.assertLess(mx.max(mx.abs(bl[i].astype(mx.float32) - sl.astype(mx.float32))).item(), 0.2)
+
+    def test_batched_forward_matches_single_for_attention_logits(self):
+        # the attention-only path is bit-exact; here we also assert the logits agree very tightly
+        prompts = [[20, 21, 22, 23, 24, 25], [30, 31, 32], [40, 41, 42, 43, 44]]
+        bl, _ = batched_next_logits(self.model, prompts)
+        for i, p in enumerate(prompts):
+            sl, _ = single_next_logits(self.model, p)
+            self.assertLess(mx.max(mx.abs(bl[i].astype(mx.float32) - sl.astype(mx.float32))).item(), 0.05)
 
 
 if __name__ == "__main__":
