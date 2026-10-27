@@ -1831,6 +1831,13 @@ body.nav-scroll-lock {
     height: auto;
     align-items: center;
   }
+  /* Open, the pill grows tall: a 980px radius would round it into a giant oval, so give the
+     expanded panel a normal radius and let it scroll if the links don't fit the screen. */
+  .apple-nav.nav-open {
+    border-radius: 20px;
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
+  }
   .nav-center,
   .nav-right {
     display: none;
@@ -1865,6 +1872,9 @@ body.nav-scroll-lock {
 @media (max-width: 640px) {
   .hide-small { display: none !important; }
   .apple-stats-strip { grid-template-columns: 1fr; }
+  .apple-nav-header { padding: 0 10px; }
+  .apple-nav { padding: 0 12px; }
+  .nav-title { font-size: 0.88rem; }
 }
 
 
