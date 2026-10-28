@@ -139,5 +139,69 @@ class TestBatchedDecode(unittest.TestCase):
             self.assertLess(mx.max(mx.abs(bl[i].astype(mx.float32) - sl.astype(mx.float32))).item(), 0.05)
 
 
+def serial(eng, ids, max_tokens, stop=None):
+    """The reference: the engine's ordinary one-request path, with speculation and the prefix cache off so
+    each run is independent — exactly what a batch row does."""
+    eng.speculative = False
+    eng.cache = None
+    pieces = []
+    for item in eng.generate(ids, max_tokens=max_tokens, sampling={"temperature": 0}, stop=stop):
+        if isinstance(item, dict):
+            return "".join(pieces), item
+        pieces.append(item[1])
+    return "".join(pieces), {}
+
+
+class TestEngineGenerateBatch(unittest.TestCase):
+    """Engine.generate_batch must reproduce the ordinary path's text, token count and finish reason."""
+
+    @classmethod
+    def setUpClass(cls):
+        from engine.generate import Engine
+        cls.dir = tempfile.mkdtemp()
+        make_bundle(cls.dir, seed=5, attn_interval=1)
+        cls.eng = Engine(cls.dir, vision=False, max_context=1024, max_tokens=64, log=lambda *_: None)
+
+    def run_batch(self, reqs):
+        got = {i: [] for i in range(len(reqs))}
+        stats = self.eng.generate_batch(reqs, on_piece=lambda i, t: got[i].append(t))
+        return ["".join(got[i]) for i in range(len(reqs))], stats
+
+    def test_matches_the_single_request_path(self):
+        prompts = [[20, 21, 22, 23, 24, 25], [30, 31, 32], [40, 41, 42, 43, 44]]   # ragged on purpose
+        want = [serial(self.eng, p, 10) for p in prompts]
+        texts, stats = self.run_batch([{"ids": p, "max_tokens": 10, "sampling": {"temperature": 0}}
+                                       for p in prompts])
+        for i, (wtext, wstat) in enumerate(want):
+            self.assertEqual(texts[i], wtext, f"row {i}")
+            self.assertEqual(stats[i]["completion_tokens"], wstat["completion_tokens"], f"row {i}")
+            self.assertEqual(stats[i]["finish_reason"], wstat["finish_reason"], f"row {i}")
+
+    def test_each_row_keeps_its_own_max_tokens(self):
+        prompts = [[20, 21, 22], [30, 31, 32]]
+        texts, stats = self.run_batch([{"ids": prompts[0], "max_tokens": 3, "sampling": {"temperature": 0}},
+                                       {"ids": prompts[1], "max_tokens": 9, "sampling": {"temperature": 0}}])
+        self.assertEqual(stats[0]["completion_tokens"], 3)
+        self.assertLessEqual(stats[1]["completion_tokens"], 9)
+        self.assertGreater(stats[1]["completion_tokens"], 3)
+        self.assertEqual(stats[0]["finish_reason"], "length")
+
+    def test_a_row_can_be_cancelled_without_touching_the_others(self):
+        prompts = [[20, 21, 22], [30, 31, 32]]
+        texts, stats = self.run_batch([
+            {"ids": prompts[0], "max_tokens": 8, "sampling": {"temperature": 0}, "should_stop": lambda: True},
+            {"ids": prompts[1], "max_tokens": 8, "sampling": {"temperature": 0}}])
+        self.assertEqual(stats[0]["finish_reason"], "cancelled")
+        self.assertEqual(stats[1]["completion_tokens"], 8)
+
+    def test_stats_are_marked_as_batched(self):
+        _, stats = self.run_batch([{"ids": [20, 21, 22], "max_tokens": 4, "sampling": {"temperature": 0}}])
+        self.assertTrue(stats[0]["batched"])
+        self.assertEqual(stats[0]["prompt_tokens"], 3)
+
+    def test_an_empty_batch_is_fine(self):
+        self.assertEqual(self.eng.generate_batch([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

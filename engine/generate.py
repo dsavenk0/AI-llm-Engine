@@ -946,6 +946,117 @@ class Engine:
         mx.clear_cache()
         yield st
 
+    # ───────────────────────── several requests in one pass ─────────────────────────
+    def generate_batch(self, reqs, on_piece=None):
+        """Generate for several requests in one lockstep batch: the weights are read once per step for the
+        whole batch instead of once per request. Measured motivation: with requests served one at a time the
+        aggregate throughput is flat (four clients buy 1.01x), because ~68 % of a token is reading the weights.
+
+        `reqs`: a list of dicts {ids, max_tokens, sampling, stop, should_stop, seed}. `on_piece(i, text)` is
+        called as text appears for row i. Returns a list of per-row stats, in the same order.
+
+        Deliberately not used inside a batch (both are single-request optimisations that a batch replaces):
+        the prefix cache — every row prefills on its own — and speculative decoding. The thinking budget is
+        not applied either; a reasoning model still stops on its own markers, max_tokens and the loop guard.
+        """
+        from .batch import batched_generate
+        if not reqs:
+            return []
+        self.ensure_awake()
+        for r in reqs:
+            if len(r["ids"]) >= self.max_context:
+                raise ContextError(f"prompt is {len(r['ids'])} tokens, context limit is {self.max_context}")
+
+        rows = [_BatchRow(self, r) for r in reqs]
+        max_new = max(r.max_tokens for r in rows)
+
+        def row_sampler(s):
+            # Sampler takes [1, L, V] and returns a lazy scalar; batched_generate hands a [V] row and
+            # needs a real int (it tests membership in eos).
+            return lambda row: int(s(row[None, None, :]).item())
+
+        samplers = [row_sampler(r.sampler) for r in rows]
+        stoppers = [(lambda i=i: rows[i].stopped()) for i in range(len(rows))]
+
+        def token(i, tok):
+            rows[i].feed(tok, on_piece, i)
+
+        t0 = time.time()
+        outputs = batched_generate(self.model, [list(r["ids"]) for r in reqs], max_new=max_new, eos=self.eos,
+                                   samplers=samplers, should_stop=stoppers, on_token=token)
+        dt = time.time() - t0
+        for i, row in enumerate(rows):
+            row.settle(outputs[i])          # the finish reason first: the tail is only released on "length"
+            row.flush(on_piece, i)
+        mx.clear_cache()
+        return [r.stats(dt, len(reqs[i]["ids"])) for i, r in enumerate(rows)]
+
+
+class _BatchRow:
+    """One request inside a batch: its own detokeniser, stop strings, limits and finish reason."""
+
+    def __init__(self, eng, req):
+        self.eng = eng
+        self.max_tokens = min(int(req.get("max_tokens") or eng.max_tokens), eng.max_tokens,
+                              eng.max_context - len(req["ids"]))
+        self.sampler = Sampler(eng.vocab, seed=req.get("seed"), **(req.get("sampling") or {}))
+        self.dec = StreamDecoder(eng.tok)
+        self.filter = StopFilter(req.get("stop"))
+        self.should_stop = req.get("should_stop")
+        self.out, self.text, self.finish, self.done, self.looped = [], "", "length", False, False
+
+    def stopped(self):
+        """Checked by the batch loop before a token is accepted."""
+        if not self.done and self.should_stop and self.should_stop():
+            self.finish, self.done = "cancelled", True
+        return self.done
+
+    def feed(self, tok, on_piece, i):
+        self.out.append(tok)
+        piece = self.dec.add(tok)
+        self.text += piece
+        hit, piece = self.filter.feed(piece)
+        if piece and on_piece:
+            on_piece(i, piece)
+        if hit:
+            self.finish, self.done = "stop", True
+            return
+        if len(self.out) % 32 == 0 and not self.eng._check_memory("decode"):
+            self.finish, self.done = "length", True
+            return
+        if len(self.out) % 16 == 0 and is_looping(self.text):
+            self.finish, self.done, self.looped = "stop", True, True
+            return
+        if len(self.out) >= self.max_tokens:
+            self.finish, self.done = "length", True
+
+    def settle(self, produced):
+        """A row the batch ended on its own (never marked done here) stopped on an eos token."""
+        if not self.done and len(produced) < self.max_tokens:
+            self.finish = "stop"
+
+    def flush(self, on_piece, i):
+        """Release what the stop filter held back, and the decoder's tail — the latter only when the answer
+        ran to its length limit, exactly as the single-request path does."""
+        if not on_piece:
+            return
+        rest = self.filter.flush()
+        if rest:
+            on_piece(i, rest)
+        tail = self.dec.flush()
+        if tail and self.finish == "length":
+            on_piece(i, tail)
+
+    def stats(self, dt, prompt_tokens):
+        n = len(self.out)
+        return {"prompt_tokens": prompt_tokens, "cached_tokens": 0, "completion_tokens": n,
+                "prefill_s": 0.0, "decode_s": round(dt, 3),
+                "prefill_tps": 0.0, "decode_tps": round(n / dt, 2) if dt else 0.0,
+                "finish_reason": self.finish, "loop_stopped": self.looped, "think_forced": None,
+                "peak_gb": round(mx.get_peak_memory() / GiB, 2), "batched": True,
+                "ram_used": memory.used_fraction(), "verifies": 0, "drafted": 0, "accepted": 0,
+                "draft_accept": None}
+
 
 def summarize(t):
     """Derived numbers for a totals dict (session or all-time)."""
