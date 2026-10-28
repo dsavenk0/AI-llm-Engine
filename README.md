@@ -220,6 +220,8 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 ./build-dmg.sh                         # docs/LLMBar-1.0.dmg — drag-to-Applications installer
 ```
 
+> **Prebuilt download:** [LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg) (direct download of the latest release).
+
 LLMBar is the lightweight UI of the engine. It lives in the menu bar as a small `Ai_` icon. Click the icon to open a
 frosted-glass panel right under it; click again, press Esc or click elsewhere to hide it (the model keeps running).
 Double-clicking the app opens the same panel. If the icon is hidden behind the notch or another app's menus, ⌘-drag it
