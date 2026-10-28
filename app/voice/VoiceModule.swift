@@ -695,12 +695,13 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return msg["content"] as? String
     }
 
-    /// Does this message call for the internet? Only on a clear request ("найди в интернете…") or a clear sign that
-    /// the answer changes (today, weather, price, score…) — decided by the words, not by a small model's guess,
-    /// so a greeting never waits for a lookup. Then the model is asked for a good query (the question itself is
-    /// the fallback). Returns the search text, or nil.
+    /// Does this message call for the internet? A greeting or thanks is skipped outright (no cost); any real
+    /// question is sent to the model, which understands the intent and answers NO (it can answer itself) or a
+    /// short search query. Clear fresh/explicit wording still searches even if the model gives no query, so a
+    /// lookup is never missed. Returns the search text, or nil.
     private func webQuery(_ history: [[String: Any]], question: String) async -> String? {
-        guard WebLookup.wantsSearch(question) else { return nil }
+        guard !WebLookup.skip(question) else { return nil }
+        let clearlyNeeds = WebLookup.wantsSearch(question)
         let ask = "Today is \(Voice.today). You read the user's message and reply with exactly one line: NO if it "
             + "can be answered from general knowledge, or a short web search query (at most 8 words) if it asks for "
             + "current, recent, live or very specific facts (news, weather, prices, scores, schedules, releases, who "
@@ -718,7 +719,9 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         // a good query when the model gives one — never one copied from the examples above
         if let reply = await complete(messages, maxTokens: 32), let q = WebLookup.query(from: reply),
            !shots.contains(where: { $0.1.caseInsensitiveCompare(q) == .orderedSame }) { return q }
-        return String(question.prefix(120))
+        // the model gave no query (it said NO or nothing): search only when the wording already made it clear,
+        // otherwise trust the model's judgement and stay offline
+        return clearlyNeeds ? String(question.prefix(120)) : nil
     }
 
     /// Runs the search (`llm web search`) and turns what came back into text for the system prompt.

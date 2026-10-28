@@ -296,6 +296,14 @@ for q in ["What is two plus two?", "Tell me a joke.", "Explain how photosynthesi
           "Write a haiku about the sea", "Why is the sky blue?", "Что такое фотосинтез?"] {
     check(!WebLookup.needsFresh(q, year: 2026), "general knowledge: \(q)")
 }
+// skip: greetings/thanks never reach the model; a real question always does (the model, not keywords, then decides)
+for q in ["привет", "Привет!", "спасибо", "Спасибо большое", "hi", "Hey", "thanks", "ok", "как дела?"] {
+    check(WebLookup.skip(q), "small talk is skipped: \(q)")
+}
+for q in ["Who is the prime minister now?", "Что такое фотосинтез?", "Explain recursion to me please",
+          "Какая завтра погода в Москве?", "Tell me the latest news"] {
+    check(!WebLookup.skip(q), "a real question is not skipped: \(q)")
+}
 
 // terminal tabs
 var tabs = TerminalTabs()

@@ -180,6 +180,21 @@ enum WebLookup {
         explicitRequest(question) || needsFresh(question, year: year)
     }
 
+    private static let social: [String] = [
+        "привет", "здравств", "спасибо", "благодар", "пожалуйста", "пока", "как дела", "как ты", "доброе утро",
+        "добрый день", "добрый вечер", "спокойной ночи", "hello", "hi", "hey", "thanks", "thank you", "thank",
+        "good morning", "good evening", "good night", "how are you", "bye", "goodbye", "ok", "окей", "ясно", "угу",
+    ]
+    /// A message that never needs the web and should not even cost a decision call: a greeting, thanks, or a very
+    /// short remark. Anything else — a real question, even without fresh-data words — is sent to the model, which
+    /// understands the intent and decides whether a search helps (so it is not keyword matching alone).
+    static func skip(_ question: String) -> Bool {
+        let t = question.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?,…"))
+        if t.count < 3 { return true }
+        return t.count <= 24 && social.contains { t == $0 || t.hasPrefix($0 + " ") || t.hasSuffix(" " + $0) }
+    }
+
     /// The JSON line `llm web search` prints.
     static func parse(_ json: String) -> Found? {
         guard let line = json.split(separator: "\n").last(where: { $0.hasPrefix("{") }),
