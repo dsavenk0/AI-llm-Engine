@@ -22,6 +22,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   Whisper* setting (off by default): the utterance is recorded while the system recogniser runs live, then
   transcribed with Whisper for the final text, falling back to the system text if Whisper isn't installed or
   returns nothing. Omni is the next piece.
+- **Per-request timeout and graceful shutdown**: `--request-timeout N` ends a generation that runs past N seconds
+  as a timeout (`stop_reason` `timeout`; the CLI chat says so). On SIGTERM the engine now stops taking new requests
+  (a clean 503), lets in-flight ones drain for up to `--shutdown-grace` seconds, then persists the prefix cache and
+  exits; `/health` reports `shutting_down`.
 - **Request admission cap** (`--max-queue N`, or `advanced.max_queue` in `./llm`): refuses a generation request
   with 503 once this many are in flight, so a coding agent, a chat, the editor and voice all hitting one model
   stay bounded instead of piling up unbounded threads and prompt buffers; `/health` reports `inflight`/`max_queue`.

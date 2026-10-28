@@ -1746,6 +1746,8 @@ def reply_note(stop_reason):
     """A short, user-facing note on why a reply ended, when it was not a clean stop (empty otherwise)."""
     if stop_reason == "repetition":
         return T("stopped — the model was repeating itself")
+    if stop_reason == "timeout":
+        return T("stopped — it was taking too long")
     return ""
 
 

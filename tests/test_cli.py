@@ -444,6 +444,7 @@ class TestTranscribe(unittest.TestCase):
 class TestReplyNote(unittest.TestCase):
     def test_repetition_is_explained(self):
         self.assertIn("repeat", llm.reply_note("repetition").lower())
+        self.assertTrue(llm.reply_note("timeout"))
         self.assertEqual(llm.reply_note(None), "")
         self.assertEqual(llm.reply_note("stop"), "")
 

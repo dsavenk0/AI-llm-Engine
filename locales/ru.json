@@ -309,6 +309,7 @@
   "Compiling the OCR helper (Apple Vision)…": "Компиляция OCR-хелпера (Apple Vision)…",
   "OCR ready:": "OCR готов:",
   "stopped — the model was repeating itself": "остановлено — модель зациклилась",
+  "stopped — it was taking too long": "остановлено — слишком долго",
   "Type /retry to try again.": "Введите /retry, чтобы повторить.",
   "Nothing to retry.": "Нечего повторять.",
   "the attached files": "прикреплённые файлы",

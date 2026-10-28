@@ -59,6 +59,7 @@ class Admission:
 
 ADMISSION = Admission(0)
 GEN_PATHS = ("/v1/chat/completions", "/chat/completions", "/v1/messages", "/api/chat", "/api/generate")
+SHUTTING_DOWN = threading.Event()        # set on SIGTERM: new generation requests are refused, in-flight drain
 
 
 def worker(init):
@@ -374,6 +375,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if ARGS.steer else None,
                 "busy": ENGINE.lock.locked(),
                 "inflight": ADMISSION.inflight, "max_queue": ADMISSION.limit,
+                "shutting_down": SHUTTING_DOWN.is_set(),
                 "progress": getattr(ENGINE, "progress", None),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
                               "peak": round(mx.get_peak_memory() / 2**30, 2),
@@ -421,6 +423,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             return self._error(400, "invalid JSON body")
         if path in GEN_PATHS:
+            if SHUTTING_DOWN.is_set():
+                return self._error(503, "the server is shutting down", "server_error", "shutting_down")
             if not ADMISSION.acquire():
                 return self._error(503, "the server is busy — too many requests in flight; retry shortly",
                                    "server_error", "overloaded")
@@ -542,8 +546,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         reasoning, content, stats = [], [], {}
         with ENGINE.lock:
+            timeout = getattr(ARGS, "request_timeout", 0) or 0
+            deadline = time.time() + timeout if timeout else None
+            timed_out = [False]
+
+            def should_stop():                         # the client hung up, or the wall-clock deadline passed
+                if cancelled.is_set():
+                    return True
+                if deadline and time.time() > deadline:
+                    timed_out[0] = True
+                    return True
+                return False
             try:
-                gen = lambda: ENGINE.generate(ids, media, max_tokens, sampling, stop, cancelled.is_set,
+                gen = lambda: ENGINE.generate(ids, media, max_tokens, sampling, stop, should_stop,
                                               seed=body.get("seed"), thinking_open=bool(thinking_open))
                 for item in run_job(gen):
                     if isinstance(item, dict):
@@ -566,6 +581,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         calls = parse_calls(parser.tool_text, tools) if parser.tool_text else []
         finish, stop_reason = finish_reason(stats, bool(calls))
+        if timed_out[0] and not calls:                 # the deadline, not a clean stop
+            finish, stop_reason = "length", "timeout"
         usage = {"prompt_tokens": stats.get("prompt_tokens", len(ids)),
                  "completion_tokens": stats.get("completion_tokens", 0),
                  "total_tokens": stats.get("prompt_tokens", len(ids)) + stats.get("completion_tokens", 0),
@@ -938,6 +955,10 @@ def main():
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
     ap.add_argument("--max-queue", type=int, default=0,
                     help="refuse (503) a generation request when this many are already in flight (0 = no cap)")
+    ap.add_argument("--request-timeout", type=float, default=0,
+                    help="stop a generation after N seconds and end it as a timeout (0 = no limit)")
+    ap.add_argument("--shutdown-grace", type=float, default=10,
+                    help="on SIGTERM, let in-flight requests finish for up to N seconds before exiting")
     ap.add_argument("--disk-cache-gb", type=_cache_size, default=8,
                     help="SSD prefix cache budget in GB, or \"auto\" for 10%% of free disk space (0 = off)")
     ap.add_argument("--disk-cache-dir", default="", help="where the SSD prefix cache lives (default: "
@@ -1003,9 +1024,14 @@ def main():
         return iter(())  # no streamed output, just run on the worker thread and finish
 
     def _shutdown(signum, frame):
-        # persist_prefix touches MLX arrays, so it has to run on the worker thread like
-        # everything else — route it through the same job queue chat requests use, then
-        # exit directly (stop/restart already has its own SIGKILL fallback if this hangs).
+        # Stop taking new work (new requests get a clean 503), let in-flight requests drain for up to the
+        # grace period, then persist the prefix cache and exit. persist_prefix touches MLX arrays, so it has
+        # to run on the worker thread like everything else — route it through the same job queue chat
+        # requests use (stop/restart already has its own SIGKILL fallback if this hangs).
+        SHUTTING_DOWN.set()
+        grace = time.time() + max(0.0, getattr(ARGS, "shutdown_grace", 0) or 0)
+        while ADMISSION.inflight > 0 and time.time() < grace:
+            time.sleep(0.05)
         try:
             for _ in run_job(_persist_job):
                 pass

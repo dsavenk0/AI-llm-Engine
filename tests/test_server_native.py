@@ -473,6 +473,18 @@ class TestNativeServerOptions(unittest.TestCase):
         code, r = srv.chat(model="gpt-4o")
         self.assertEqual(code, 200, r)
 
+    def test_request_timeout_ends_as_a_timeout(self):
+        srv = self.with_server("--request-timeout", "0.001")        # the deadline passes before any token
+        code, r = srv.chat("tell me a long story", max_tokens=16)
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["choices"][0].get("stop_reason"), "timeout")
+
+    def test_health_reports_the_queue_and_shutdown_fields(self):
+        h = self.with_server().get("/health")
+        for k in ("inflight", "max_queue", "shutting_down"):
+            self.assertIn(k, h)
+        self.assertFalse(h["shutting_down"])
+
     def test_fallback_off_refuses_another_model_but_accepts_the_loaded_one_in_any_spelling(self):
         srv = self.with_server("--fallback-model", "off")
         code, r = srv.chat(model="some-other-model")
