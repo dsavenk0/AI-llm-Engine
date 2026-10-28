@@ -315,5 +315,10 @@
   "Usage: ./llm transcribe <audio> [--model <hf-repo>] [--json]": "Использование: ./llm transcribe <аудио> [--model <hf-repo>] [--json]",
   "Cannot transcribe:": "Не удалось распознать речь:",
   "Installing mlx-whisper…": "Установка mlx-whisper…",
-  "Speech-to-text ready. Try:  ./llm transcribe recording.m4a": "Распознавание речи готово. Попробуйте:  ./llm transcribe recording.m4a"
+  "Speech-to-text ready. Try:  ./llm transcribe recording.m4a": "Распознавание речи готово. Попробуйте:  ./llm transcribe recording.m4a",
+  "Installing Whisper and Kokoro (mlx-whisper, mlx-audio)…": "Установка Whisper и Kokoro (mlx-whisper, mlx-audio)…",
+  "Audio ready. Try:  ./llm transcribe clip.m4a   ./llm say \"hello\"": "Аудио готово. Попробуйте:  ./llm transcribe clip.m4a   ./llm say \"hello\"",
+  "Usage: ./llm say \"<text>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]": "Использование: ./llm say \"<текст>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]",
+  "Cannot speak:": "Не удалось озвучить:",
+  "Saved {path} ({sec}s)": "Сохранено {path} ({sec}с)"
 }

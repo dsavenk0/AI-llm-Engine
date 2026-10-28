@@ -415,6 +415,31 @@ class TestTranscribe(unittest.TestCase):
         with self.assertRaises(audio.AudioError):
             audio.transcribe("/no/such/audio.wav")
 
+    def test_say_usage_without_text(self):
+        rv, out = self.capture(llm.say_cmd, cfg(), ["--voice", "af_heart"])
+        self.assertFalse(rv)
+
+    def test_say_without_mlx_audio_is_a_clear_error(self):
+        from unittest import mock
+        from engine import audio
+        with mock.patch.object(audio, "kokoro_available", lambda: False):
+            with self.assertRaises(audio.AudioError) as cm:
+                audio.synthesize("hello", os.path.join(tempfile.mkdtemp(), "o.wav"))
+            self.assertIn("setup --audio", str(cm.exception))
+            rv, out = self.capture(llm.say_cmd, cfg(), ["hello", "--no-play"])
+            self.assertFalse(rv)
+
+    def test_write_wav_is_a_valid_readable_file(self):
+        import wave
+        import numpy as np
+        from engine import audio
+        p = os.path.join(tempfile.mkdtemp(), "tone.wav")
+        samples = np.sin(np.linspace(0, 20, 2400)).astype(np.float32)   # 0.1 s at 24 kHz
+        audio._write_wav(p, samples, 24000)
+        with wave.open(p, "rb") as w:
+            self.assertEqual((w.getnchannels(), w.getsampwidth(), w.getframerate()), (1, 2, 24000))
+            self.assertEqual(w.getnframes(), 2400)
+
 
 class TestReplyNote(unittest.TestCase):
     def test_repetition_is_explained(self):

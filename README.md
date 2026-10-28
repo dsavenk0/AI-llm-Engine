@@ -226,6 +226,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm inspect [<#|name>]   what is inside a model, from its headers: layers, storage types, bits per weight, biggest tensors
 ./llm read <file>          extract text from a PDF/DOCX/PPTX/HTML/text document (or OCR a scan/image) to attach as a source
 ./llm transcribe <audio>   on-device speech-to-text with Whisper (MLX); install once with ./llm setup --audio
+./llm say "<text>"         on-device text-to-speech with Kokoro (MLX): plays it and saves a WAV
 ./llm agent [dir]          terminal coding agent (files, search, edits, shell)
 ./llm connect [client]     register the model in Continue, Kilo Code or opencode
 ./llm free                 quit vMLX / oMLX / Ollama to free memory

@@ -7,8 +7,9 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm up                   start (if needed), chat right away, then the menu
   ./llm setup [--compat]     create .venv and install dependencies (--compat adds mlx-lm for other model families)
   ./llm setup --ocr          build the on-device OCR helper (Apple Vision) so scanned PDFs and images can be read
-  ./llm setup --audio        install Whisper (MLX) for on-device speech-to-text (./llm transcribe)
+  ./llm setup --audio        install Whisper + Kokoro (MLX) for on-device speech-to-text and text-to-speech
   ./llm transcribe <audio>   speech-to-text with Whisper (MLX), on-device (--model <hf-repo>, --json)
+  ./llm say "<text>"         text-to-speech with Kokoro (MLX), on-device (--voice, --speed, --out, --no-play)
   ./llm models               discovered models and compatibility
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
@@ -2709,14 +2710,54 @@ def transcribe_cmd(cfg, args):
     return True
 
 
+def say_cmd(cfg, args):
+    """`./llm say "<text>" [--voice af_heart] [--speed 1.0] [--lang a] [--out file.wav] [--no-play]` —
+    on-device text-to-speech with Kokoro (MLX). Plays the audio and saves a WAV. Needs `./llm setup --audio`."""
+    voice, speed, lang, out, play, words, i = "af_heart", 1.0, "a", None, True, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--voice" and i + 1 < len(args):
+            voice = args[i + 1]; i += 2
+        elif a == "--speed" and i + 1 < len(args):
+            try:
+                speed = float(args[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--lang" and i + 1 < len(args):
+            lang = args[i + 1]; i += 2
+        elif a == "--out" and i + 1 < len(args):
+            out = args[i + 1]; i += 2
+        elif a == "--no-play":
+            play = False; i += 1
+        elif a.startswith("--"):
+            i += 1
+        else:
+            words.append(a); i += 1
+    text = " ".join(words).strip()
+    if not text:
+        print(T("Usage: ./llm say \"<text>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]")); return False
+    from engine import audio
+    dest = os.path.expanduser(out) if out else os.path.join(DATA, "say.wav")
+    try:
+        r = audio.synthesize(text, dest, voice=voice, speed=speed, lang_code=lang)
+    except audio.AudioError as e:
+        print(R(T("Cannot speak:") + f" {e}")); return False
+    print(G(T("Saved {path} ({sec}s)").format(path=r["path"], sec=r["seconds"])))
+    if play and shutil.which("afplay"):
+        subprocess.run(["afplay", dest])
+    return True
+
+
 def setup_audio():
-    """`./llm setup --audio`: install mlx-whisper into .venv for on-device speech-to-text (./llm transcribe)."""
+    """`./llm setup --audio`: install Whisper (speech-to-text) and Kokoro/mlx-audio (text-to-speech) into .venv."""
     if not os.path.exists(VENV_PY) and not setup():
         return False
-    print(T("Installing mlx-whisper…"))
-    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-whisper"], env=network_env(load_cfg()))
+    print(T("Installing Whisper and Kokoro (mlx-whisper, mlx-audio)…"))
+    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-whisper", "mlx-audio", "misaki"],
+                       env=network_env(load_cfg()))
     if r.returncode == 0:
-        print(G(T("Speech-to-text ready. Try:  ./llm transcribe recording.m4a")))
+        print(G(T("Audio ready. Try:  ./llm transcribe clip.m4a   ./llm say \"hello\"")))
     return r.returncode == 0
 
 
@@ -3108,6 +3149,7 @@ def main():
                 setup_ocr() if "--ocr" in sys.argv else (
                     setup_audio() if "--audio" in sys.argv else setup(compat="--compat" in sys.argv)))),
         "transcribe": lambda: transcribe_cmd(cfg, sys.argv[2:]),
+        "say": lambda: say_cmd(cfg, sys.argv[2:]),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),
         "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),
