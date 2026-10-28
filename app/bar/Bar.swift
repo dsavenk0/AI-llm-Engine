@@ -2063,18 +2063,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             installContent()
         }
         // under the icon if it is visible, else the top-right corner — always fully on screen
-        if let w = window, !w.isVisible || anchorX != nil, let screen = NSScreen.main {
+        if let w = window, !w.isVisible || anchorX != nil, let screen = NSScreen.main, let host = hosting {
             let v = screen.visibleFrame
-            // the frame is still empty before SwiftUI lays out — size from the content instead
-            var size = hosting?.fittingSize ?? .zero
+            // Measure the content once with intrinsic sizing on, set the frame, then freeze it. While the
+            // panel is open the memory/graph numbers refresh ~1×/s; an auto-sizing host re-applies the
+            // content size on every tick, and NSWindow keeps the bottom-left origin, so the top edge
+            // jittered once a second. The width is fixed (392), so centring off a constant — not the
+            // fluctuating fittingSize — keeps the panel put on the x axis too.
+            host.sizingOptions = [.minSize, .intrinsicContentSize, .maxSize]
+            var size = host.fittingSize
             if size.width < 100 || size.height < 100 { size = NSSize(width: 392, height: 680) }
+            let width: CGFloat = 392
             let h = min(size.height, v.height - 8)
             // Under the icon when opened by a click on it; otherwise (launch, double-click) the
             // top-right corner like Control Center — a status item can be covered by the notch or
             // the active app's menus while macOS still reports it visible.
-            var x = anchorX.map { $0 - size.width / 2 } ?? (v.maxX - size.width - 12)
-            x = min(max(x, v.minX + 8), v.maxX - size.width - 8)
-            w.setFrame(NSRect(x: x, y: v.maxY - h - 6, width: size.width, height: h), display: true)
+            var x = anchorX.map { $0 - width / 2 } ?? (v.maxX - width - 12)
+            x = min(max(x, v.minX + 8), v.maxX - width - 8)
+            w.setFrame(NSRect(x: x, y: v.maxY - h - 6, width: width, height: h), display: true)
+            host.sizingOptions = []   // a content refresh must not resize or move the window
         }
         engine.loadConfig()
         NSApp.activate(ignoringOtherApps: true)
