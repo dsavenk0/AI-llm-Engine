@@ -63,6 +63,33 @@ class Base(unittest.TestCase):
             json.dump({"workers": workers}, f)
 
 
+class TestAttachRecognition(Base):
+    """A text/code file is attached raw; a PDF/Office/image/audio file is recognised to text first."""
+
+    def test_needs_recognition_by_type(self):
+        self.assertTrue(delegate.needs_recognition("x.pdf"))
+        self.assertTrue(delegate.needs_recognition("x.docx"))
+        self.assertTrue(delegate.needs_recognition("scan.png"))
+        self.assertTrue(delegate.needs_recognition("clip.m4a"))
+        self.assertFalse(delegate.needs_recognition("main.py"))
+        self.assertFalse(delegate.needs_recognition("notes.md"))
+
+    def test_text_file_is_attached_raw(self):
+        block = delegate.attach(self.root, ["a.py"])
+        self.assertIn("### a.py", block)
+        self.assertIn("print('a')", block)
+
+    def test_docx_is_recognised(self):
+        import zipfile
+        p = os.path.join(self.root, "spec.docx")
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("word/document.xml",
+                       "<w:document><w:body><w:p><w:r><w:t>The API returns a status field.</w:t></w:r></w:p></w:body></w:document>")
+        block = delegate.attach(self.root, ["spec.docx"])
+        self.assertIn("### spec.docx (docx)", block)
+        self.assertIn("status field", block)
+
+
 class TestDelegate(Base):
     def test_openai_worker_gets_task_and_files_with_key_from_env(self):
         os.environ["FAKE_WORKER_KEY"] = "sk-test"

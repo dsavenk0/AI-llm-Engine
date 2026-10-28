@@ -234,7 +234,13 @@ class Agent:
         return "\n".join(out) or "(empty)"
 
     def t_read_file(self, path, start=None, end=None):
-        with open(self.path(path), errors="replace") as f:
+        full = self.path(path)
+        from harness.delegate import needs_recognition
+        if needs_recognition(full):                    # a PDF, scan, image or audio file: recognise it to text
+            from harness import perception
+            src = perception.recognize([full])[0]
+            return src["text"] or ("[" + (src["note"] or "unreadable") + "]")
+        with open(full, errors="replace") as f:
             lines = f.read().splitlines()
         s = max(1, int(start or 1))
         e = min(len(lines), int(end or len(lines)))

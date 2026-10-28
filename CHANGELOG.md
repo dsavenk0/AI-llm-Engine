@@ -18,7 +18,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   locally — audio via Whisper, scans/images/PDF via OCR, documents via text extraction — and fed to the optional
   orchestrator, which routes the work across your installed models by role (a fast model reads and extracts, the
   senior model writes the code) and merges one answer. Each subtask receives only the passages of the attachment
-  relevant to it (TF·IDF excerpts). `./llm conduct "<task>" --file F …`. Nothing leaves the Mac.
+  relevant to it (TF·IDF excerpts). `./llm conduct "<task>" --file F …`. Nothing leaves the Mac. The **agents**
+  do it too: `read_file` (editor and CLI agent) and a delegated task's attachments recognise a PDF, scan, image
+  or audio file to text instead of returning "(binary file)", so the model can read them like any source.
 - **Speech-to-text and text-to-speech** (`./llm transcribe <audio>`, `./llm say "<text>"`, `engine/audio.py`):
   on-device Whisper and Kokoro on MLX — optional, like image generation and OCR (`./llm setup --audio` installs
   `mlx-whisper`, `mlx-audio` and `misaki`; the models download on first use). `transcribe` returns text + language

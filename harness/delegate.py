@@ -113,19 +113,35 @@ def usable(spec):
 
 
 def attach(root, files):
-    """The listed workspace files as a context block; refuses paths outside the workspace."""
+    """The listed workspace files as a context block; refuses paths outside the workspace. A PDF, Office doc,
+    image or audio file is recognised (OCR / Whisper / text extraction) instead of read as raw bytes."""
     parts, total = [], 0
     for rel in files or []:
         full = os.path.realpath(os.path.join(root, rel))
         if full != os.path.realpath(root) and not full.startswith(os.path.realpath(root) + os.sep):
             raise ValueError(f"{rel} is outside the workspace")
-        with open(full, encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        if needs_recognition(full):
+            from harness import perception
+            src = perception.recognize([full])[0]
+            text = src["text"] or ("[" + (src["note"] or "unreadable") + "]")
+            header = f"### {rel} ({src['kind']})"
+        else:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            header = f"### {rel}"
         total += len(text.encode())
         if total > MAX_CONTEXT_BYTES:
             raise ValueError(f"attached files exceed {MAX_CONTEXT_BYTES // 1000} KB; send fewer or smaller files")
-        parts.append(f"### {rel}\n```\n{text}\n```")
+        parts.append(f"{header}\n```\n{text}\n```")
     return "\n\n".join(parts)
+
+
+def needs_recognition(path):
+    """True for the file types perception turns into text (audio, images/scans, PDF, Office docs) — a plain
+    text or code file is read directly and exactly, never run through OCR."""
+    from engine import audio, documents
+    ext = os.path.splitext(path)[1].lower()
+    return ext in audio.AUDIO_EXTS or ext in documents.IMAGE_EXTS or ext in (".pdf", ".docx", ".pptx")
 
 
 def build_prompt(task, context):

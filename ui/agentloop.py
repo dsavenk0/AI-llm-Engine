@@ -23,7 +23,8 @@ TOOLS = [
             "path": {"type": "string", "description": "folder relative to the project, '.' for the root"},
             "pattern": {"type": "string", "description": "optional glob filter such as '*.py'"}}, "required": ["path"]}}},
     {"type": "function", "function": {
-        "name": "read_file", "description": "Read a text file (optionally a line range). Lines are numbered.",
+        "name": "read_file", "description": "Read a file (optionally a line range; lines are numbered). A PDF, "
+        "image, scan or audio file is recognised to text (OCR / speech-to-text).",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"}, "start": {"type": "integer"}, "end": {"type": "integer"}}, "required": ["path"]}}},
     {"type": "function", "function": {
@@ -324,6 +325,11 @@ class Tools:
         full = self.P.resolve(path)
         if os.path.isdir(full):
             raise IsADirectoryError(path)
+        from harness.delegate import needs_recognition
+        if needs_recognition(full):                    # a PDF, scan, image or audio file: recognise it to text
+            from harness import perception
+            src = perception.recognize([full])[0]
+            return src["text"] or ("[" + (src["note"] or "unreadable") + "]")
         with open(full, "rb") as f:
             raw = f.read(self.P.max_file + 1)
         if b"\x00" in raw[:8192]:
