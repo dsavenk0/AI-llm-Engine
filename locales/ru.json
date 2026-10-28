@@ -310,6 +310,7 @@
   "OCR ready:": "OCR готов:",
   "stopped — the model was repeating itself": "остановлено — модель зациклилась",
   "stopped — it was taking too long": "остановлено — слишком долго",
+  "Work on the attached sources.": "Поработай с прикреплёнными источниками.",
   "Type /retry to try again.": "Введите /retry, чтобы повторить.",
   "Nothing to retry.": "Нечего повторять.",
   "the attached files": "прикреплённые файлы",

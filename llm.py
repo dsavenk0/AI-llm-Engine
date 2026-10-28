@@ -23,7 +23,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm start|stop|restart|status|chat|bench|logs|free
   ./llm service install|uninstall|status   optional background service (launchd): up after login, restarts on crash
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
-  ./llm conduct ["<task>"]   optional orchestrator: split a task across models by role (set: conduct set …)
+  ./llm conduct ["<task>"] [--file F …]   orchestrator: recognise attachments (OCR/Whisper/docs), route by role
   ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
@@ -3090,11 +3090,13 @@ def conduct_cmd(cfg, args):
     """Optional orchestrator: split a task across models by role. Opt-in — single-model work is unaffected.
     `--root DIR` points at the project (the editor passes it); `--json` prints the status for a UI."""
     from harness import conductor
-    root, as_json, rest = os.getcwd(), False, []
+    root, as_json, files, rest = os.getcwd(), False, [], []
     i = 0
     while i < len(args):
         if args[i] == "--root" and i + 1 < len(args):
             root = args[i + 1]; i += 2; continue
+        if args[i] in ("--file", "-f") and i + 1 < len(args):
+            files.append(args[i + 1]); i += 2; continue
         if args[i] == "--json":
             as_json = True; i += 1; continue
         rest.append(args[i]); i += 1
@@ -3109,11 +3111,18 @@ def conduct_cmd(cfg, args):
     if sub == "unset" and len(args) == 2:
         conductor.set_role(root, args[1], None); print(G(f"{args[1]} cleared")); return True
     task = " ".join(args).strip()
-    if not task:
+    if not task and not files:
         return _conduct_status(cfg, conductor, root)
+    sources = ()
+    if files:
+        from harness import perception
+        sources = perception.recognize(files)
+        for s in sources:
+            print(DIM(f"[perceive] {s['name']} ({s['kind']})" + (f" — {s['note']}" if s['note'] else "")))
     try:
-        answer = conductor.conduct(task, root, local=_conduct_local_fallback(cfg),
-                                   switch_local=_conduct_switch(cfg), emit=lambda line: print(DIM(line)))
+        answer = conductor.conduct(task or T("Work on the attached sources."), root,
+                                   local=_conduct_local_fallback(cfg), switch_local=_conduct_switch(cfg),
+                                   emit=lambda line: print(DIM(line)), sources=sources)
     except RuntimeError as e:
         print(R(str(e))); return False
     print("\n" + (answer or "(empty)"))

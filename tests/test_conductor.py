@@ -164,5 +164,44 @@ class TestConfig(Base):
         self.assertEqual(roles["fast"], {"local": "Selected"})
 
 
+class TestPerception(unittest.TestCase):
+    """Attachments → text sources, and those sources reaching the planner and the subtasks."""
+
+    class Stub:                       # a duck-typed engine that records the prompts it is asked to run
+        def __init__(self, reply):
+            self.reply, self.prompts = reply, []
+
+        def run(self, spec, prompt, root):
+            self.prompts.append(prompt)
+            return self.reply
+
+    def test_recognise_text_and_error(self):
+        from harness import perception
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "spec.md")
+        with open(p, "w") as f:
+            f.write("The API returns JSON with a status field.")
+        src = perception.recognize([p])
+        self.assertEqual(src[0]["kind"], "text")
+        self.assertIn("status field", src[0]["text"])
+        bad = perception.recognize([os.path.join(d, "missing.pdf")])      # a bad file is a source with a note
+        self.assertEqual(bad[0]["kind"], "error")
+        self.assertTrue(bad[0]["note"])
+
+    def test_sources_reach_the_planner(self):
+        eng = self.Stub('{"subtasks":[{"id":"s1","role":"heavy","task":"implement it"}]}')
+        conductor.decompose("build the client", {"type": "openai"}, eng, "/tmp", {"heavy"},
+                            srctext="### api.md\nthe endpoint returns a status field")
+        self.assertIn("status field", eng.prompts[0])       # the planner saw the recognised source
+
+    def test_each_subtask_gets_the_relevant_excerpt(self):
+        eng = self.Stub("ok")
+        subs = [{"id": "s1", "role": "fast", "task": "what status field does the API return", "depends_on": []}]
+        res = conductor.run_subtasks(subs, {"fast": {"type": "openai", "url": "http://x", "model": "m"}},
+                                     eng, "/tmp", srctext="the API must return JSON with a status field")
+        self.assertEqual(res["s1"], "ok")
+        self.assertIn("status field", eng.prompts[0])       # the relevant passage reached the subtask
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,11 @@ its Metal headroom estimate (~8.5K on 16 GB).
   request it frees caches, caps the output to what fits and refuses an oversized prompt with a clear error — instead
   of swapping and freezing a 16 GB Mac. It shrinks the prefill chunk under pressure and checks every 32 tokens while
   generating. (Where vMLX returns HTTP 413 and fails, this clamps and succeeds.)
+- **On-device multimodal orchestration — the flagship.** Attach a scan, a photo, a recording or a document and it
+  is recognised *on the Mac* (OCR via Apple Vision, speech via Whisper, PDF/DOCX/HTML text), then the optional
+  **Conductor** splits the task across your installed models by role — a fast model reads and extracts, the senior
+  model writes the code — and merges one answer. Each subtask is given only the passages of the attachment relevant
+  to it (TF·IDF, so a long document stays small). No cloud at any step. `./llm conduct "add tests for this" --file spec.pdf`.
 
 Numbers and the full mechanism are in [How it is fast](#how-it-is-fast).
 

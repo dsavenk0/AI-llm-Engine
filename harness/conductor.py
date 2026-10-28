@@ -192,9 +192,13 @@ class _Engine:
         return delegate.ask_openai(spec, prompt)
 
 
-def decompose(task, heavy, engine, root, available):
-    """Ask the heavy role for a plan. Returns a list of validated subtasks. Raises RuntimeError on a bad plan."""
-    reply = engine.run(heavy, PLAN_PROMPT.format(maxn=MAX_SUBTASKS, task=task.strip()), root)
+def decompose(task, heavy, engine, root, available, srctext=""):
+    """Ask the heavy role for a plan. Returns a list of validated subtasks. Raises RuntimeError on a bad plan.
+    `srctext`: recognised attachments, shown to the planner so it can route work over them."""
+    full = task.strip()
+    if srctext:
+        full += "\n\n--- Attached sources (recognised; plan subtasks that use them) ---\n" + srctext[:SOURCE_PLAN_CAP]
+    reply = engine.run(heavy, PLAN_PROMPT.format(maxn=MAX_SUBTASKS, task=full), root)
     data = _extract_json(reply)
     items = (data or {}).get("subtasks") if isinstance(data, dict) else None
     if not isinstance(items, list) or not items:
@@ -232,15 +236,21 @@ def _levels(subtasks):
     return levels
 
 
-def run_subtasks(subtasks, roles, engine, root, emit=lambda _l: None):
+def run_subtasks(subtasks, roles, engine, root, emit=lambda _l: None, srctext=""):
     """Run every subtask on its role's model. Within a dependency level, remote (API) subtasks run in parallel
-    while the local ones take turns on the engine (grouped by model); the two go on at the same time. Returns
-    {id: answer} — the running state the Conductor carries across switches."""
+    while the local ones take turns on the engine (grouped by model); the two go on at the same time. `srctext`:
+    recognised attachments — each subtask gets the passages relevant to it (TF·IDF, so a long document stays
+    small). Returns {id: answer} — the running state the Conductor carries across switches."""
     from concurrent.futures import ThreadPoolExecutor
     results, by_id = {}, {s["id"]: s for s in subtasks}
 
     def prompt_for(s):
         ctx = ""
+        if srctext:
+            from engine import documents
+            ex = documents.select_excerpts(srctext, s["task"], budget=4000)["text"]
+            if ex:
+                ctx += "\n\n--- From the attached sources ---\n" + ex
         for d in s["depends_on"]:
             if d in results:
                 ctx += f"\n\nResult of {d} ({by_id[d]['role']}):\n{results[d][:MAX_DEP_BYTES]}"
@@ -284,18 +294,27 @@ def synthesize(task, subtasks, results, heavy, engine, root):
     return engine.run(heavy, SYNTH_PROMPT.format(task=task.strip(), bundle=bundle), root)
 
 
-def conduct(task, root, local=None, switch_local=None, emit=lambda _l: None):
-    """Decompose → route → synthesize. `local`: the local-engine model spec for unmapped roles (e.g. the selected
-    model). `switch_local(model) -> spec`: loads a model on the engine and returns its endpoint. `emit(line)` gets
-    the trace. Returns the final answer text."""
+SOURCE_PLAN_CAP = 8000     # how much of the attached sources the planner sees; subtasks pull the relevant parts
+
+
+def conduct(task, root, local=None, switch_local=None, emit=lambda _l: None, sources=()):
+    """Perceive → decompose → route → synthesize. `local`: the local-engine model spec for unmapped roles (e.g.
+    the selected model). `switch_local(model) -> spec`: loads a model on the engine and returns its endpoint.
+    `emit(line)` gets the trace. `sources`: recognised attachments (harness.perception.recognize) — the planner
+    sees them and each subtask draws the relevant passages, so the senior/code model works on a scan, a recording
+    or a document without a manual step. Returns the final answer text."""
     roles, dropped = resolve_roles(root, local=local)
     if "heavy" not in roles:
         raise RuntimeError("the 'heavy' role needs a model (it plans and synthesizes). "
                            "Set it with: llm conduct set heavy <model-or-worker>")
+    from harness import perception
+    srctext = perception.as_text(sources) if sources else ""
     engine = _Engine(switch_local, emit)
+    if sources:
+        emit("[perceive] " + ", ".join(f"{s['name']} ({s['kind']})" for s in sources))
     emit("[plan] " + " · ".join(f"{r} → {where(roles[r])}" for r in ROLES if r in roles))
-    subtasks = decompose(task, roles["heavy"], engine, root, set(roles))
+    subtasks = decompose(task, roles["heavy"], engine, root, set(roles), srctext)
     emit(f"[plan] {len(subtasks)} subtask(s)")
-    results = run_subtasks(subtasks, roles, engine, root, emit)
+    results = run_subtasks(subtasks, roles, engine, root, emit, srctext)
     emit("[synth] heavy → " + where(roles["heavy"]))
     return synthesize(task, subtasks, results, roles["heavy"], engine, root)
