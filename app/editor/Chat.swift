@@ -74,8 +74,16 @@ final class ChatStore: ObservableObject {
 
     private func save() {
         guard let f = file else { return }
+        lastSave = Date()
         let keep = sessions.sorted { $0.updated > $1.updated }.prefix(40)
         try? JSONEncoder().encode(Array(keep)).write(to: f, options: .atomic)
+    }
+
+    private var lastSave = Date.distantPast
+    /// Persist at most once a second while a reply streams in, so a crash mid-generation keeps the request
+    /// and the partial answer on disk (the unfinished reply can be asked again next launch).
+    private func saveThrottled() {
+        if Date().timeIntervalSince(lastSave) > 1.0 { save() }
     }
 
     func newChat() {
@@ -198,6 +206,7 @@ final class ChatStore: ObservableObject {
             if s.items.isEmpty { s.title = String(prompt.prefix(48)) }
             s.items.append(ChatItem(kind: .user, text: prompt, attached: names))
         }
+        save()                        // persist the request before generation starts (survives a crash)
         let history = plainHistory()
         // what the person is looking at: "check this code" means the open file (and where the cursor is)
         let active: [String: Any]? = ws.active.map { ["file": $0.path, "line": ws.cursor.0] }
@@ -224,6 +233,23 @@ final class ChatStore: ObservableObject {
     }
 
     func stop() { task?.cancel() }
+
+    /// A turn whose reply did not complete — stopped, failed, or cut off by a crash (the last item is the
+    /// user's message or an error, with no finished answer after it). Such a turn can be asked again.
+    var canRetry: Bool {
+        guard !busy, let last = current?.items.last else { return false }
+        return last.kind == .user || last.kind == .error
+    }
+
+    /// Ask the last user message again: drop the unfinished reply after it and regenerate from the history.
+    func retry() {
+        guard !busy, let items = current?.items, let i = items.lastIndex(where: { $0.kind == .user }) else { return }
+        mutate { s in if i + 1 < s.items.count { s.items.removeSubrange((i + 1)...) } }
+        save()
+        busy = true
+        let history = plainHistory()
+        task = Task { await self.run(history: history, attached: [], inline: [], pictures: [], active: nil) }
+    }
 
     private func apply(_ ev: AgentEvent) {
         mutate { s in
@@ -256,6 +282,7 @@ final class ChatStore: ObservableObject {
             case .error(let m): s.items.append(ChatItem(kind: .error, text: m))
             }
         }
+        saveThrottled()               // keep the partial answer on disk as it streams in
     }
 
     // MARK: answering cards

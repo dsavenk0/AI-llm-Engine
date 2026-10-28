@@ -325,6 +325,10 @@ struct Composer: View {
                 if store.busy {
                     Button("Stop") { store.stop() }.buttonStyle(.bordered)
                 } else {
+                    if store.canRetry, !canSend {           // a stopped/failed/unfinished turn, nothing typed yet
+                        Button { store.retry() } label: { Label("Retry", systemImage: "arrow.clockwise") }
+                            .buttonStyle(.bordered).help("Ask the last message again")
+                    }
                     Button(action: send) {
                         Label("Send", systemImage: "arrow.up").labelStyle(.titleAndIcon)
                     }
