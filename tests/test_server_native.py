@@ -351,6 +351,61 @@ class TestNativeServer(unittest.TestCase):
         self.assertEqual(row["model"], "synth")
         self.assertGreater(row["prompt"], 0)
 
+    # ───────────── Ollama wire format ─────────────
+    def _ndjson(self, path, body):
+        code, h, raw = self.srv.request("POST", path, body)
+        lines = [json.loads(x) for x in raw.decode().split("\n") if x.strip()]
+        return code, h, lines
+
+    def test_ollama_discovery(self):
+        self.assertIn("version", self.srv.get("/api/version"))
+        tags = self.srv.get("/api/tags")
+        self.assertEqual([m["name"] for m in tags["models"]], ["synth"])
+        self.assertTrue(tags["models"][0]["digest"].startswith("sha256:"))
+        code, show = self.srv.json("POST", "/api/show", {"model": "synth"})
+        self.assertEqual(code, 200)
+        self.assertIn("completion", show["capabilities"])
+        self.assertIn("tools", show["capabilities"])
+        self.assertGreater(show["model_info"]["general.context_length"], 0)
+        ps = self.srv.get("/api/ps")                       # awake → the model is listed
+        self.assertEqual([m["name"] for m in ps["models"]], ["synth"])
+
+    def test_ollama_chat_nonstream(self):
+        code, r = self.srv.json("POST", "/api/chat", {"model": "synth", "stream": False,
+                                "options": {"temperature": 0, "num_predict": 8},
+                                "messages": [{"role": "user", "content": "hello world"}]})
+        self.assertEqual(code, 200, r)
+        self.assertTrue(r["done"])
+        self.assertIn(r["done_reason"], ("stop", "length"))   # synth truncates at num_predict → "length"
+        self.assertEqual(r["message"]["role"], "assistant")
+        self.assertIsInstance(r["message"]["content"], str)
+        self.assertGreater(r["prompt_eval_count"], 0)
+
+    def test_ollama_chat_stream_is_ndjson_ending_done(self):
+        code, h, lines = self._ndjson("/api/chat", {"model": "synth",
+                                      "options": {"temperature": 0, "num_predict": 8},
+                                      "messages": [{"role": "user", "content": "what is two plus two"}]})
+        self.assertEqual(code, 200)
+        self.assertIn("x-ndjson", h.get("Content-Type", ""))
+        self.assertFalse(lines[0]["done"])                 # the first line is a delta, not the end
+        self.assertTrue(lines[-1]["done"])                 # the last one is the terminator
+        self.assertIn(lines[-1]["done_reason"], ("stop", "length"))
+        streamed = "".join(x["message"]["content"] for x in lines if not x["done"])
+        self.assertTrue(streamed)                          # something was actually streamed
+
+    def test_ollama_generate_uses_response_field(self):
+        code, r = self.srv.json("POST", "/api/generate", {"model": "synth", "stream": False,
+                                "options": {"temperature": 0, "num_predict": 8}, "prompt": "hello"})
+        self.assertEqual(code, 200, r)
+        self.assertTrue(r["done"])
+        self.assertIsInstance(r["response"], str)
+        self.assertGreater(r["prompt_eval_count"], 0)
+
+    def test_ollama_chat_without_messages_is_a_clean_error(self):
+        code, r = self.srv.json("POST", "/api/chat", {"model": "synth", "stream": False, "messages": []})
+        self.assertEqual(code, 400)
+        self.assertIn("error", r)                           # Ollama's bare {"error": "..."} shape
+
 
 class TestNativeServerOptions(unittest.TestCase):
     """--fallback-model, --log-level (with group tags), --prefill-guard."""

@@ -270,6 +270,16 @@ def resolve_options(body):
     return thinking, effort, kw
 
 
+class ChatError(Exception):
+    """A chat request that cannot be served. Raised from the wire-agnostic chat core so each wire (OpenAI,
+    Ollama) renders the failure in its own shape — as an HTTP error before anything is sent, or inline once a
+    stream has started."""
+
+    def __init__(self, status, message, typ="invalid_request_error", code=None):
+        super().__init__(message)
+        self.status, self.message, self.typ, self.code = status, message, typ, code
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -339,8 +349,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "cached_tokens": len(ENGINE.cache_tokens),
                 "requests": ENGINE.stats["requests"], "last": ENGINE.stats["last"],
             })
+        if path == "/api/version":                    # Ollama discovery — public, like /health
+            from engine import ollama
+            return self._json(200, ollama.version())
         if not self._auth():
             return
+        if path == "/api/tags":                       # Ollama: the models available here
+            from engine import ollama
+            return self._json(200, ollama.tags([self._ollama_card()]))
+        if path == "/api/ps":                         # Ollama: the models loaded right now
+            from engine import ollama
+            return self._json(200, ollama.ps([] if ENGINE.sleeping else [self._ollama_card()]))
         if path == "/v1/stats":
             from engine.generate import summarize
             return self._json(200, {"session": summarize(ENGINE.totals), "history": list(ENGINE.history),
@@ -366,6 +385,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._error(400, "invalid JSON body")
         if path in ("/v1/chat/completions", "/chat/completions"):
             return self.chat(body)
+        if path == "/api/chat":                       # Ollama wire format (same loaded model, no adapter)
+            return self.chat_ollama(body)
+        if path == "/api/generate":
+            return self.generate_ollama(body)
+        if path == "/api/show":
+            from engine import ollama
+            return self._json(200, ollama.show(self._ollama_card(), context=ENGINE.max_context,
+                                               capabilities=self._capabilities()))
         if path in ("/v1/images/generations", "/images/generations"):
             return self.images(body)
         self._error(404, f"unknown path {self.path}")
@@ -407,19 +434,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png).decode()}]})
 
     # ───────────────────────── chat ─────────────────────────
-    def chat(self, body):
+    def _chat_core(self, body, cancelled):
+        """One chat request, wire-agnostic (OpenAI and Ollama share it — the generation path exists once).
+        Takes an OpenAI-shaped body and yields, in order:
+            ("ready", rid, created)              — validation + prompt encoding done, nothing sent yet
+            ("delta", "reasoning"|"content", s)  — streamed text pieces
+            ("result", {...})                    — content/reasoning/calls/finish/stop_reason/usage/rid/created/stats
+        and raises ChatError on any failure. `cancelled` is set by the caller when the client hangs up; the
+        generation loop stops at the next token."""
         from engine.generate import ContextError, MemoryLimitError
         from engine.tokenizer import TemplateError
         messages = body.get("messages") or []
         if not messages:
-            return self._error(400, "messages is required")
+            raise ChatError(400, "messages is required")
         if ARGS.fallback_model == "off" and not model_matches(body.get("model")):
-            return self._error(404, f"model {body.get('model')!r} is not loaded; the loaded model is "
-                                    f"{ARGS.name!r} (fallback is off)", "invalid_request_error", "model_not_found")
+            raise ChatError(404, f"model {body.get('model')!r} is not loaded; the loaded model is "
+                                 f"{ARGS.name!r} (fallback is off)", "invalid_request_error", "model_not_found")
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
         bad = check_params(body)
         if bad:
-            return self._error(400, bad, "invalid_request_error")
+            raise ChatError(400, bad, "invalid_request_error")
         thinking, effort, extra = resolve_options(body)
         log(f"trace: request model={body.get('model')!r} messages={len(messages)} tools={len(tools or [])} "
             f"stream={bool(body.get('stream'))} max_tokens={body.get('max_tokens') or body.get('max_completion_tokens')}")
@@ -432,16 +466,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             text, images, thinking_open = ENGINE.build_prompt(normalize_messages(messages), tools, thinking, effort, extra)
             ids, media = next(run_job(lambda: iter([ENGINE.encode(text, images)])))
         except (TemplateError, ValueError, OSError) as e:
-            return self._error(400, f"prompt error: {e}")
+            raise ChatError(400, f"prompt error: {e}")
         except MemoryLimitError as e:   # e.g. no room to load the vision tower: a clean answer, not a dropped connection
             log(f"memory: {e}")
-            return self._error(503, str(e), "server_error", "insufficient_memory")
+            raise ChatError(503, str(e), "server_error", "insufficient_memory")
         except Exception as e:
             log(f"prompt encoding error: {e!r}")
-            return self._error(500, f"prompt error: {e}", "server_error")
+            raise ChatError(500, f"prompt error: {e}", "server_error")
         if len(ids) >= ENGINE.max_context:
-            return self._error(400, f"This model's maximum context length is {ENGINE.max_context} tokens, "
-                                    f"but the prompt is {len(ids)} tokens.", err_code="context_length_exceeded")
+            raise ChatError(400, f"This model's maximum context length is {ENGINE.max_context} tokens, "
+                                 f"but the prompt is {len(ids)} tokens.", code="context_length_exceeded")
 
         sampling = dict(ENGINE.sampling[bool(thinking_open)] or {})
         for k in SAMPLING_KEYS:
@@ -451,8 +485,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         stop = body.get("stop")
         stop = [stop] if isinstance(stop, str) else (stop or None)
-        stream = bool(body.get("stream"))
-        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         rid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
         from engine import parsers
@@ -461,38 +493,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ENGINE.parser_markers() if hasattr(ENGINE, "parser_markers") else {},
             ENGINE.parse_tool_calls if hasattr(ENGINE, "parse_tool_calls") else parse_tool_calls)
         parser = OutputParser(thinking_open, bool(tools), **markers)
-
-        def chunk(delta, finish=None, usage=None, stop_reason=None):
-            choice = {"index": 0, "delta": delta, "finish_reason": finish}
-            if stop_reason is not None:               # why the answer ended, when it is not a plain stop
-                choice["stop_reason"] = stop_reason
-            c = {"id": rid, "object": "chat.completion.chunk", "created": created, "model": ARGS.name,
-                 "choices": [choice]}
-            if usage is not None:
-                c["usage"] = usage
-            return c
-
-        cancelled = threading.Event()
-        if stream:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.close_connection = True
-
-        def send(obj):
-            try:
-                self.wfile.write(b"data: " + json.dumps(obj, ensure_ascii=False).encode() + b"\n\n")
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                cancelled.set()
+        yield ("ready", rid, created)
 
         reasoning, content, stats = [], [], {}
         with ENGINE.lock:
-            if stream:
-                send(chunk({"role": "assistant", "content": ""}))
             try:
                 gen = lambda: ENGINE.generate(ids, media, max_tokens, sampling, stop, cancelled.is_set,
                                               seed=body.get("seed"), thinking_open=bool(thinking_open))
@@ -502,29 +506,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         break
                     for kind, s in parser.feed(item[1]):
                         (reasoning if kind == "reasoning" else content).append(s)
-                        if stream:
-                            send(chunk({"reasoning_content": s} if kind == "reasoning" else {"content": s}))
+                        yield ("delta", kind, s)
                 for kind, s in parser.finish():
                     (reasoning if kind == "reasoning" else content).append(s)
-                    if stream:
-                        send(chunk({"reasoning_content": s} if kind == "reasoning" else {"content": s}))
+                    yield ("delta", kind, s)
             except MemoryLimitError as e:
                 log(f"memory: {e}")
-                if stream:
-                    send({"error": {"message": str(e), "type": "server_error", "code": "insufficient_memory"}})
-                    return
-                return self._error(503, str(e), "server_error", "insufficient_memory")
+                raise ChatError(503, str(e), "server_error", "insufficient_memory")
             except ContextError as e:
-                if stream:
-                    send({"error": {"message": str(e), "code": "context_length_exceeded"}})
-                    return
-                return self._error(400, str(e), err_code="context_length_exceeded")
+                raise ChatError(400, str(e), code="context_length_exceeded")
             except Exception as e:  # keep the server alive on model errors
                 log(f"generation error: {e!r}")
-                if stream:
-                    send({"error": {"message": str(e), "type": "server_error"}})
-                    return
-                return self._error(500, str(e), "server_error")
+                raise ChatError(500, str(e), "server_error")
 
         calls = parse_calls(parser.tool_text, tools) if parser.tool_text else []
         finish, stop_reason = finish_reason(stats, bool(calls))
@@ -536,7 +529,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log(f"{len(ids)} prompt ({stats.get('cached_tokens', 0)} cached, {stats.get('prefill_tps', 0)} tok/s) → "
             f"{stats.get('completion_tokens', 0)} out @ {stats.get('decode_tps', 0)} tok/s, "
             f"{finish}{', ' + str(len(calls)) + ' tool calls' if calls else ''}, peak {stats.get('peak_gb')} GB")
+        yield ("result", {"content": "".join(content), "reasoning": "".join(reasoning), "calls": calls,
+                          "finish": finish, "stop_reason": stop_reason, "usage": usage,
+                          "rid": rid, "created": created, "stats": stats})
 
+    def chat(self, body):
+        """OpenAI /v1/chat/completions — an SSE stream of chat.completion.chunk, or one chat.completion."""
+        stream = bool(body.get("stream"))
+        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+        cancelled = threading.Event()
+        rid = created = None
+
+        def chunk(delta, finish=None, usage=None, stop_reason=None):
+            choice = {"index": 0, "delta": delta, "finish_reason": finish}
+            if stop_reason is not None:               # why the answer ended, when it is not a plain stop
+                choice["stop_reason"] = stop_reason
+            c = {"id": rid, "object": "chat.completion.chunk", "created": created, "model": ARGS.name,
+                 "choices": [choice]}
+            if usage is not None:
+                c["usage"] = usage
+            return c
+
+        def send(obj):
+            try:
+                self.wfile.write(b"data: " + json.dumps(obj, ensure_ascii=False).encode() + b"\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                cancelled.set()
+
+        result = None
+        try:
+            for ev in self._chat_core(body, cancelled):
+                if ev[0] == "ready":
+                    rid, created = ev[1], ev[2]
+                    if stream:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "close")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        self.close_connection = True
+                        send(chunk({"role": "assistant", "content": ""}))
+                elif ev[0] == "delta":
+                    if stream:
+                        send(chunk({"reasoning_content": ev[2]} if ev[1] == "reasoning" else {"content": ev[2]}))
+                elif ev[0] == "result":
+                    result = ev[1]
+        except ChatError as e:
+            if stream and rid is not None:            # headers are already out — the error must go inline
+                send({"error": {"message": e.message, "type": e.typ, "code": e.code}})
+                return
+            return self._error(e.status, e.message, e.typ, e.code)
+
+        finish, stop_reason, usage, calls = result["finish"], result["stop_reason"], result["usage"], result["calls"]
         if stream:
             if calls:
                 send(chunk({"tool_calls": [dict(c, index=i) for i, c in enumerate(calls)]}))
@@ -551,16 +597,124 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except OSError:
                 pass
             return
-        msg = {"role": "assistant", "content": "".join(content) or (None if calls else "")}
-        if reasoning:
-            msg["reasoning_content"] = "".join(reasoning)
+        msg = {"role": "assistant", "content": result["content"] or (None if calls else "")}
+        if result["reasoning"]:
+            msg["reasoning_content"] = result["reasoning"]
         if calls:
             msg["tool_calls"] = calls
         choice = {"index": 0, "message": msg, "finish_reason": finish}
         if stop_reason is not None:
             choice["stop_reason"] = stop_reason
-        self._json(200, {"id": rid, "object": "chat.completion", "created": created, "model": ARGS.name,
-                         "choices": [choice], "usage": usage})
+        self._json(200, {"id": result["rid"], "object": "chat.completion", "created": result["created"],
+                         "model": ARGS.name, "choices": [choice], "usage": usage})
+
+    # ───────────────────────── Ollama wire format ─────────────────────────
+    def _begin_ndjson(self):
+        """Ollama streams newline-delimited JSON (not SSE), one object per line."""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.close_connection = True
+
+    def chat_ollama(self, body):
+        """Ollama POST /api/chat — the same chat core, framed as Ollama NDJSON or a single object."""
+        from engine import ollama
+        model = body.get("model") or ARGS.name
+        oai = ollama.to_openai_chat(body)
+        stream = oai.get("stream", True)
+        cancelled = threading.Event()
+        ready = False
+
+        def send_line(obj):
+            try:
+                self.wfile.write(json.dumps(obj, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                cancelled.set()
+
+        result = None
+        try:
+            for ev in self._chat_core(oai, cancelled):
+                if ev[0] == "ready":
+                    ready = True
+                    if stream:
+                        self._begin_ndjson()
+                elif ev[0] == "delta":
+                    if stream:
+                        send_line(ollama.chat_delta(model, content=ev[2]) if ev[1] == "content"
+                                  else ollama.chat_delta(model, thinking=ev[2]))
+                elif ev[0] == "result":
+                    result = ev[1]
+        except ChatError as e:
+            if stream and ready:
+                return send_line(ollama.error(e.message))
+            return self._json(e.status, ollama.error(e.message))
+
+        stats = result.get("stats") or {}
+        timings = {"prefill_s": stats.get("prefill_s"), "decode_s": stats.get("decode_s")}
+        if stream:
+            if result["calls"]:
+                send_line(ollama.chat_tool_delta(model, result["calls"]))
+            send_line(ollama.chat_final(model, result["finish"], result["usage"], timings))
+            return
+        self._json(200, ollama.chat_response(model, result["content"], result["reasoning"],
+                                             result["calls"], result["finish"], result["usage"], timings))
+
+    def generate_ollama(self, body):
+        """Ollama POST /api/generate (raw prompt) — the chat core, framed with the `response` field."""
+        from engine import ollama
+        model = body.get("model") or ARGS.name
+        oai = ollama.to_openai_generate(body)
+        stream = oai.get("stream", True)
+        cancelled = threading.Event()
+        ready = False
+
+        def send_line(obj):
+            try:
+                self.wfile.write(json.dumps(obj, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                cancelled.set()
+
+        result = None
+        try:
+            for ev in self._chat_core(oai, cancelled):
+                if ev[0] == "ready":
+                    ready = True
+                    if stream:
+                        self._begin_ndjson()
+                elif ev[0] == "delta":
+                    if stream and ev[1] == "content":     # /api/generate streams only the answer text
+                        send_line(ollama.generate_delta(model, ev[2]))
+                elif ev[0] == "result":
+                    result = ev[1]
+        except ChatError as e:
+            if stream and ready:
+                return send_line(ollama.error(e.message))
+            return self._json(e.status, ollama.error(e.message))
+
+        stats = result.get("stats") or {}
+        timings = {"prefill_s": stats.get("prefill_s"), "decode_s": stats.get("decode_s")}
+        if stream:
+            send_line(ollama.generate_final(model, result["finish"], result["usage"], timings))
+            return
+        self._json(200, ollama.generate_response(model, result["content"], result["finish"],
+                                                 result["usage"], timings))
+
+    def _ollama_card(self):
+        from engine import ollama
+        return ollama.model_card(ARGS.name, size_bytes=getattr(ENGINE, "model_bytes", 0), fmt="mlx")
+
+    def _capabilities(self):
+        caps = ["completion", "tools"]
+        if getattr(ENGINE, "vision_allowed", False):
+            caps.append("vision")
+        if getattr(ENGINE, "supports_thinking", True):
+            caps.append("thinking")
+        return caps
 
 
 def finish_reason(stats, has_calls):
