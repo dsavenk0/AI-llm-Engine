@@ -33,6 +33,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/llm"
 swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$APP/Contents/MacOS/LLMBar" \
   "$ROOT/app/main.swift" "$ROOT"/app/core/*.swift "$ROOT"/app/bar/*.swift "$ROOT"/app/editor/*.swift "$ROOT"/app/voice/*.swift
 
+echo "▸ OCR helper (Apple Vision)…"
+mkdir -p "$APP/Contents/Resources/llm/bin"
+swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$APP/Contents/Resources/llm/bin/ocr" "$ROOT/app/ocr/main.swift"
+
 echo "▸ Bundling engine + CLI…"
 for f in llm llm.py agent.py requirements.txt LICENSE NOTICE; do cp "$ROOT/$f" "$APP/Contents/Resources/llm/"; done
 for d in engine harness ui locales third_party; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done

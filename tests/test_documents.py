@@ -102,6 +102,48 @@ class TestDocuments(unittest.TestCase):
         with self.assertRaises(D.DocError):
             D.extract_text(os.path.join(self.d, "nope.txt"))
 
+    def _fake_ocr(self, says="FAKE OCR"):
+        p = os.path.join(self.d, "ocr")
+        with open(p, "w") as f:
+            f.write('#!/bin/sh\nprintf "%s"\n' % says)
+        os.chmod(p, 0o755)
+        return p
+
+    def test_image_is_ocr_d_when_the_helper_is_present(self):
+        png = write("pic.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, self.d)   # PNG magic, body irrelevant to the fake
+        os.environ["LLM_OCR"] = self._fake_ocr("Recognised text")
+        try:
+            r = D.extract_text(png)
+        finally:
+            del os.environ["LLM_OCR"]
+        self.assertEqual(r["text"], "Recognised text")
+        self.assertEqual(r["kind"], "image")
+
+    def test_scanned_pdf_falls_back_to_ocr(self):
+        scan = write("s.pdf", b"%PDF-1.4\n/Type /Page\n", self.d)             # no text layer
+        os.environ["LLM_OCR"] = self._fake_ocr("From the scan")
+        try:
+            r = D.extract_text(scan)
+        finally:
+            del os.environ["LLM_OCR"]
+        self.assertEqual(r["kind"], "pdf-ocr")
+        self.assertEqual(r["text"], "From the scan")
+
+    def test_image_without_helper_is_a_clear_error(self):
+        from unittest import mock
+        png = write("pic.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, self.d)
+        with mock.patch.object(D, "ocr_tool", lambda: None):
+            with self.assertRaises(D.DocError):
+                D.extract_text(png)
+
+    def test_scanned_pdf_without_helper_keeps_the_note(self):
+        from unittest import mock
+        scan = write("s.pdf", b"%PDF-1.4\n/Type /Page\n", self.d)
+        with mock.patch.object(D, "ocr_tool", lambda: None):
+            r = D.extract_text(scan)
+        self.assertEqual(r["text"], "")
+        self.assertIn("scanned", r["note"])
+
     def test_truncation_flag(self):
         orig = D.MAX_CHARS
         try:

@@ -6,6 +6,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm open                 new Terminal window: start the model and open chat (= LLM.command)
   ./llm up                   start (if needed), chat right away, then the menu
   ./llm setup [--compat]     create .venv and install dependencies (--compat adds mlx-lm for other model families)
+  ./llm setup --ocr          build the on-device OCR helper (Apple Vision) so scanned PDFs and images can be read
   ./llm models               discovered models and compatibility
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
@@ -42,6 +43,7 @@ import http.client
 import json
 import os
 import re
+import platform
 import shutil
 import signal
 import socket
@@ -1433,6 +1435,23 @@ def setup_gguf():
         return False
     print(G(T("llama.cpp installed:") + f" {path}"))
     return True
+
+
+def setup_ocr():
+    """`./llm setup --ocr`: compile the Apple-Vision OCR helper (app/ocr) into bin/ocr, so scanned PDFs and
+    images can be read on-device. (The app build ships it already; this is for the standalone CLI.)"""
+    src = os.path.join(BASE, "app", "ocr", "main.swift")
+    if not os.path.exists(src):
+        print(R(T("OCR helper source not found:") + f" {src}")); return False
+    if not shutil.which("swiftc"):
+        print(R(T("swiftc is not available (install the Xcode command-line tools).")));  return False
+    out = os.path.join(BASE, "bin", "ocr")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    print(T("Compiling the OCR helper (Apple Vision)…"))
+    r = subprocess.run(["swiftc", "-O", "-target", f"{platform.machine()}-apple-macos13.0", "-o", out, src])
+    if r.returncode == 0:
+        print(G(T("OCR ready:") + f" {out}"))
+    return r.returncode == 0
 
 
 def engine_cmd(cfg, m):
@@ -3021,7 +3040,8 @@ def main():
         "web": lambda: web_cmd(sys.argv[2:]),
         "inspect": lambda: inspect_cmd(cfg, sys.argv[2:]),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
-            setup_gguf() if "--gguf" in sys.argv else setup(compat="--compat" in sys.argv)),
+            setup_gguf() if "--gguf" in sys.argv else (
+                setup_ocr() if "--ocr" in sys.argv else setup(compat="--compat" in sys.argv))),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),
         "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),

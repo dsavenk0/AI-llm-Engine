@@ -10,6 +10,7 @@
 import html
 import os
 import re
+import subprocess
 import zipfile
 import zlib
 
@@ -18,10 +19,34 @@ MAX_CHARS = 400_000          # a long document is truncated to this (≈100K tok
 TEXT_EXTS = (".txt", ".text", ".log", ".md", ".markdown", ".rst", ".csv", ".tsv", ".json", ".jsonl",
              ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf")
 MARKUP_EXTS = (".html", ".htm", ".xml", ".svg")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".gif", ".heic", ".heif", ".webp")
 
 
 class DocError(Exception):
     pass
+
+
+def ocr_tool():
+    """The local Apple-Vision OCR helper, if it was built (env LLM_OCR, else bin/ocr next to the code).
+    None means scanned PDFs and images cannot be read here — build it with `./llm setup --ocr`."""
+    p = os.environ.get("LLM_OCR")
+    if p and os.path.isfile(p):
+        return p
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # repo root / Resources/llm
+    for cand in (os.path.join(here, "bin", "ocr"), os.path.join(here, "ocr")):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def _run_ocr(path):
+    tool = ocr_tool()
+    if not tool:
+        return ""
+    try:
+        return subprocess.run([tool, path], capture_output=True, text=True, timeout=180).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def _clip(text):
@@ -153,7 +178,17 @@ def extract_text(path):
     if not data:
         return _result("", "text")
     if ext == ".pdf" or data[:5] == b"%PDF-":
-        return _pdf(data)
+        r = _pdf(data)
+        if not r["text"] and ocr_tool():                  # scanned PDF: recover the text with Vision OCR
+            text = _run_ocr(path)
+            if text:
+                return _result(text, "pdf-ocr", pages=r["pages"], note="text recovered by OCR")
+        return r
+    if ext in IMAGE_EXTS or data[:4] in (b"\x89PNG", b"GIF8") or data[:3] == b"\xff\xd8\xff":
+        if not ocr_tool():
+            raise DocError("reading an image needs the Vision OCR helper — build it with ./llm setup --ocr")
+        text = _run_ocr(path)
+        return _result(text, "image", note="" if text else "no text found in the image")
     if ext == ".docx":
         return _docx(data)
     if ext == ".pptx":

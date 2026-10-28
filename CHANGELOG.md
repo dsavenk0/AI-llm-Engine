@@ -16,8 +16,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 ### Added
 - **Documents as sources** (`./llm read <file>`, `engine/documents.py`): extracts plain text from PDF, DOCX,
   PPTX, HTML and text/markdown/CSV so a document can be attached to the model as one source — stdlib only, no new
-  dependencies (Office files are zipped XML; PDF text is pulled from the content streams). A scanned PDF with no
-  text layer is reported (OCR would be needed) rather than sent empty; long documents are truncated with a flag.
+  dependencies (Office files are zipped XML; PDF text is pulled from the content streams). Long documents are
+  truncated with a flag.
+- **On-device OCR** (Apple Vision): a scanned PDF (no text layer) or an image file is read with `VNRecognizeText`
+  through a small local helper (`app/ocr`, bundled with the app; `./llm setup --ocr` builds it for the standalone
+  CLI). No network and no third-party dependency; without the helper those files are reported as "needs OCR".
 - **More editor languages**: syntax colouring now covers ~40 languages — added Scala, Dart, Haskell, Elixir,
   Erlang, Clojure, R, Julia, Perl, Groovy, Zig, Nim, PowerShell, GraphQL, Protobuf, Solidity, HCL/Terraform and
   CMake (the last two closed `cmake`/`perl` mappings that had no highlighter). Declarative keyword/comment/string

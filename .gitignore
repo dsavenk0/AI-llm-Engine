@@ -31,3 +31,6 @@ docs/LLMBar-*-offline.dmg
 .mypy_cache/
 node_modules/
 *.log
+
+# built OCR helper (compiled by ./llm setup --ocr or build-app.sh)
+/bin/

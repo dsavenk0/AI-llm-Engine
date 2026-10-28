@@ -303,5 +303,9 @@
   "Opened {dest} — drag LLMBar to Applications to update.": "Открыто {dest} — перетащите LLMBar в Applications для обновления.",
   "Usage: ./llm read <file> [--json] [--max N]": "Использование: ./llm read <файл> [--json] [--max N]",
   "Cannot read the document:": "Не удалось прочитать документ:",
-  "truncated": "обрезано"
+  "truncated": "обрезано",
+  "OCR helper source not found:": "Исходник OCR-хелпера не найден:",
+  "swiftc is not available (install the Xcode command-line tools).": "swiftc недоступен (установите Xcode command-line tools).",
+  "Compiling the OCR helper (Apple Vision)…": "Компиляция OCR-хелпера (Apple Vision)…",
+  "OCR ready:": "OCR готов:"
 }
