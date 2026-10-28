@@ -1208,28 +1208,80 @@ struct HubModel: Identifiable {
     var partial = false               // a download was started and not finished: resume, don't start over
 }
 
-final class Downloader: ObservableObject {
-    @Published var repo: String? = nil        // downloading now
-    @Published var paused: String? = nil      // paused by the user; the .part files stay, resume continues
-    @Published var fraction = 0.0
+enum JobState { case queued, downloading, paused, failed }
+
+/// One model download. Several run at once (Downloader.maxParallel); a paused or failed one stays in the
+/// list with its progress so it never "disappears" — the .part files on disk are kept and resuming continues
+/// from them. `lastTick` lets the watchdog notice a stall.
+final class DownloadJob: ObservableObject, Identifiable {
+    let id: String
+    @Published var fraction: Double
     @Published var file = ""
+    @Published var state: JobState
     @Published var error: String? = nil
-    private var proc: Process?
-    private var stoppedByUser = false
-    private var finished: (() -> Void)?
+    fileprivate var proc: Process? = nil
+    fileprivate var stoppedByUser = false      // a pause/cancel/retry asked for this termination
+    fileprivate var autoResume = false         // the watchdog bounced it: come back as queued, not paused
+    fileprivate var retries = 0
+    fileprivate var lastTick = Date()
+    init(id: String, fraction: Double = 0, state: JobState = .queued) {
+        self.id = id; self.fraction = fraction; self.state = state
+    }
+}
 
-    /// Pause = stop the transfer but keep what is on disk; `resume()` picks up from the .part files.
-    func pause() { stoppedByUser = true; proc?.terminate() }
-    func resume() { if let r = paused, let f = finished { start(r, done: f) } }
-    func cancel() { stoppedByUser = true; paused = nil; finished = nil; proc?.terminate() }
+final class Downloader: ObservableObject {
+    @Published private(set) var jobs: [DownloadJob] = []
+    private var onDone: [String: () -> Void] = [:]
+    private let maxParallel = 2
+    private var watchdog: Timer?
+    private let stallSeconds: TimeInterval = 90     // no progress for this long → bounce the transfer
+    private let maxRetries = 3
 
+    var active: Int { jobs.filter { $0.state == .downloading }.count }
+    func job(_ repo: String) -> DownloadJob? { jobs.first { $0.id == repo } }
+
+    /// Queue a download (or re-queue a paused/failed one). It starts as soon as a slot is free.
     func start(_ repo: String, done: @escaping () -> Void) {
-        let keep = (paused == repo) ? fraction : 0       // a resumed download keeps its progress bar
-        self.repo = repo; paused = nil; fraction = keep; file = ""; error = nil
-        stoppedByUser = false; finished = done
+        onDone[repo] = done
+        if let j = job(repo) {
+            if j.state == .paused || j.state == .failed { j.state = .queued; j.error = nil }
+        } else {
+            jobs.append(DownloadJob(id: repo))
+        }
+        ensureWatchdog(); pump()
+    }
+
+    func pause(_ repo: String) {
+        guard let j = job(repo) else { return }
+        if j.state == .downloading { j.stoppedByUser = true; j.proc?.terminate() }
+        else if j.state == .queued { j.state = .paused }     // not launched yet: just hold it
+    }
+
+    func resume(_ repo: String) {
+        guard let j = job(repo), j.state == .paused || j.state == .failed else { return }
+        j.state = .queued; j.error = nil; ensureWatchdog(); pump()
+    }
+
+    /// Remove a job from the list. The .part files on disk stay (a later download resumes from them).
+    func cancel(_ repo: String) {
+        guard let j = job(repo) else { return }
+        onDone[repo] = nil
+        if j.state == .downloading { j.stoppedByUser = true; j.proc?.terminate() }   // handler drops it
+        else { jobs.removeAll { $0.id == repo } }
+    }
+
+    private func pump() {
+        for j in jobs where j.state == .queued {
+            if active >= maxParallel { break }
+            launch(j)
+        }
+    }
+
+    private func launch(_ j: DownloadJob) {
+        j.state = .downloading; j.error = nil; j.file = ""; j.lastTick = Date()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Paths.shared.root + "/llm")
-        p.arguments = ["pull", repo, "--progress"]
+        p.arguments = ["pull", j.id, "--progress"]
         p.currentDirectoryURL = URL(fileURLWithPath: Paths.shared.root)
         var env = ProcessInfo.processInfo.environment
         env["LLM_HOME"] = Paths.shared.home
@@ -1247,10 +1299,11 @@ final class Downloader: ObservableObject {
                     let line = String(buffer[..<nl]); buffer.removeSubrange(...nl)
                     let parts = line.split(separator: " ", maxSplits: 3).map(String.init)
                     if parts.first == "PROGRESS", parts.count >= 3, let d = Double(parts[1]), let t = Double(parts[2]), t > 0 {
-                        self.fraction = d / t
-                        self.file = parts.count > 3 ? parts[3] : ""
+                        j.fraction = d / t
+                        j.file = parts.count > 3 ? parts[3] : ""
+                        j.lastTick = Date()                   // progress → not stalled
                     } else if line.contains("✗") || line.lowercased().contains("error") {
-                        self.error = line
+                        j.error = line
                     }
                 }
             }
@@ -1258,26 +1311,105 @@ final class Downloader: ObservableObject {
         p.terminationHandler = { proc in
             DispatchQueue.main.async {
                 pipe.fileHandleForReading.readabilityHandler = nil
-                if self.stoppedByUser {
-                    if self.finished != nil { self.paused = repo }     // paused, not cancelled
-                } else if proc.terminationStatus != 0 && self.error == nil {
-                    self.error = L("Download failed", "Загрузка не удалась")
+                j.proc = nil
+                let done = self.onDone[j.id]
+                if j.autoResume {                             // watchdog bounce: come straight back to the queue
+                    j.autoResume = false; j.stoppedByUser = false; j.state = .queued
+                } else if j.stoppedByUser {
+                    j.stoppedByUser = false
+                    if done == nil { self.jobs.removeAll { $0.id == j.id } }   // cancelled
+                    else { j.state = .paused }                                 // paused by the user
+                } else if proc.terminationStatus != 0 && j.error == nil {
+                    j.state = .failed; j.error = L("Download failed", "Загрузка не удалась")
+                } else if proc.terminationStatus != 0 {
+                    j.state = .failed
+                } else {                                      // finished
+                    self.jobs.removeAll { $0.id == j.id }; self.onDone[j.id] = nil
                 }
-                self.repo = nil
-                self.proc = nil
-                done()
+                done?()
+                self.pump()
             }
         }
-        proc = p
+        j.proc = p
         do { try p.run() } catch {
             pipe.fileHandleForReading.readabilityHandler = nil
-            self.error = L("Could not start the download", "Не удалось начать загрузку") + ": \(error.localizedDescription)"
-            self.repo = nil
-            self.proc = nil
-            done()
+            j.proc = nil; j.state = .failed
+            j.error = L("Could not start the download", "Не удалось начать загрузку") + ": \(error.localizedDescription)"
+            self.onDone[j.id]?(); pump()
         }
     }
 
+    /// A single timer watches every running job: when one makes no progress for `stallSeconds`, bounce the
+    /// transfer (terminate → it resumes from the .part files) up to `maxRetries` times, then leave it paused
+    /// with a clear reason instead of hanging forever. Stops itself when nothing is downloading.
+    private func ensureWatchdog() {
+        guard watchdog == nil else { return }
+        watchdog = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            let now = Date()
+            for j in self.jobs where j.state == .downloading && now.timeIntervalSince(j.lastTick) > self.stallSeconds {
+                j.lastTick = now
+                if j.retries < self.maxRetries {
+                    j.retries += 1; j.autoResume = true; j.proc?.terminate()   // bounce: resumes from disk
+                } else {
+                    j.stoppedByUser = true; j.proc?.terminate()
+                    j.error = L("Stalled — paused, press play to retry", "Завис — пауза, нажмите ▶ для повтора")
+                }
+            }
+            if !self.jobs.contains(where: { $0.state == .downloading || $0.state == .queued }) {
+                self.watchdog?.invalidate(); self.watchdog = nil
+            }
+        }
+    }
+}
+
+/// One row in the download list — stays put whether the job is downloading, queued, paused or failed, so a
+/// paused model never vanishes. Pause/resume/retry and cancel act on this job alone.
+struct DownloadRow: View {
+    @ObservedObject var job: DownloadJob
+    let dl: Downloader
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                MarqueeText(text: label + job.id, font: .system(size: 11, weight: .medium), color: HUD.text, active: false)
+                Spacer()
+                Text("\(Int(job.fraction * 100))%").font(HUD.mono(11)).foregroundColor(accent)
+                if job.state == .downloading {
+                    Button(action: { dl.pause(job.id) }) { Image(systemName: "pause.fill") }.buttonStyle(.plain).foregroundColor(HUD.text)
+                        .help(L("Pause (keeps what is downloaded)", "Пауза (скачанное сохраняется)"))
+                } else if job.state == .paused || job.state == .failed {
+                    Button(action: { dl.resume(job.id) }) { Image(systemName: "play.fill") }.buttonStyle(.plain).foregroundColor(HUD.phosphor)
+                        .help(L("Resume", "Продолжить"))
+                }
+                Button(action: { dl.cancel(job.id) }) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundColor(HUD.dim)
+                    .help(L("Remove from the list (downloaded files stay on disk)", "Убрать из списка (скачанные файлы остаются)"))
+            }
+            Bar(value: job.fraction, color: accent)
+            if let err = job.error {
+                Text(err).font(HUD.mono(9)).foregroundColor(HUD.magenta).lineLimit(2)
+            } else if job.state == .downloading, !job.file.isEmpty {
+                Text(job.file).font(HUD.mono(9)).foregroundColor(HUD.dim).lineLimit(1)
+            }
+        }
+    }
+
+    private var label: String {
+        switch job.state {
+        case .downloading: return L("Downloading · ", "Загрузка · ")
+        case .queued:      return L("Queued · ", "В очереди · ")
+        case .paused:      return L("Paused · ", "Пауза · ")
+        case .failed:      return L("Failed · ", "Ошибка · ")
+        }
+    }
+
+    private var accent: Color {
+        switch job.state {
+        case .downloading: return HUD.phosphor
+        case .failed:      return HUD.magenta
+        default:           return HUD.amber
+        }
+    }
 }
 
 struct ModelsTab: View {
@@ -1414,36 +1546,9 @@ struct ModelsTab: View {
                 Hint(text: L("MLX-tagged repos, most downloaded first. Mirrors: set HF_ENDPOINT; private repos: HF_TOKEN.",
                              "Репозитории с тегом MLX, популярные сверху. Зеркало: HF_ENDPOINT; закрытые модели: HF_TOKEN."))
                 if let err = searchError { Text(err).font(HUD.mono(10)).foregroundColor(HUD.magenta) }
-                if let repo = dl.repo {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(L("Downloading ", "Загрузка ") + repo).font(.system(size: 11, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
-                            Spacer()
-                            Text("\(Int(dl.fraction * 100))%").font(HUD.mono(11)).foregroundColor(HUD.phosphor)
-                            Button(action: dl.pause) { Image(systemName: "pause.fill") }.buttonStyle(.plain).foregroundColor(HUD.text)
-                                .help(L("Pause (keeps what is downloaded)", "Пауза (скачанное сохраняется)"))
-                            Button(action: dl.cancel) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundColor(HUD.dim)
-                                .help(L("Stop (what is downloaded stays; downloading again continues from it)",
-                                        "Остановить (скачанное остаётся; повторная загрузка продолжит с него)"))
-                        }
-                        Bar(value: dl.fraction, color: HUD.phosphor)
-                        Text(dl.file).font(HUD.mono(9)).foregroundColor(HUD.dim).lineLimit(1)
-                    }
-                } else if let repo = dl.paused {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(L("Paused · ", "Пауза · ") + repo).font(.system(size: 11, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
-                            Spacer()
-                            Text("\(Int(dl.fraction * 100))%").font(HUD.mono(11)).foregroundColor(HUD.amber)
-                            Button(action: dl.resume) { Image(systemName: "play.fill") }.buttonStyle(.plain).foregroundColor(HUD.phosphor)
-                                .help(L("Resume", "Продолжить"))
-                            Button(action: dl.cancel) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundColor(HUD.dim)
-                                .help(L("Forget the pause (files stay on disk)", "Сбросить паузу (файлы остаются на диске)"))
-                        }
-                        Bar(value: dl.fraction, color: HUD.amber)
-                    }
+                ForEach(dl.jobs) { job in
+                    DownloadRow(job: job, dl: dl)
                 }
-                if let err = dl.error { Text(err).font(HUD.mono(10)).foregroundColor(HUD.magenta).lineLimit(2) }
                 ForEach(results) { r in
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -1465,10 +1570,11 @@ struct ModelsTab: View {
                         Spacer()
                         if r.local {
                             Text(L("HAVE", "ЕСТЬ")).font(HUD.mono(9, .semibold)).foregroundColor(HUD.phosphor)
+                        } else if dl.job(r.id) != nil {        // already downloading/queued/paused: shown in the list above
+                            Image(systemName: "arrow.down.circle.fill").font(.system(size: 16)).foregroundColor(HUD.dim)
                         } else {
                             Button(action: { dl.start(r.id) { e.loadModels(); search() } }) { Image(systemName: "arrow.down.circle") }
                                 .buttonStyle(.plain).font(.system(size: 16)).foregroundColor(r.compatible ? HUD.phosphor : HUD.dim)
-                                .disabled(dl.repo != nil)
                                 .help(r.partial ? L("Resume the download", "Докачать")
                                       : (r.compatible ? L("Download (resumable)", "Скачать (с докачкой)")
                                                       : L("Downloads, but no backend here can run it", "Скачается, но ни один бэкенд её не запустит")))
