@@ -26,6 +26,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Profiles** (Modelfile-style): `./llm create <name> --from <model> --system "…" --param k=v` saves a named
   preset — a base model with a system prompt and sampling — that `./llm run <name>` then applies. `./llm create`
   lists them, `./llm create <name> --rm` (or `./llm rm <name>`) deletes one, `./llm show <name>` prints it.
+- **Anthropic Messages API** (native `/v1/messages`, not an OpenAI wrapper): streaming SSE (`message_start` →
+  `content_block_*` → `message_delta` → `message_stop`) or one message object, with `system`, `stop_sequences`,
+  `tools`/`tool_use`/`tool_result` and `thinking` translated and the reply returned as Anthropic content blocks.
+  Auth accepts `x-api-key`. Same loaded model and generation path as the OpenAI and Ollama routes.
 - **Ollama API on the same port**: `POST /api/chat` and `/api/generate` (NDJSON streaming or one object; `options`,
   `tools`, `images`, `think` translated), `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` — an
   Ollama-speaking client needs no adapter. One generation path feeds both the OpenAI and the Ollama wire formats.

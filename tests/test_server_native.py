@@ -406,6 +406,36 @@ class TestNativeServer(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertIn("error", r)                           # Ollama's bare {"error": "..."} shape
 
+    # ───────────── Anthropic Messages API ─────────────
+    def test_anthropic_messages_nonstream(self):
+        code, r = self.srv.json("POST", "/v1/messages", {"model": "synth", "max_tokens": 8, "temperature": 0,
+                                "messages": [{"role": "user", "content": "hello world"}]})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["type"], "message")
+        self.assertEqual(r["role"], "assistant")
+        self.assertTrue(r["id"].startswith("msg_"))
+        self.assertIn(r["stop_reason"], ("end_turn", "max_tokens", "tool_use"))
+        self.assertEqual([b["type"] for b in r["content"] if b["type"] == "text"] or ["text"], ["text"])
+        self.assertGreater(r["usage"]["input_tokens"], 0)
+
+    def test_anthropic_messages_stream_events(self):
+        code, h, raw = self.srv.request("POST", "/v1/messages", {"model": "synth", "max_tokens": 8,
+                                        "temperature": 0, "stream": True,
+                                        "messages": [{"role": "user", "content": "two plus two"}]})
+        self.assertEqual(code, 200)
+        self.assertIn("event-stream", h.get("Content-Type", ""))
+        types = [ln[len("event: "):] for ln in raw.decode().split("\n") if ln.startswith("event: ")]
+        self.assertEqual(types[0], "message_start")
+        self.assertEqual(types[-1], "message_stop")
+        self.assertIn("content_block_start", types)
+        self.assertIn("content_block_delta", types)
+        self.assertIn("message_delta", types)
+
+    def test_anthropic_messages_without_messages_is_a_clean_error(self):
+        code, r = self.srv.json("POST", "/v1/messages", {"model": "synth", "max_tokens": 8, "messages": []})
+        self.assertEqual(code, 400)
+        self.assertEqual(r["type"], "error")                # Anthropic {"type":"error","error":{...}} shape
+
 
 class TestNativeServerOptions(unittest.TestCase):
     """--fallback-model, --log-level (with group tags), --prefill-guard."""

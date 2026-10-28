@@ -267,6 +267,12 @@ OpenAI-совместимый, на `http://localhost:8090/v1`:
 объект; `options`, `tools`, `images` и `think` транслируются), а также `GET /api/tags`, `POST /api/show`,
 `GET /api/ps`, `GET /api/version`. Это та же загруженная модель и тот же путь генерации, что и у маршрута OpenAI.
 
+**Anthropic Messages API** — нативный, не обёртка: `POST /v1/messages` (потоковый SSE — `message_start` →
+`content_block_*` → `message_delta` → `message_stop` — или один объект-сообщение) с трансляцией `system`,
+`stop_sequences`, `tools` (`input_schema`), `tool_use`/`tool_result` и `thinking`, а ответ возвращается блоками
+`thinking`/`text`/`tool_use`. Авторизация принимает и `x-api-key`, и `Authorization: Bearer`. Та же модель, тот же
+путь генерации.
+
 Подходит любое имя в поле `model`: сервер обслуживает ровно одну модель.
 
 `POST /v1/chat/completions` принимает и `repetition_penalty` (1.0 = выкл.; 1.05–1.2 делит оценку уже написанных

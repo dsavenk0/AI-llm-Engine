@@ -27,6 +27,10 @@ English version: [CHANGELOG.md](CHANGELOG.md).
 - **Профили** (аналог Modelfile): `./llm create <имя> --from <модель> --system "…" --param k=v` сохраняет
   именованный пресет — базовую модель с системным промптом и сэмплингом, — который затем применяет `./llm run <имя>`.
   `./llm create` показывает список, `./llm create <имя> --rm` (или `./llm rm <имя>`) удаляет, `./llm show <имя>` печатает.
+- **Anthropic Messages API** (нативный `/v1/messages`, не обёртка над OpenAI): потоковый SSE (`message_start` →
+  `content_block_*` → `message_delta` → `message_stop`) или один объект-сообщение, с трансляцией `system`,
+  `stop_sequences`, `tools`/`tool_use`/`tool_result` и `thinking`; ответ — блоками `thinking`/`text`/`tool_use`.
+  Авторизация принимает `x-api-key`. Та же модель и путь генерации, что у маршрутов OpenAI и Ollama.
 - **API Ollama на том же порту**: `POST /api/chat` и `/api/generate` (потоковый NDJSON или один объект; `options`,
   `tools`, `images`, `think` транслируются), `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` —
   клиенту Ollama адаптер не нужен. Один путь генерации питает оба формата: OpenAI и Ollama.

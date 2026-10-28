@@ -302,7 +302,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not ARGS.api_key:
             return True
         import hmac
-        if hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {ARGS.api_key}".encode()):
+        bearer = hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {ARGS.api_key}".encode())
+        xkey = hmac.compare_digest(self.headers.get("x-api-key", "").encode(), ARGS.api_key.encode())  # Anthropic clients
+        if bearer or xkey:
             return True
         self._error(401, "invalid api key", "authentication_error")
         return False
@@ -385,6 +387,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._error(400, "invalid JSON body")
         if path in ("/v1/chat/completions", "/chat/completions"):
             return self.chat(body)
+        if path == "/v1/messages":                    # Anthropic Messages API (native, not an OpenAI wrapper)
+            return self.messages_anthropic(body)
         if path == "/api/chat":                       # Ollama wire format (same loaded model, no adapter)
             return self.chat_ollama(body)
         if path == "/api/generate":
@@ -703,6 +707,76 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json(200, ollama.generate_response(model, result["content"], result["finish"],
                                                  result["usage"], timings))
+
+    # ───────────────────────── Anthropic Messages API ─────────────────────────
+    def messages_anthropic(self, body):
+        """Anthropic POST /v1/messages — the chat core, framed as an Anthropic message or its SSE event stream
+        (message_start → content blocks → message_delta → message_stop)."""
+        from engine import anthropic as A
+        model = body.get("model") or ARGS.name
+        internal = A.to_internal(body)
+        stream = internal.get("stream", False)
+        cancelled = threading.Event()
+        rid = A.msg_id()
+        started = False
+        open_kind = None            # which content block is open while streaming: "thinking" | "text" | None
+        index = -1
+        result = None
+
+        def sse(ev):
+            try:
+                self.wfile.write(f"event: {ev['type']}\ndata: ".encode()
+                                 + json.dumps(ev, ensure_ascii=False).encode() + b"\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                cancelled.set()
+
+        try:
+            for e in self._chat_core(internal, cancelled):
+                if e[0] == "ready":
+                    started = True
+                    if stream:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "close")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        self.close_connection = True
+                        sse(A.message_start(model, rid))
+                elif e[0] == "delta":
+                    if not stream:
+                        continue
+                    want = "thinking" if e[1] == "reasoning" else "text"
+                    if open_kind != want:
+                        if open_kind is not None:
+                            sse(A.block_stop(index))
+                        index += 1; open_kind = want
+                        sse(A.block_start(index, want))
+                    sse(A.block_delta(index, want, e[2]))
+                elif e[0] == "result":
+                    result = e[1]
+        except ChatError as ex:
+            if stream and started:
+                sse({"type": "error", "error": {"type": ex.typ, "message": ex.message}})
+                return
+            return self._json(ex.status, A.error(ex.message, ex.typ))
+
+        calls, finish = result["calls"], result["finish"]
+        out_tokens = result["usage"].get("completion_tokens", 0)
+        if stream:
+            if open_kind is not None:
+                sse(A.block_stop(index))
+            for c in calls:
+                index += 1
+                start, inp = A.tool_block_start(index, c)
+                sse(start)
+                sse(A.input_json_delta(index, inp))
+                sse(A.block_stop(index))
+            sse(A.message_delta(finish, bool(calls), out_tokens))
+            sse(A.message_stop())
+            return
+        self._json(200, A.message(model, result["content"], result["reasoning"], calls, finish, result["usage"], rid))
 
     def _ollama_card(self):
         from engine import ollama

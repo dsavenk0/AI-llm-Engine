@@ -264,6 +264,12 @@ The **Ollama API** is served from the same port, so a tool that speaks to Ollama
 `tools`, `images` and `think` are translated), and `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version`.
 It is the same loaded model and the same generation path as the OpenAI route.
 
+The **Anthropic Messages API** is native, not a wrapper: `POST /v1/messages` (streaming SSE —
+`message_start` → `content_block_*` → `message_delta` → `message_stop` — or one message object) with `system`,
+`stop_sequences`, `tools` (`input_schema`), `tool_use`/`tool_result` and `thinking` translated to the engine, and
+the reply returned as Anthropic `thinking`/`text`/`tool_use` content blocks. Auth takes `x-api-key` as well as
+`Authorization: Bearer`. The same loaded model, again on the one generation path.
+
 Any `model` name is accepted, since the server hosts exactly one model.
 
 `POST /v1/chat/completions` also takes `repetition_penalty` (1.0 = off; 1.05–1.2 divides the score of tokens
