@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Speech-to-text** (`./llm transcribe <audio>`, `engine/audio.py`): on-device Whisper on MLX — optional, like
+  image generation and OCR (`./llm setup --audio` installs `mlx-whisper`; the model downloads on first use).
+  Handles common audio/video files, returns text + language + timed segments (`--json`). The first of the audio
+  pieces (Kokoro TTS and Omni to follow); the voice chat can later use it in place of the system recogniser.
 - **Request admission cap** (`--max-queue N`, or `advanced.max_queue` in `./llm`): refuses a generation request
   with 503 once this many are in flight, so a coding agent, a chat, the editor and voice all hitting one model
   stay bounded instead of piling up unbounded threads and prompt buffers; `/health` reports `inflight`/`max_queue`.

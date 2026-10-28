@@ -383,6 +383,39 @@ class TestUpdate(unittest.TestCase):
         self.assertIn("9.9", out)
 
 
+class TestTranscribe(unittest.TestCase):
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    def test_usage_without_args(self):
+        rv, out = self.capture(llm.transcribe_cmd, cfg(), [])
+        self.assertFalse(rv)
+
+    def test_without_mlx_whisper_is_a_clear_error(self):
+        from unittest import mock
+        from engine import audio
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "a.wav")
+        with open(p, "wb") as f:
+            f.write(b"RIFF....WAVE")
+        with mock.patch.object(audio, "whisper_available", lambda: False):
+            with self.assertRaises(audio.AudioError) as cm:
+                audio.transcribe(p)
+            self.assertIn("setup --audio", str(cm.exception))      # points at how to install it
+            rv, out = self.capture(llm.transcribe_cmd, cfg(), [p])  # the command reports it cleanly, not a crash
+            self.assertFalse(rv)
+
+    def test_missing_file(self):
+        from engine import audio
+        with self.assertRaises(audio.AudioError):
+            audio.transcribe("/no/such/audio.wav")
+
+
 class TestReplyNote(unittest.TestCase):
     def test_repetition_is_explained(self):
         self.assertIn("repeat", llm.reply_note("repetition").lower())

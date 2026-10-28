@@ -7,6 +7,8 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm up                   start (if needed), chat right away, then the menu
   ./llm setup [--compat]     create .venv and install dependencies (--compat adds mlx-lm for other model families)
   ./llm setup --ocr          build the on-device OCR helper (Apple Vision) so scanned PDFs and images can be read
+  ./llm setup --audio        install Whisper (MLX) for on-device speech-to-text (./llm transcribe)
+  ./llm transcribe <audio>   speech-to-text with Whisper (MLX), on-device (--model <hf-repo>, --json)
   ./llm models               discovered models and compatibility
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
@@ -2683,6 +2685,41 @@ def update_cmd(cfg, args):
     return True
 
 
+def transcribe_cmd(cfg, args):
+    """`./llm transcribe <audio> [--model <hf-repo>] [--json]` — on-device speech-to-text with Whisper (MLX).
+    Needs `./llm setup --audio`; the model downloads on first use."""
+    model, files, i = None, [], 0
+    while i < len(args):
+        if args[i] == "--model" and i + 1 < len(args):
+            model = args[i + 1]; i += 2
+        elif args[i].startswith("--"):
+            i += 1
+        else:
+            files.append(args[i]); i += 1
+    if not files:
+        print(T("Usage: ./llm transcribe <audio> [--model <hf-repo>] [--json]")); return False
+    from engine import audio
+    try:
+        r = audio.transcribe(os.path.expanduser(files[0]), model)
+    except audio.AudioError as e:
+        print(R(T("Cannot transcribe:") + f" {e}")); return False
+    if "--json" in args:
+        print(json.dumps(r, ensure_ascii=False)); return True
+    print(r["text"])
+    return True
+
+
+def setup_audio():
+    """`./llm setup --audio`: install mlx-whisper into .venv for on-device speech-to-text (./llm transcribe)."""
+    if not os.path.exists(VENV_PY) and not setup():
+        return False
+    print(T("Installing mlx-whisper…"))
+    r = subprocess.run([VENV_PY, "-m", "pip", "install", "-q", "mlx-whisper"], env=network_env(load_cfg()))
+    if r.returncode == 0:
+        print(G(T("Speech-to-text ready. Try:  ./llm transcribe recording.m4a")))
+    return r.returncode == 0
+
+
 def read_doc_cmd(cfg, args):
     """`./llm read <file> [--json] [--max N]` — extract plain text from a document (PDF, DOCX, PPTX, HTML,
     text/markdown/CSV…) so it can be attached to the model as one source. PDF is best-effort; a scanned PDF
@@ -3068,7 +3105,9 @@ def main():
         "inspect": lambda: inspect_cmd(cfg, sys.argv[2:]),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
             setup_gguf() if "--gguf" in sys.argv else (
-                setup_ocr() if "--ocr" in sys.argv else setup(compat="--compat" in sys.argv))),
+                setup_ocr() if "--ocr" in sys.argv else (
+                    setup_audio() if "--audio" in sys.argv else setup(compat="--compat" in sys.argv)))),
+        "transcribe": lambda: transcribe_cmd(cfg, sys.argv[2:]),
         "image": lambda: image_cmd(cfg, sys.argv[2:]),
         "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),

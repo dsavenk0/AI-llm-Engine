@@ -311,5 +311,9 @@
   "stopped — the model was repeating itself": "остановлено — модель зациклилась",
   "Type /retry to try again.": "Введите /retry, чтобы повторить.",
   "Nothing to retry.": "Нечего повторять.",
-  "the attached files": "прикреплённые файлы"
+  "the attached files": "прикреплённые файлы",
+  "Usage: ./llm transcribe <audio> [--model <hf-repo>] [--json]": "Использование: ./llm transcribe <аудио> [--model <hf-repo>] [--json]",
+  "Cannot transcribe:": "Не удалось распознать речь:",
+  "Installing mlx-whisper…": "Установка mlx-whisper…",
+  "Speech-to-text ready. Try:  ./llm transcribe recording.m4a": "Распознавание речи готово. Попробуйте:  ./llm transcribe recording.m4a"
 }
