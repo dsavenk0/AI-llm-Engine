@@ -327,6 +327,61 @@ class TestTranslations(unittest.TestCase):
             self.assertEqual(set(re.findall(r"\{(\w+)", k)), set(re.findall(r"\{(\w+)", v)), k)
 
 
+class TestFetchCustomSource(unittest.TestCase):
+    """`./llm fetch <url|magnet>` — a user-provided source: name derivation, archive safety, dispatch."""
+
+    def test_basename_strips_query_and_slash(self):
+        self.assertEqual(llm._fetch_basename("https://x.io/a/model.gguf?token=1"), "model.gguf")
+        self.assertEqual(llm._fetch_basename("https://x.io/a/"), "a")
+
+    def test_name_from_magnet_archive_and_gguf(self):
+        self.assertEqual(llm._fetch_name("magnet:?xt=urn:btih:abc&dn=My+Model"), "My Model")
+        self.assertEqual(llm._fetch_name("https://x.io/pack.tar.gz"), "pack")
+        self.assertEqual(llm._fetch_name("https://x.io/Qwen3-4B.gguf"), "Qwen3-4B")
+
+    def test_safe_extract_accepts_normal_zip(self):
+        import zipfile
+        d = tempfile.mkdtemp()
+        arc = os.path.join(d, "a.zip")
+        with zipfile.ZipFile(arc, "w") as z:
+            z.writestr("config.json", "{}")
+            z.writestr("sub/weights.bin", "x")
+        out = tempfile.mkdtemp()
+        llm._safe_extract(arc, out)
+        self.assertTrue(os.path.exists(os.path.join(out, "config.json")))
+        self.assertTrue(os.path.exists(os.path.join(out, "sub", "weights.bin")))
+
+    def test_safe_extract_rejects_path_traversal(self):
+        import zipfile
+        d = tempfile.mkdtemp()
+        arc = os.path.join(d, "evil.zip")
+        with zipfile.ZipFile(arc, "w") as z:
+            z.writestr("../escape.txt", "pwn")
+        with self.assertRaises(ValueError):
+            llm._safe_extract(arc, tempfile.mkdtemp())
+
+    def test_fetch_dispatch(self):
+        from unittest import mock
+        c = cfg()
+        c["dirs"] = [tempfile.mkdtemp()]
+        seen = {}
+        with mock.patch.object(llm, "_fetch_torrent", lambda u, d, p: seen.update(torrent=u) or True), \
+             mock.patch.object(llm, "_fetch_http", lambda u, d, p: seen.update(http=u) or True):
+            llm.fetch_cmd(c, ["magnet:?xt=urn:btih:abc&dn=M"])
+            llm.fetch_cmd(c, ["https://x.io/thing.torrent"])
+            llm.fetch_cmd(c, ["https://x.io/model.gguf"])
+        self.assertTrue(seen["torrent"].startswith("magnet:") or seen["torrent"].endswith(".torrent"))
+        self.assertEqual(seen["http"], "https://x.io/model.gguf")
+
+    def test_fetch_without_args(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = llm.fetch_cmd(cfg(), [])
+        self.assertFalse(rv)
+
+
 class TestOllamaStyleCommands(unittest.TestCase):
     """resolve_model and the Ollama-style verbs run / show / ps."""
 

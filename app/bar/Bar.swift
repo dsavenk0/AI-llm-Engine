@@ -878,6 +878,7 @@ struct MonitorTab: View {
 struct SettingsTab: View {
     @ObservedObject var e: EngineState
     @State private var advanced = false
+    @State private var customURL = ""
 
     var model: ModelInfo? { e.models.first { $0.path == e.modelPath } }
 
@@ -955,6 +956,20 @@ struct SettingsTab: View {
                         .font(HUD.mono(11)).frame(width: 170).multilineTextAlignment(.trailing).textFieldStyle(.roundedBorder)
                 }
                 Hint(text: L("Point it at a faster/bigger external SSD; empty = default location", "Укажите более быстрый/ёмкий внешний SSD; пусто = путь по умолчанию"))
+            }
+            Card {
+                Caption(text: L("Custom source", "Свой источник"))
+                HStack {
+                    TextField(L("Paste a .gguf / archive URL or a magnet link", "Вставьте ссылку на .gguf / архив или magnet"),
+                              text: $customURL)
+                        .textFieldStyle(.roundedBorder).font(HUD.mono(11))
+                        .onSubmit(fetchCustom)
+                    Button(action: fetchCustom) { Image(systemName: "arrow.down.to.line").frame(width: 24, height: 20) }
+                        .buttonStyle(NeonButton(color: HUD.phosphor))
+                        .disabled(customURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Hint(text: L("Downloads what you point it at into your models folder (progress shows in Models). Magnet links need aria2c. You are responsible for the source's licence.",
+                             "Скачивает по вашей ссылке в папку моделей (прогресс — во вкладке «Модели»). Для magnet нужен aria2c. Ответственность за лицензию источника — на вас."))
             }
             Card {
                 Caption(text: L("Network & interface", "Сеть и интерфейс"))
@@ -1079,6 +1094,13 @@ struct SettingsTab: View {
             Hint(text: L("Changes are saved as you edit; the engine applies them when it (re)starts",
                          "Изменения сохраняются сразу; движок применяет их при запуске или перезапуске"))
         }
+    }
+
+    func fetchCustom() {
+        let url = customURL.trimmingCharacters(in: .whitespaces)
+        guard !url.isEmpty else { return }
+        Downloader.shared.fetch(url) { e.loadModels() }
+        customURL = ""
     }
 
     func labeledPicker(_ label: String, _ b: Binding<String>, _ options: [(String, String)]) -> some View {
@@ -1224,12 +1246,14 @@ final class DownloadJob: ObservableObject, Identifiable {
     fileprivate var autoResume = false         // the watchdog bounced it: come back as queued, not paused
     fileprivate var retries = 0
     fileprivate var lastTick = Date()
-    init(id: String, fraction: Double = 0, state: JobState = .queued) {
-        self.id = id; self.fraction = fraction; self.state = state
+    fileprivate var args: [String]             // the `llm` sub-command this job runs (pull or fetch)
+    init(id: String, args: [String], fraction: Double = 0, state: JobState = .queued) {
+        self.id = id; self.args = args; self.fraction = fraction; self.state = state
     }
 }
 
 final class Downloader: ObservableObject {
+    static let shared = Downloader()          // one list, shared by the Models tab and the Settings "Custom source" field
     @Published private(set) var jobs: [DownloadJob] = []
     private var onDone: [String: () -> Void] = [:]
     private let maxParallel = 2
@@ -1242,11 +1266,20 @@ final class Downloader: ObservableObject {
 
     /// Queue a download (or re-queue a paused/failed one). It starts as soon as a slot is free.
     func start(_ repo: String, done: @escaping () -> Void) {
-        onDone[repo] = done
-        if let j = job(repo) {
+        enqueue(id: repo, args: ["pull", repo, "--progress"], done: done)
+    }
+
+    /// Queue a fetch from a source the user provided (a URL or magnet) — same list, same controls.
+    func fetch(_ url: String, done: @escaping () -> Void) {
+        enqueue(id: url, args: ["fetch", url, "--progress"], done: done)
+    }
+
+    private func enqueue(id: String, args: [String], done: @escaping () -> Void) {
+        onDone[id] = done
+        if let j = job(id) {
             if j.state == .paused || j.state == .failed { j.state = .queued; j.error = nil }
         } else {
-            jobs.append(DownloadJob(id: repo))
+            jobs.append(DownloadJob(id: id, args: args))
         }
         ensureWatchdog(); pump()
     }
@@ -1281,7 +1314,7 @@ final class Downloader: ObservableObject {
         j.state = .downloading; j.error = nil; j.file = ""; j.lastTick = Date()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Paths.shared.root + "/llm")
-        p.arguments = ["pull", j.id, "--progress"]
+        p.arguments = j.args
         p.currentDirectoryURL = URL(fileURLWithPath: Paths.shared.root)
         var env = ProcessInfo.processInfo.environment
         env["LLM_HOME"] = Paths.shared.home
@@ -1414,7 +1447,7 @@ struct DownloadRow: View {
 
 struct ModelsTab: View {
     @ObservedObject var e: EngineState
-    @StateObject private var dl = Downloader()
+    @ObservedObject private var dl = Downloader.shared
     @State private var query = "qwen3.5"
     @State private var results: [HubModel] = []
     @State private var searching = false

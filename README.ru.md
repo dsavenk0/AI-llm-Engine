@@ -110,6 +110,7 @@
 ```sh
 ./llm search qwen3.5            # MLX-модели на Hugging Face: размер, загрузки, «движок ✓», влезет ли в RAM
 ./llm pull mlx-community/Qwen3.5-4B-MLX-4bit   # загрузка с докачкой в ~/.cache/huggingface/hub
+./llm fetch https://host/model.gguf            # ваш источник: ссылка на .gguf/архив или magnet (нужен aria2c)
 ./llm run mlx-community/Qwen3.5-4B-MLX-4bit    # как в Ollama: скачать при необходимости, запустить, чат
 ./llm run qwen3.5 "сколько будет два плюс два?"  # уже установлена: один ответ и выход
 ./llm show qwen3.5               # краткая карточка: формат, маршрут, размер, контекст, возможности

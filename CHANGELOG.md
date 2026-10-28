@@ -17,6 +17,12 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Ollama-style CLI**: `./llm run <model> [prompt]` (select, downloading the model first if only an `org/name`
   is given, start the engine, then chat — or print one answer for a trailing prompt), `./llm show [model]`
   (format, route, size, context, capabilities) and `./llm ps` (the model loaded now). `--json` on `show`/`ps`.
+- **Custom source** (Settings → "Custom source", or `./llm fetch <url|magnet> [name]`): add a model from a source
+  **you** provide — a direct http(s) link to a `.gguf` or an archive (`.zip`/`.tar*`, extracted safely), or a
+  magnet/`.torrent` via `aria2c` if installed. It only downloads what you point it at, into your models folder.
+- **Download manager**: several downloads run at once (a queue, two in parallel); a paused or failed one stays in
+  the list with its progress (the `.part` files are kept, resume continues) instead of disappearing; a transfer
+  that makes no progress for 90 s is bounced (resumes from disk) up to three times, then paused with a reason.
 - **Profiles** (Modelfile-style): `./llm create <name> --from <model> --system "…" --param k=v` saves a named
   preset — a base model with a system prompt and sampling — that `./llm run <name>` then applies. `./llm create`
   lists them, `./llm create <name> --rm` (or `./llm rm <name>`) deletes one, `./llm show <name>` prints it.

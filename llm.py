@@ -9,6 +9,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm models               discovered models and compatibility
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
+  ./llm fetch <url|magnet> [name]   add a model from a source you provide (.gguf/archive URL, or magnet via aria2c)
   ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
   ./llm show [<#|name>]      a quick card: format, route, size, context, capabilities
   ./llm ps                   the model loaded right now
@@ -2360,6 +2361,150 @@ def hf_pull(repo, progress=False, revision=None):
     return True
 
 
+ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
+
+
+def _fetch_basename(url):
+    """The file name a URL ends in, without the query string."""
+    path = urllib.parse.urlsplit(url).path
+    return urllib.parse.unquote(os.path.basename(path.rstrip("/"))) or "download"
+
+
+def _fetch_name(url):
+    """A folder name for a fetched source: the magnet's display name, or the URL's file name without its
+    archive extension."""
+    if url.startswith("magnet:"):
+        dn = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("dn", [""])[0]
+        return (dn or "custom").replace("/", "-").strip() or "custom"
+    base = _fetch_basename(url)
+    low = base.lower()
+    for ext in sorted(ARCHIVE_EXTS, key=len, reverse=True):
+        if low.endswith(ext):
+            return base[: -len(ext)] or "custom"
+    return os.path.splitext(base)[0] or base
+
+
+def _safe_extract(archive, dest):
+    """Extract a .zip or .tar* into `dest`, refusing any member that would escape it (absolute paths,
+    ``..`` or a symlink pointing outside)."""
+    import tarfile
+    import zipfile
+    root = os.path.realpath(dest)
+
+    def inside(name):
+        return os.path.realpath(os.path.join(dest, name)).startswith(root + os.sep)
+
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as z:
+            for n in z.namelist():
+                if not inside(n):
+                    raise ValueError(T("Unsafe path in archive: {name}").format(name=n))
+            z.extractall(dest)
+    elif tarfile.is_tarfile(archive):
+        with tarfile.open(archive) as t:
+            for m in t.getmembers():
+                if (m.issym() or m.islnk()) or not inside(m.name):
+                    raise ValueError(T("Unsafe path in archive: {name}").format(name=m.name))
+            t.extractall(dest)
+    else:
+        raise ValueError(T("Not a .zip or .tar archive"))
+
+
+def _remote_size(url, headers):
+    """Content-Length for a URL, or 0 when the server does not say."""
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return int(r.headers.get("Content-Length") or 0)
+    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError):
+        return 0
+
+
+def fetch_cmd(cfg, args):
+    """`./llm fetch <url|magnet> [name] [--progress]` — add a model from a source **you** provide: a direct
+    http(s) link to a `.gguf` or an archive (.zip/.tar*), or a magnet/.torrent (needs `aria2c`). It only
+    downloads what you point it at, into your models folder; you are responsible for the source's licence."""
+    progress = "--progress" in args
+    rest = [a for a in args if not a.startswith("--")]
+    if not rest:
+        print(T("Usage: ./llm fetch <url|magnet> [name]")); return False
+    url = rest[0]
+    name = (rest[1] if len(rest) > 1 else _fetch_name(url)).strip("/") or "custom"
+    base = os.path.expanduser(cfg["dirs"][0])
+    dest = os.path.join(base, "custom", name)
+    if url.startswith("magnet:") or url.lower().endswith(".torrent"):
+        return _fetch_torrent(url, dest, progress)
+    return _fetch_http(url, dest, progress)
+
+
+def _fetch_torrent(url, dest, progress):
+    aria = shutil.which("aria2c")
+    if not aria:
+        print(R(T("Install aria2 to fetch magnet/torrent links: brew install aria2"))); return False
+    os.makedirs(dest, exist_ok=True)
+    print(T("Fetching {url} → {dest}").format(url=url[:60], dest=dest), flush=True)
+    p = subprocess.Popen([aria, "--dir", dest, "--seed-time=0", "--summary-interval=1",
+                          "--console-log-level=warn", url],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    last = ""
+    for line in p.stdout:                             # aria2c prints "... (53%) ..." — forward it as PROGRESS
+        m = re.search(r"\((\d+)%\)", line)
+        if m and progress:
+            pct = m.group(1)
+            if pct != last:
+                last = pct; print(f"PROGRESS {pct} 100 {os.path.basename(dest)}", flush=True)
+        elif not progress:
+            print("  " + line.rstrip(), flush=True)
+    ok = p.wait() == 0
+    if ok and progress:
+        print("PROGRESS 100 100 done", flush=True)
+    print((G(T("Fetched: {dest}")) if ok else R(T("Download failed"))).format(dest=dest))
+    return ok
+
+
+def _fetch_http(url, dest, progress):
+    os.makedirs(dest, exist_ok=True)
+    fname = _fetch_basename(url)
+    is_archive = fname.lower().endswith(ARCHIVE_EXTS)
+    headers = {"User-Agent": "AI-llm-Engine"}
+    total = _remote_size(url, headers)
+    free = shutil.disk_usage(dest).free
+    if total and total > free - 2 * 2**30:
+        print(R(T("Not enough disk space: need {need:.1f} GB, free {free:.1f} GB")
+                .format(need=total / 2**30, free=free / 2**30))); return False
+    target = os.path.realpath(os.path.join(dest, fname))
+    if not target.startswith(os.path.realpath(dest) + os.sep):
+        print(R(T("Unsafe path in archive: {name}").format(name=fname))); return False
+    print(T("Fetching {url} → {dest}").format(url=url[:60], dest=dest), flush=True)
+    state = {"done": 0, "last": 0.0}
+    t0 = time.time()
+
+    def tick(n):
+        state["done"] += n
+        now = time.time()
+        if now - state["last"] > 0.5:
+            state["last"] = now
+            if progress and total:
+                print(f"PROGRESS {min(state['done'], total)} {total} {fname}", flush=True)
+            elif not progress:
+                speed = state["done"] / max(1e-6, now - t0) / 2**20
+                print(f"\r  {state['done'] / 2**30:5.2f} GB  {speed:6.1f} MB/s  {fname[:40]:40s}", end="", flush=True)
+    try:
+        download_file(url, target, total, None, headers, lambda n: tick(n))
+    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as e:
+        print("\n" + R(T("Download failed: {name}: {err}").format(name=fname, err=e))); return False
+    if is_archive:
+        try:
+            _safe_extract(target, dest)
+            os.remove(target)
+        except (ValueError, OSError) as e:
+            print("\n" + R(T("Download failed: {name}: {err}").format(name=fname, err=e))); return False
+    if progress and total:
+        print(f"PROGRESS {total} {total} done", flush=True)
+    print("\n" + G(T("Fetched: {dest}").format(dest=dest)))
+    return True
+
+
 def search_cmd(query, as_json=False, source="hf"):
     if not query:
         query = input(T("Search MLX models on Hugging Face") + " › ").strip()
@@ -2730,7 +2875,8 @@ def main():
         "up": lambda: up(cfg), "open": open_window,
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
-        "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__), "": menu, "menu": menu,
+        "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),
+        "fetch": lambda: fetch_cmd(cfg, sys.argv[2:]), "": menu, "menu": menu,
     }
     if cmd not in actions:
         print(__doc__); sys.exit(2)

@@ -280,5 +280,12 @@
   "Profile not found.": "Профиль не найден.",
   "Deleted profile: {name}": "Профиль удалён: {name}",
   "Give a base model: ./llm create {name} --from <model>": "Укажите базовую модель: ./llm create {name} --from <модель>",
-  "Created profile {name} ← {base}": "Создан профиль {name} ← {base}"
+  "Created profile {name} ← {base}": "Создан профиль {name} ← {base}",
+  "Usage: ./llm fetch <url|magnet> [name]": "Использование: ./llm fetch <url|magnet> [имя]",
+  "Install aria2 to fetch magnet/torrent links: brew install aria2": "Для magnet/torrent установите aria2: brew install aria2",
+  "Fetching {url} → {dest}": "Загрузка {url} → {dest}",
+  "Fetched: {dest}": "Загружено: {dest}",
+  "Download failed": "Загрузка не удалась",
+  "Unsafe path in archive: {name}": "Небезопасный путь в архиве: {name}",
+  "Not a .zip or .tar archive": "Не архив .zip или .tar"
 }

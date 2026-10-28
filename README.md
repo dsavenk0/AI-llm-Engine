@@ -110,6 +110,7 @@ missing connection is named as such. For a Mac that will never see the internet,
 ```sh
 ./llm search qwen3.5            # MLX models on Hugging Face: size, downloads, "engine ✓", fits RAM
 ./llm pull mlx-community/Qwen3.5-4B-MLX-4bit   # resumable download into ~/.cache/huggingface/hub
+./llm fetch https://host/model.gguf            # a source you provide: a .gguf/archive URL, or a magnet (needs aria2c)
 ./llm run mlx-community/Qwen3.5-4B-MLX-4bit    # Ollama-style: download if needed, start, then chat
 ./llm run qwen3.5 "two plus two?"              # already installed: one answer and exit
 ./llm show qwen3.5               # a quick card: format, route, size, context, capabilities
