@@ -18,8 +18,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   on-device Whisper and Kokoro on MLX — optional, like image generation and OCR (`./llm setup --audio` installs
   `mlx-whisper`, `mlx-audio` and `misaki`; the models download on first use). `transcribe` returns text + language
   + timed segments; `say` synthesises a WAV with a Kokoro voice (`--voice`, `--speed`), plays it, and saves it
-  (the WAV is written with the stdlib, no soundfile/scipy). Omni is the next piece; the voice chat can later use
-  these in place of the system recogniser and synthesiser.
+  (the WAV is written with the stdlib, no soundfile/scipy). The **voice chat** has an opt-in *Transcribe with
+  Whisper* setting (off by default): the utterance is recorded while the system recogniser runs live, then
+  transcribed with Whisper for the final text, falling back to the system text if Whisper isn't installed or
+  returns nothing. Omni is the next piece.
 - **Request admission cap** (`--max-queue N`, or `advanced.max_queue` in `./llm`): refuses a generation request
   with 503 once this many are in flight, so a coding agent, a chat, the editor and voice all hitting one model
   stay bounded instead of piling up unbounded threads and prompt buffers; `/health` reports `inflight`/`max_queue`.

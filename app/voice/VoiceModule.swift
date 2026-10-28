@@ -199,6 +199,12 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var speakReplies: Bool {
         didSet { UserDefaults.standard.set(speakReplies, forKey: "speakReplies") }
     }
+    /// Off by default: the system recogniser runs live. On: the utterance is also recorded and, when it ends,
+    /// transcribed with Whisper (MLX) via `./llm transcribe` — more accurate, a little slower, and it falls back
+    /// to the system text if Whisper is not installed or returns nothing. Needs `./llm setup --audio`.
+    @Published var whisperASR: Bool {
+        didSet { UserDefaults.standard.set(whisperASR, forKey: "whisperASR") }
+    }
     /// Dialog mode: after each answer the microphone opens again by itself, so a conversation needs no
     /// button presses. It ends on a long silence, a click on the sphere while nothing is said, or a typed message.
     @Published var dialogMode: Bool {
@@ -216,6 +222,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     private var engine: AVAudioEngine?
+    private var recordURL: URL?                 // the utterance recorded for Whisper (when whisperASR is on)
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var lastChange = Date()
@@ -230,6 +237,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     override init() {
         speakReplies = UserDefaults.standard.object(forKey: "speakReplies") as? Bool ?? true
+        whisperASR = UserDefaults.standard.object(forKey: "whisperASR") as? Bool ?? false
         autoListen = UserDefaults.standard.object(forKey: "autoListen") as? Bool ?? true
         dialogMode = UserDefaults.standard.object(forKey: "dialogMode") as? Bool ?? true
         webMode = UserDefaults.standard.object(forKey: "webMode") as? Bool ?? true
@@ -601,8 +609,17 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let input = engine.inputNode
         if bargeIn { try? input.setVoiceProcessingEnabled(true) }  // echo cancellation so the mic ignores the reply being read aloud
         let format = input.outputFormat(forBus: 0)
+        var recordFile: AVAudioFile? = nil          // captured strongly by the tap; flushed when the tap is removed
+        recordURL = nil
+        if whisperASR, !bargeIn {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("llmbar-utterance.wav")
+            try? FileManager.default.removeItem(at: url)
+            recordFile = try? AVAudioFile(forWriting: url, settings: format.settings)
+            if recordFile != nil { recordURL = url }
+        }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
             req.append(buf)
+            try? recordFile?.write(from: buf)
             guard let ch = buf.floatChannelData?[0] else { return }
             let n = Int(buf.frameLength)
             var sum: Float = 0
@@ -668,8 +685,30 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     private func finishListening() {
         guard state == .listening else { return }
+        let recorded = recordURL; recordURL = nil
         stopCapture()
-        let text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        let appleText = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        if whisperASR, let recorded {                 // transcribe the recording; fall back to the live text
+            state = .thinking
+            heard = ""
+            Task { await self.commitWithWhisper(recorded, fallback: appleText) }
+            return
+        }
+        commitUtterance(appleText)
+    }
+
+    /// Run the recorded utterance through Whisper (`./llm transcribe`); use its text, or the system recogniser's
+    /// if Whisper is not installed or produced nothing. Off the main thread, then back on it to send.
+    private func commitWithWhisper(_ url: URL, fallback: String) async {
+        let root = Setup.llmRoot
+        let out = await Task.detached { Voice.runLLM(["transcribe", url.path], root: root) }.value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try? FileManager.default.removeItem(at: url)
+        commitUtterance(out.isEmpty ? fallback : out)
+    }
+
+    /// Send a finished user utterance (from the system recogniser or Whisper) as the next turn.
+    private func commitUtterance(_ text: String) {
         guard !text.isEmpty else { dialogActive = false; state = .idle; return }   // nothing said: the dialog ends
         dialogActive = true
         turns.append(Turn(role: "user", text: text, spoken: true))
@@ -1173,6 +1212,7 @@ struct VoiceView: View {
                 Toggle("Read voice answers aloud", isOn: $voice.speakReplies)
                 Toggle("Dialog mode — keep listening after each answer", isOn: $voice.dialogMode)
                 Toggle("Look things up on the web when needed", isOn: $voice.webMode)
+                Toggle("Transcribe with Whisper (more accurate, a bit slower; ./llm setup --audio)", isOn: $voice.whisperASR)
                 Toggle("Listen when opened", isOn: $voice.autoListen)
                 Toggle("Keep on top", isOn: $voice.keepOnTop)
                 Picker("Recognition language", selection: $voice.localeID) {
