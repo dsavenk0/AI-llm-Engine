@@ -77,3 +77,11 @@ hdiutil convert "$RW_DMG" -quiet -format UDZO -imagekey zlib-level=9 -o "$FINAL_
 
 echo "✓ Done: $FINAL_DMG ($(du -h "$FINAL_DMG" | cut -f1))"
 echo "  Open it and drag LLMBar to Applications."
+
+# A stable-named copy for the website's one-click button. GitHub serves
+# releases/latest/download/LLMBar.dmg as an attachment, so the page downloads straight away
+# instead of bouncing to the releases list — but only if the release carries this exact name.
+# Upload BOTH assets (the versioned one for humans, LLMBar.dmg for the link).
+STABLE_DMG="$OUT_DIR/LLMBar.dmg"
+cp -f "$FINAL_DMG" "$STABLE_DMG"
+echo "✓ Stable copy for the site's download button: $STABLE_DMG"
