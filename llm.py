@@ -1188,6 +1188,8 @@ def gguf_cmd(cfg, m):
            "--context", str(mc["context"]), "--max-tokens", str(mc["max_output"]),
            "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--inner-log", os.path.join(STATE, "llama-server.log"),
            "--ram-gb", f"{RAM_GB:.1f}"]
+    if os.environ.get("LLM_PARENT_PID"):   # the app sets this so the engine (and llama-server) stop if it crashes
+        cmd += ["--parent-pid", os.environ["LLM_PARENT_PID"]]
     srv = gguf.server_path(DATA)
     if srv:
         cmd += ["--llama-server", srv]
@@ -1229,6 +1231,8 @@ def engine_cmd(cfg, m):
            "--mem-limit", str(cfg["mem_limit"] / 100),
            "--stats-file", os.path.join(STATE, "stats.jsonl"),
            "--idle-sleep", str(cfg.get("idle_sleep", 15)), "--disk-cache-gb", str(cfg.get("disk_cache_gb", 8))]
+    if os.environ.get("LLM_PARENT_PID"):   # the app sets this so the engine stops if the app crashes
+        cmd += ["--parent-pid", os.environ["LLM_PARENT_PID"]]
     if m.get("route") == "ptq1":  # picking an experimental-format model is the opt-in; no separate switch
         cmd += ["--ptq1", "on"]
     if native_gguf:

@@ -26,6 +26,30 @@ def free_port():
         return s.getsockname()[1]
 
 
+class TestWatchdog(unittest.TestCase):
+    """The engine stops itself when the app that launched it goes away (no orphaned engine / llama-server)."""
+
+    def test_pid_alive(self):
+        from engine.server import pid_alive
+        self.assertTrue(pid_alive(0))                 # no parent to watch
+        self.assertTrue(pid_alive(os.getpid()))
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        self.assertFalse(pid_alive(p.pid))            # it has exited
+
+    def test_watch_parent_fires_once_when_the_parent_goes(self):
+        from engine.server import watch_parent
+        seen = {"alive": [True, True, False], "slept": 0, "gone": 0}
+
+        def alive(_pid):
+            return seen["alive"].pop(0) if seen["alive"] else False
+
+        def sleep(_s):
+            seen["slept"] += 1
+        watch_parent(1234, lambda: seen.__setitem__("gone", seen["gone"] + 1), sleep=sleep, alive=alive)
+        self.assertEqual((seen["gone"], seen["slept"]), (1, 2))
+
+
 class TestFinishReason(unittest.TestCase):
     """A reply cut off for looping must read as a clear reason, not a plain stop."""
 

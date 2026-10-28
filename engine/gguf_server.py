@@ -314,6 +314,8 @@ def main(argv=None):
     ap.add_argument("--no-speculative", action="store_true", help="no prompt-lookup speculative decoding")
     ap.add_argument("--inner-log", default="")
     ap.add_argument("--ram-gb", type=float, default=0)
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="stop (and with it the llama-server child) if this process exits; 0 = independent")
     ARGS = ap.parse_args(argv)
     LOG = logs.make(ARGS.log_level)
     try:
@@ -356,6 +358,12 @@ def main(argv=None):
         os._exit(0)
     signal.signal(signal.SIGTERM, bye)
     signal.signal(signal.SIGINT, bye)
+
+    if ARGS.parent_pid:   # the app that launched us; if it crashes, stop so no orphan llama-server lingers
+        from engine.server import watch_parent
+        LOG(f"watchdog: will stop if the launching process (PID {ARGS.parent_pid}) exits")
+        threading.Thread(target=watch_parent, args=(ARGS.parent_pid,
+                         lambda: os.kill(os.getpid(), signal.SIGTERM)), daemon=True).start()
     LOG(f"serving {ARGS.name} on http://{ARGS.host}:{ARGS.port}/v1  (context {ARGS.context_effective}, "
         f"max output {ARGS.max_tokens})")
     try:

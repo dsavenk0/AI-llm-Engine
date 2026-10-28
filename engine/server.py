@@ -88,6 +88,27 @@ def log(msg, level=None, group=None):
     _log(msg, level, group)
 
 
+def pid_alive(pid):
+    """True while a process with this PID exists. A watchdog uses it to notice the app that launched the
+    engine has gone away (crashed), so an orphaned engine does not keep the model and the port forever."""
+    if not pid or pid <= 0:
+        return True                                   # no parent to watch (the CLI daemon runs on its own)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                                   # it exists, we just may not signal it
+    return True
+
+
+def watch_parent(pid, on_gone, interval=3.0, sleep=time.sleep, alive=pid_alive):
+    """Block until `pid` disappears, then call `on_gone()`. Factored out so it is unit-testable."""
+    while alive(pid):
+        sleep(interval)
+    on_gone()
+
+
 def model_matches(requested):
     """Does a request's `model` name the model this server has loaded? Names are compared the way clients
     spell them: case-insensitively, with or without the "org/" prefix of a hub id."""
@@ -663,6 +684,9 @@ def main():
                     help="max fraction of system RAM in use; requests are trimmed/stopped above it (default 0.88)")
     ap.add_argument("--max-pixels", type=int, default=1024 * 1024)
     ap.add_argument("--api-key", default=os.environ.get("ENGINE_API_KEY", ""))
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="shut down if this process (the app that launched the engine) goes away; "
+                         "0 = run independently, as the CLI daemon does")
     ARGS = ap.parse_args()
     from engine import parsers
     try:
@@ -719,6 +743,12 @@ def main():
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
+
+    if ARGS.parent_pid:   # tie the engine's life to the app that launched it (SIGTERM runs the clean shutdown)
+        log(f"watchdog: will stop if the launching process (PID {ARGS.parent_pid}) exits")
+        threading.Thread(target=watch_parent, args=(ARGS.parent_pid, lambda: (
+            log(f"watchdog: PID {ARGS.parent_pid} is gone — stopping the engine"),
+            os.kill(os.getpid(), signal.SIGTERM))), daemon=True).start()
 
     srv = Server((ARGS.host, ARGS.port), Handler)
     log(f"serving {ARGS.name} on http://{ARGS.host}:{ARGS.port}/v1  "
