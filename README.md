@@ -13,10 +13,12 @@ Built and tuned for a **MacBook Air M5, 16 GB** running
 [Русская версия](README.ru.md)
 
 <p align="center">
-  <img src="docs/assets/screenshot-engine.png" width="210" alt="Menu-bar engine: status, token ledger, memory">
-  <img src="docs/assets/screenshot-editor-ide.png" width="210" alt="Code editor with the assistant">
-  <img src="docs/assets/screenshot-voice.png" width="210" alt="Voice chat">
-  <img src="docs/assets/screenshot-models.png" width="210" alt="Models: installed, hub search and download">
+  <img src="docs/assets/screenshot-engine.png" width="380" alt="Menu-bar engine: status, token ledger, memory">
+  <img src="docs/assets/screenshot-models.png" width="380" alt="Models: installed, hub search and download">
+</p>
+<p align="center">
+  <img src="docs/assets/screenshot-editor-ide.png" width="450" alt="Code editor with the assistant">
+  <img src="docs/assets/screenshot-voice.png" width="365" alt="Voice chat in dark and light themes">
 </p>
 
 ## Why
