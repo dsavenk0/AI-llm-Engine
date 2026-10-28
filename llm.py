@@ -3,40 +3,42 @@
 llm — manager for local MLX models running on the bundled engine (engine/).
 
   ./llm                      interactive menu
-  ./llm open                 new Terminal window: start the model and open chat (= LLM.command)
-  ./llm up                   start (if needed), chat right away, then the menu
-  ./llm setup [--compat]     create .venv and install dependencies (--compat adds mlx-lm for other model families)
-  ./llm setup --ocr          build the on-device OCR helper (Apple Vision) so scanned PDFs and images can be read
-  ./llm setup --audio        install Whisper + Kokoro (MLX) for on-device speech-to-text and text-to-speech
-  ./llm transcribe <audio>   speech-to-text with Whisper (MLX), on-device (--model <hf-repo>, --json)
-  ./llm say "<text>"         text-to-speech with Kokoro (MLX), on-device (--voice, --speed, --out, --no-play)
-  ./llm models               discovered models and compatibility
+
+ Run & chat
+  ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
+  ./llm open | up            new Terminal window with chat | start + chat + the menu, here
+  ./llm chat                 chat with the model that is loaded
+  ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
+  ./llm conduct ["<task>"] [--file F …]   orchestrator: recognise attachments (OCR/Whisper/docs), route by role
+  ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
+
+ Models
+  ./llm models | use <#|name>   list models / select one (restarts a running engine)
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
   ./llm fetch <url|magnet> [name]   add a model from a source you provide (.gguf/archive URL, or magnet via aria2c)
-  ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
-  ./llm show [<#|name>]      a quick card: format, route, size, context, capabilities
-  ./llm ps                   the model loaded right now
+  ./llm show [<#|name>] | ps    a model's card (format/route/size/context) | the model loaded right now
   ./llm create <name> --from <model> [--system "…"] [--param k=v]   a named profile (run it with ./llm run <name>)
-  ./llm use <#|name part>    select a model (restarts it if running)
-  ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
-  ./llm start|stop|restart|status|chat|bench|logs|free
-  ./llm service install|uninstall|status   optional background service (launchd): up after login, restarts on crash
-  ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
-  ./llm conduct ["<task>"] [--file F …]   orchestrator: recognise attachments (OCR/Whisper/docs), route by role
+  ./llm rm <#|name> [--yes]  delete a downloaded model from disk
   ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
-  ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
+  ./llm inspect [<#|name|path>]  what is inside a model: layers, storage types, bits per weight, biggest tensors
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
-  ./llm read <file> [--query "…"]  extract text from a document (PDF/DOCX/PPTX/HTML/text, OCR for scans); a query picks the relevant excerpts
-  ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
-  ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
+
+ Audio & documents   (./llm setup --audio installs Whisper + Kokoro; --ocr builds the OCR helper)
+  ./llm transcribe <audio>   speech-to-text with Whisper (MLX), on-device (--model <hf-repo>, --json)
+  ./llm say "<text>"         text-to-speech with Kokoro (MLX), on-device (--voice, --speed, --out, --no-play)
+  ./llm read <file> [--query "…"]   document → text (PDF/DOCX/PPTX/HTML/text, OCR for scans); a query picks excerpts
+
+ Engine & service
+  ./llm start|stop|restart|status|bench|logs|free
+  ./llm service install|uninstall|status   optional background service (launchd): up after login, restarts on crash
+
+ Setup & maintenance
+  ./llm setup [--compat|--ocr|--audio|--gguf|--images]   .venv / mlx-lm · OCR · audio · llama.cpp · mflux
   ./llm update [--check]     is there a newer release on GitHub? (--check only reports; else downloads the .dmg)
   ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
-  ./llm test                 engine tests (integration tests too when a model is selected)
-  ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
-  ./llm eval [--save]        accuracy suite (math/code/sanity) vs tests/eval_baseline.json
-  ./llm eval --suite gsm8k,mmlu --limit 100   standard benchmarks (--suite list shows them)
-  ./llm calibrate [--apply]  find the largest context that actually prefills on this Mac
+  ./llm test | perf [--save] | eval [--save|--suite gsm8k,mmlu] | calibrate [--apply]   tests · perf · accuracy · max context
+  ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
 
 The manager itself is stdlib-only; the engine runs from ./.venv.
 Language: English by default, Russian via LLM_LANG=ru, the settings menu or a ru system locale.
