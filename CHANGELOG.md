@@ -1,9 +1,8 @@
 # Changelog
 
-All notable changes to AI-llm-Engine. Dates are 2026; the project has not tagged a release yet — everything below
-is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
+All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
-## Unreleased — 12 October
+## 1.0.0 — 28 October
 
 ### Changed — one app
 - LLMBar, the editor and the voice chat are **one app** (`LLMBar.app`, one process) split into modules: the panel,
@@ -14,6 +13,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Batched decode (`Engine.generate_batch`)**: runs several generation requests in one lockstep batch on top of the
+  bit-exact kernel in `engine/batch.py`, sharing weight reads across requests. Motivated by reproducible measurement
+  (`tests/profile.py`, `tests/concurrency.py`), where ~68% of a decode token is weight reads.
+- **Hardware baseline & profiling**: reproducible profiling suites (`tests/profile.py`, `tests/concurrency.py`,
+  `tests/perf.py`) documenting Apple M5 baseline metrics in README.
 - **On-device multimodal orchestration** (`harness/perception.py` + the Conductor): attachments are recognised
   locally — audio via Whisper, scans/images/PDF via OCR, documents via text extraction — and fed to the optional
   orchestrator, which routes the work across your installed models by role (a fast model reads and extracts, the
