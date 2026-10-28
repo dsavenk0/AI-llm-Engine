@@ -13,12 +13,10 @@
 [English version](README.md)
 
 <p align="center">
-  <img src="docs/assets/screenshot-engine.png" width="380" alt="Движок в строке меню: статус, счётчик токенов, память">
-  <img src="docs/assets/screenshot-models.png" width="380" alt="Модели: установленные, поиск и загрузка">
-</p>
-<p align="center">
-  <img src="docs/assets/screenshot-editor-ide.png" width="450" alt="Редактор кода с ассистентом">
-  <img src="docs/assets/screenshot-voice.png" width="365" alt="Голосовой чат в тёмной и светлой темах">
+  <img src="docs/assets/screenshot-engine.png" width="210" alt="Движок в строке меню: статус, счётчик токенов, память">
+  <img src="docs/assets/screenshot-editor-ide.png" width="210" alt="Редактор кода с ассистентом">
+  <img src="docs/assets/screenshot-voice.png" width="210" alt="Голосовой чат">
+  <img src="docs/assets/screenshot-models.png" width="210" alt="Модели: установленные, поиск и загрузка">
 </p>
 
 ## Зачем
