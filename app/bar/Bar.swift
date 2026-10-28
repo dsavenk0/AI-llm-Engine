@@ -1366,7 +1366,7 @@ struct ModelsTab: View {
                             }
                             Spacer()
                             if m.path == e.modelPath {
-                                Text(L("ACTIVE", "АКТИВНА")).font(HUD.mono(9, .semibold)).tracking(1.2).foregroundColor(HUD.phosphor)
+                                Text(L("SELECTED", "ВЫБРАНА")).font(HUD.mono(9, .semibold)).tracking(1.2).foregroundColor(HUD.phosphor)
                             } else if m.supported {
                                 Button(action: {
                                     e.setG("model", m.path)
@@ -1447,7 +1447,8 @@ struct ModelsTab: View {
                 ForEach(results) { r in
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(r.id).font(.system(size: 11, weight: .medium)).foregroundColor(HUD.text).lineLimit(1)
+                            MarqueeText(text: r.id, font: .system(size: 11, weight: .medium), color: HUD.text,
+                                        active: hoverRow == r.id)
                             HStack(spacing: 6) {
                                 badge(r.size.map { String(format: "%.1f GB", $0) } ?? "? GB", HUD.dim)
                                 badge("⬇ \(r.downloads >= 1000 ? "\(r.downloads / 1000)K" : "\(r.downloads)")", HUD.dim)
@@ -1473,6 +1474,8 @@ struct ModelsTab: View {
                                                       : L("Downloads, but no backend here can run it", "Скачается, но ни один бэкенд её не запустит")))
                         }
                     }.padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                    .onHover { inside in hoverRow = inside ? r.id : (hoverRow == r.id ? nil : hoverRow) }
                 }
             }
         }.onAppear { if results.isEmpty { search() } }
