@@ -263,6 +263,13 @@ def inspect_model(path):
     rt = jang.get("runtime", {})
     if rt.get("requires_jang_affine1_expansion"):
         problems.append(T("packed JANG storage"))  # 1-bit affine: no kernel for it
+    # Newer Prism packs (schema 2) ship their own runtime and a different Hadamard contract
+    # (config "hadamard_config" -> hadamard.json with prism.hadamard.* keys). The loader refuses
+    # them ("ships .signs tensors but declares no Hadamard contract"), so say so here instead of
+    # reporting the model as supported and failing only at load time.
+    if cfgj.get("requires_runtime") or (cfgj.get("hadamard_config") and
+                                        not (cfgj.get("hadamard") or jang.get("hadamard"))):
+        problems.append(T("needs the vendor runtime (newer pack schema)"))
 
     tpl = ""
     if "chat_template.jinja" in files:

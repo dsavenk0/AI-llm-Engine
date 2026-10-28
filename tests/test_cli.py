@@ -383,6 +383,34 @@ class TestUpdate(unittest.TestCase):
         self.assertIn("9.9", out)
 
 
+class TestBundleCompatibilityReporting(unittest.TestCase):
+    """A bundle the loader refuses must not be reported as supported (it failed only at load time before)."""
+
+    def bundle(self, config):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(config, f)
+        with open(os.path.join(d, "model.safetensors"), "wb") as f:
+            f.write(b"\x00" * 16)
+        return d
+
+    def test_vendor_runtime_pack_is_unsupported_with_a_reason(self):
+        d = self.bundle({"model_type": "qwen3_5", "schema_version": 2, "requires_runtime": "runtime/artifact.py",
+                         "hadamard_config": "hadamard.json", "text_config": {"model_type": "qwen3_5"}})
+        info = llm.inspect_model(d)
+        self.assertFalse(info["supported"])
+        self.assertTrue(info["problems"])
+
+    def test_hadamard_config_pointer_without_a_contract_is_unsupported(self):
+        d = self.bundle({"model_type": "qwen3_5", "hadamard_config": "hadamard.json",
+                         "text_config": {"model_type": "qwen3_5"}})
+        self.assertFalse(llm.inspect_model(d)["supported"])
+
+    def test_an_ordinary_bundle_stays_supported(self):
+        d = self.bundle({"model_type": "qwen3_5", "text_config": {"model_type": "qwen3_5"}})
+        self.assertTrue(llm.inspect_model(d)["supported"])
+
+
 class TestTranscribe(unittest.TestCase):
     def capture(self, fn, *a):
         import contextlib
