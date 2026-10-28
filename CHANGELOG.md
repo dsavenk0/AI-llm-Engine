@@ -17,7 +17,8 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Voice barge-in**: in dialog mode, speaking while the reply is being read aloud stops it and listens, then
   answers the follow-up (ChatGPT-style). A barge-in listener runs during the reply with acoustic echo cancellation
   (`setVoiceProcessingEnabled`) so the mic ignores the assistant's own voice, and only a real couple-of-words
-  utterance interrupts (the `BargeIn` policy) — a cough or a stray word won't cut the answer off.
+  utterance interrupts (the `BargeIn` policy) — a cough or a stray word won't cut the answer off. The mic button
+  (and the orb) now show a stop while a reply is being read and stop it on a press, instead of looking like "Speak".
 - **Documents as sources** (`./llm read <file>`, `engine/documents.py`): extracts plain text from PDF, DOCX,
   PPTX, HTML and text/markdown/CSV so a document can be attached to the model as one source — stdlib only, no new
   dependencies (Office files are zipped XML; PDF text is pulled from the content streams). A long document can be

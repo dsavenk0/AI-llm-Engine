@@ -256,6 +256,14 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // ---- the button
 
+    /// There is something to stop — listening, thinking, or reading a reply aloud — so the button is a stop.
+    var canStop: Bool {
+        switch state {
+        case .listening, .speaking, .thinking: return true
+        default: return false
+        }
+    }
+
     func toggle() {
         switch state {
         case .listening: finishListening()
@@ -1318,12 +1326,13 @@ struct VoiceView: View {
                     .frame(minHeight: 26)                                   // the same row height as the buttons
                     .onSubmit { voice.send() }
                 Button { voice.toggle() } label: {
-                    Image(systemName: voice.state == .listening ? "stop.circle.fill" : "mic.fill").font(.system(size: 16))
+                    Image(systemName: voice.canStop ? "stop.circle.fill" : "mic.fill").font(.system(size: 16))
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(voice.state == .listening ? VHUD.magenta : VHUD.cyan)
-                .help(voice.state == .listening ? "Stop listening" : "Speak")
+                .foregroundColor(voice.canStop ? VHUD.magenta : VHUD.cyan)
+                .help(voice.state == .speaking ? "Stop reading" : voice.state == .listening ? "Stop listening"
+                      : voice.state == .thinking ? "Stop" : "Speak")
                 Button { voice.send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).frame(width: 26, height: 26) }
                     .buttonStyle(.plain).foregroundColor(canSend && !busy ? VHUD.cyan : VHUD.dim.opacity(0.5))
                     .disabled(!canSend || busy).help("Send")
