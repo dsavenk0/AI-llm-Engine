@@ -406,6 +406,16 @@ final class Workspace: ObservableObject {
     func detach(_ path: String) { attachments.removeAll { $0 == path } }
 
     /// A file picked, dropped or pasted into the composer.
+    /// The first attached project file that cannot be read right now (deleted, moved, no permission), or nil.
+    /// Checked before a send so a document-read error does not throw away the message the person typed.
+    func unreadableAttachment() -> String? {
+        for rel in attachments {
+            let full = (root as NSString).appendingPathComponent(rel)
+            if !FileManager.default.isReadableFile(atPath: full) { return rel }
+        }
+        return nil
+    }
+
     func addAttachment(from url: URL) {
         do {
             switch try Attach.make(url, root: (root as NSString).resolvingSymlinksInPath) {

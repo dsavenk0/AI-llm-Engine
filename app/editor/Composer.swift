@@ -405,6 +405,10 @@ struct Composer: View {
     private func send() {
         guard canSend, !store.busy else { return }
         if dictation.listening { dictation.stop() }
+        if let bad = ws.unreadableAttachment() {   // a document that cannot be read: do not send, keep the text
+            ws.say("Can't read \(bad) — nothing was sent. Remove or fix the file and try again.", bad: true)
+            return
+        }
         store.send(draft)
         draft = ""
     }
