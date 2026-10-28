@@ -111,7 +111,7 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
     """Write the file; returns {tensor name: the float32 values the file actually represents}."""
     rng = np.random.default_rng(seed)
     tokens, types, merges = vocab()
-    gemma = arch == "gemma3"
+    gemma = arch in ("gemma2", "gemma3")
     layers = GEMMA_LAYERS if gemma else LAYERS
     if gemma:
         tokens, types, scores = spm_vocab()
@@ -132,8 +132,12 @@ def write(path, seed=0, quant="F16", arch="llama", extra_meta=None, tensor_type_
         meta.update({
             "tokenizer.ggml.model": "llama", "tokenizer.ggml.scores": scores, "tokenizer.ggml.add_space_prefix": False,
             "tokenizer.ggml.bos_token_id": 2, "tokenizer.ggml.eos_token_id": 1, "tokenizer.ggml.unknown_token_id": 3,
-            "tokenizer.chat_template": GEMMA_TEMPLATE, "gemma3.attention.sliding_window": GEMMA_WINDOW,
-            "gemma3.attention.key_length": HEAD_DIM, "gemma3.rope.freq_base": GEMMA_GLOBAL_BASE})
+            "tokenizer.chat_template": GEMMA_TEMPLATE, f"{arch}.attention.sliding_window": GEMMA_WINDOW,
+            f"{arch}.attention.key_length": HEAD_DIM})
+        if arch == "gemma3":
+            meta[f"{arch}.rope.freq_base"] = GEMMA_GLOBAL_BASE
+        else:                                                   # gemma2: one rope base, soft-capped scores and logits
+            meta.update({f"{arch}.attn_logit_softcapping": 50.0, f"{arch}.final_logit_softcapping": 30.0})
         for k in ("tokenizer.ggml.pre", "tokenizer.ggml.merges"):
             meta.pop(k, None)
     if moe:
@@ -233,7 +237,8 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
     qwen3 layout plus an embedding scaled by sqrt(hidden), norms after attention and feed-forward, GeGLU
     (tanh), tied output, sliding-window attention in layers 0-4 of every six (own rope base, no scaling) and
     full attention with the global base (positions scaled by `rope_scale`) in the sixth."""
-    gemma = arch == "gemma3"
+    gemma = arch in ("gemma2", "gemma3")
+    gemma2 = arch == "gemma2"
     n_layers = GEMMA_LAYERS if gemma else LAYERS
 
     def rms(x, w):
@@ -268,7 +273,7 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
     att_scale = GRANITE_SCALES["attention.scale"] if arch in ("granite", "granitemoe") else 1.0 / np.sqrt(HEAD_DIM)
     for i in range(n_layers):
         p = f"blk.{i}."
-        local = gemma and i % 6 != 5
+        local = gemma and (i % 2 == 0 if gemma2 else i % 6 != 5)      # gemma2: every other layer; gemma3: 5 of 6
         h = rms(x, values[p + "attn_norm.weight"])
         q = h @ values[p + "attn_q.weight"].T
         k = h @ values[p + "attn_k.weight"].T
@@ -280,7 +285,9 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
         v = v.reshape(T, KV_HEADS, HEAD_DIM)
         if arch in ("qwen3", "gemma3", "qwen3moe"):
             q, k = rms(q, values[p + "attn_q_norm.weight"]), rms(k, values[p + "attn_k_norm.weight"])
-        if gemma:
+        if gemma2:                                         # one rope base for every layer
+            q, k = rope(q, pos), rope(k, pos)
+        elif gemma:
             base, scale = (ROPE_BASE, 1.0) if local else (GEMMA_GLOBAL_BASE, rope_scale)
             q, k = rope(q, pos, base, scale), rope(k, pos, base, scale)
         else:
@@ -288,6 +295,8 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
         rep = HEADS // KV_HEADS
         k, v = np.repeat(k, rep, axis=1), np.repeat(v, rep, axis=1)
         att = np.einsum("thd,shd->hts", q, k) * att_scale
+        if gemma2:                                         # tanh soft-cap on the scores, before masking
+            att = np.tanh(att / 50.0) * 50.0
         att = att + np.triu(np.full((T, T), -np.inf), 1)[None]
         if local:                                          # only the last GEMMA_WINDOW positions (itself included)
             att = att + np.tril(np.full((T, T), -np.inf), -GEMMA_WINDOW)[None]
@@ -320,4 +329,6 @@ def reference_logits(values, ids, arch="llama", rope_scale=1.0, moe=False, norm_
         x = x + d * res
     head = values["token_embd.weight"] if gemma else values["output.weight"]
     out = rms(x, values["output_norm.weight"]) @ head.T
+    if gemma2:                                             # tanh soft-cap on the output logits
+        out = np.tanh(out / 30.0) * 30.0
     return out / GRANITE_SCALES["logit_scale"] if granite else out

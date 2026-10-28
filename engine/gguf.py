@@ -161,7 +161,7 @@ def has_array(path, key):
 # ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0
 # Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_NL IQ4_XS
 NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 30}
-NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma3", "granite", "granitemoe", "qwen3moe", "minicpm")
+NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma2", "gemma3", "granite", "granitemoe", "qwen3moe", "minicpm")
 # pre-tokenizer rules verified against llama.cpp (engine/gguf_tokenizer.py keeps the expressions)
 NATIVE_PRE = ("default", "gpt2", "llama-bpe", "llama3", "smaug-bpe", "qwen2", "qwen35", "deepseek-r1-qwen",
               "smollm", "refact")
@@ -229,7 +229,7 @@ def native_support(path):
                 return False, "longrope scaling without its short factors"
             if orig and orig < meta.get(f"{arch}.context_length", orig):
                 return False, "longrope scaling with a longer context than the original"
-        if meta.get(f"{arch}.attention.sliding_window") and arch != "gemma3":
+        if meta.get(f"{arch}.attention.sliding_window") and arch not in ("gemma2", "gemma3"):
             return False, "sliding-window attention"
         if scaling == "llama3" and "rope_freqs.weight" not in tensor_names(path):
             return False, "llama3 rope scaling without its frequency table"

@@ -40,6 +40,8 @@ class Config:
     embed_scale: float = 1.0             # granite / minicpm / gemma style multipliers
     logit_scale: float = 1.0
     residual_scale: float = 1.0
+    attn_softcap: float = 0.0            # Gemma 2: tanh soft-cap on the attention scores (0 = none)
+    final_softcap: float = 0.0          # Gemma 2: tanh soft-cap on the output logits (0 = none)
     gelu: bool = False                   # GeGLU (tanh approximation) instead of SwiGLU
     sandwich: bool = False               # extra norms on the attention and feed-forward outputs (Gemma 2/3)
     window: int = 0                      # sliding-window size of the local layers, 0 = none
@@ -56,7 +58,7 @@ class Config:
 
 
 # ggml's rope type per architecture (llama.cpp: llama_model_rope_type)
-ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma3": False,
+ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma2": False, "gemma3": False,
                     "granite": True, "granitemoe": True, "qwen3moe": False, "minicpm": True}
 SUPPORTED = tuple(ROPE_TRADITIONAL)
 
@@ -165,6 +167,21 @@ def _rms(x, w, eps):
 
 def _gelu_tanh(x):
     return 0.5 * x * (1.0 + mx.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
+
+
+def _softcap_attention(q, k, v, scale, mask, cap):
+    """Attention with Gemma 2's tanh soft-cap on the scores — mx.fast SDPA has no cap hook, so the scores are
+    formed by hand (float32), capped, masked and soft-maxed. q [B,H,L,D], k/v [B,Hkv,S,D] (GQA repeated)."""
+    H, Hkv = q.shape[1], k.shape[1]
+    if H != Hkv:
+        rep = H // Hkv
+        k, v = mx.repeat(k, rep, axis=1), mx.repeat(v, rep, axis=1)
+    scores = (q.astype(mx.float32) @ k.astype(mx.float32).swapaxes(-1, -2)) * scale
+    scores = mx.tanh(scores / cap) * cap
+    if mask is not None:
+        scores = scores + mask.astype(mx.float32)
+    w = mx.softmax(scores, axis=-1)
+    return (w @ v.astype(mx.float32)).astype(mx.float16)
 
 
 class Layer:
@@ -313,7 +330,10 @@ class DenseModel:
                 m = w_mask
                 if w_start:
                     k, v = k[..., w_start:, :], v[..., w_start:, :]
-            a = mx.fast.scaled_dot_product_attention(q.astype(F16), k, v, scale=scale, mask=m).astype(M)
+            if c.attn_softcap:                           # Gemma 2: scores are tanh-capped, so attention is by hand
+                a = _softcap_attention(q, k, v, scale, m, c.attn_softcap).astype(M)
+            else:
+                a = mx.fast.scaled_dot_product_attention(q.astype(F16), k, v, scale=scale, mask=m).astype(M)
             o = layer.o(a.transpose(0, 2, 1, 3).reshape(B, L, -1)).astype(R)
             if layer.post_attn_norm is not None:
                 o = _rms(o, layer.post_attn_norm, c.eps)
@@ -331,6 +351,8 @@ class DenseModel:
             x = x + st(d) * c.residual_scale
         x = _rms(x, self.norm, c.eps).astype(M)
         logits = self.head(x)
+        if c.final_softcap:                              # Gemma 2: tanh soft-cap on the output logits
+            logits = mx.tanh(logits / c.final_softcap) * c.final_softcap
         return logits * (1.0 / c.logit_scale) if c.logit_scale != 1.0 else logits
 
 
@@ -391,7 +413,7 @@ def build(path, log=print):
             raise Unsupported("longrope scaling with a longer context than the original")
     if scaling == "llama3" and "rope_freqs.weight" not in gf.tensors:
         raise Unsupported("llama3 rope scaling without its frequency table")
-    if g("attention.sliding_window") and arch != "gemma3":
+    if g("attention.sliding_window") and arch not in ("gemma2", "gemma3"):
         raise Unsupported("sliding-window attention")
     names = gf.tensors
     n_expert = int(g("expert_count", 0) or 0)
@@ -432,6 +454,16 @@ def build(path, log=print):
             cfg.rope_scale = 1.0 / float(g("rope.scaling.factor", 1.0))
         # llama.cpp: the 27B scales queries by 1/sqrt(n_embd / n_head), the others by 1/sqrt(head_dim)
         cfg.attn_scale = (n_embd / n_head) ** -0.5 if n_layer == 62 else 0.0
+    if arch == "gemma2":
+        cfg.gelu = cfg.sandwich = True
+        cfg.embed_scale = n_embd ** 0.5
+        # local sliding-window attention on every other layer (even layers local), one rope base for all
+        cfg.window, cfg.window_pattern = int(g("attention.sliding_window", 0)), 2
+        cfg.attn_softcap = float(g("attn_logit_softcapping", 0.0) or 0.0)
+        cfg.final_softcap = float(g("final_logit_softcapping", 0.0) or 0.0)
+        qps = g("attention.query_pre_attn_scalar")       # 2B/9B: == head_dim (same as the default); 27B differs
+        if qps:
+            cfg.attn_scale = float(qps) ** -0.5
     if "rope_freqs.weight" in names:
         cfg.rope_freqs = T.load_dense(gf, names["rope_freqs.weight"])
     elif longrope:

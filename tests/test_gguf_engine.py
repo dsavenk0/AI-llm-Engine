@@ -137,6 +137,42 @@ class TestDecoder(Base):
         self.assertGreater(float(np.abs(on - base).max()), 1e-2)
 
 
+class TestGemma2(Base):
+    """Gemma 2: sliding window on every other layer, tanh soft-cap on the attention scores and the output
+    logits, norms after attention and feed-forward, GeGLU, tied output, one rope base — against an independent
+    numpy forward that applies the same caps."""
+    IDS = [5, 40, 7, 250, 12, 99, 3, 260, 14, 15, 60, 61, 62, 33, 34, 35, 70, 71]
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.path = os.path.join(cls.dir, "gemma2.gguf")
+        cls.values = S.write(cls.path, seed=4, quant="F16", arch="gemma2")
+
+    def test_softcaps_and_window_match_the_reference(self):
+        import mlx.core as mx
+        from engine import dense
+        model, cfg, _ = dense.build(self.path)
+        self.assertEqual((cfg.window_pattern, cfg.attn_softcap, cfg.final_softcap, cfg.gelu, cfg.sandwich),
+                         (2, 50.0, 30.0, True, True))
+        got = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+        want = S.reference_logits(self.values, self.IDS, arch="gemma2")
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0)
+        self.assertTrue((got.argmax(-1) == want.argmax(-1)).mean() > 0.85)
+        # the final soft-cap actually binds: tanh(x/30)*30 can never leave (-30, 30)
+        self.assertLess(float(np.abs(got).max()), 30.0)
+
+    def test_softcap_is_not_shared_code_turning_it_off_changes_the_logits(self):
+        import mlx.core as mx
+        from engine import dense
+        model, _, _ = dense.build(self.path)
+        got = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+        model.cfg.attn_softcap = 0.0
+        model.cfg.final_softcap = 0.0
+        off = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+        self.assertGreater(float(np.abs(off - got).max()), 0.05)
+
+
 class TestGemma3(Base):
     """Gemma 3: sliding-window layers (5 of every 6) with their own rope base, norms after attention and
     feed-forward, GeGLU, tied output, SentencePiece vocabulary — against an independent numpy forward pass."""
