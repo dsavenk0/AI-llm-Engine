@@ -78,6 +78,9 @@
 
       integ_head: "Seamless OpenAI API Compatibility",
       integ_sub_desc: "AI-llm-Engine serves on http://127.0.0.1:8000/v1. Drop-in ready for Continue, Kilo Code, OpenCode, Claude Code, and Cursor with automatic max_tokens clamping.",
+      integ_ollama_title: "Ollama API (no adapter)",
+      integ_ollama_tag: "Same port",
+      integ_ollama_note: "Point any Ollama client at the same server:",
       copy_config: "Copy Configuration",
       copy_url: "Copy Base URL",
 
@@ -266,6 +269,9 @@
 
       integ_head: "Совместимость с OpenAI API",
       integ_sub_desc: "AI-llm-Engine работает на http://127.0.0.1:8000/v1. Готов к работе с Continue, Kilo Code, OpenCode, Claude Code и Cursor с автоматической защитой от переполнения токенов.",
+      integ_ollama_title: "API Ollama (без адаптера)",
+      integ_ollama_tag: "Тот же порт",
+      integ_ollama_note: "Наведите любой клиент Ollama на тот же сервер:",
       copy_config: "Скопировать конфиг",
       copy_url: "Скопировать URL сервера",
 

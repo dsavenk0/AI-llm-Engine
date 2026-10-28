@@ -516,6 +516,20 @@ Streaming: Enabled</code></pre>
                         <span data-i18n="copy_url">Copy Base URL</span>
                       </button>
                     </div>
+
+                    <div class="integ-box">
+                      <div class="integ-box-header">
+                        <span class="integ-app-title" data-i18n="integ_ollama_title">Ollama API (no adapter)</span>
+                        <span class="apple-tag tag-blue" data-i18n="integ_ollama_tag">Same port</span>
+                      </div>
+                      <p class="integ-box-note" data-i18n="integ_ollama_note">Point any Ollama client at the same server:</p>
+                      <pre class="integ-code"><code>POST /api/chat      POST /api/generate
+GET  /api/tags      POST /api/show
+GET  /api/ps        GET  /api/version</code></pre>
+                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet="http://127.0.0.1:8000">
+                        <span data-i18n="copy_url">Copy Base URL</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

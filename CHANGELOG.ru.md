@@ -14,6 +14,9 @@ English version: [CHANGELOG.md](CHANGELOG.md).
   стороны шара, пока модель включена; точка состояния — закрашенный круг, когда модель включена, и пустое кольцо, когда нет.
 
 ### Добавлено
+- **API Ollama на том же порту**: `POST /api/chat` и `/api/generate` (потоковый NDJSON или один объект; `options`,
+  `tools`, `images`, `think` транслируются), `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` —
+  клиенту Ollama адаптер не нужен. Один путь генерации питает оба формата: OpenAI и Ollama.
 - **GGUF-декодер — Gemma 2**: свой MLX-декодер теперь запускает Gemma 2 (tanh soft-cap по attention-скорам и
   выходным логитам, скользящее окно на каждом 2-м слое, sandwich-нормы, GeGLU, tied output), сверено с независимым
   numpy-форвардом с теми же cap.

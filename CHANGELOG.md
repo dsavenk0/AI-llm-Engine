@@ -14,6 +14,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Ollama API on the same port**: `POST /api/chat` and `/api/generate` (NDJSON streaming or one object; `options`,
+  `tools`, `images`, `think` translated), `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` — an
+  Ollama-speaking client needs no adapter. One generation path feeds both the OpenAI and the Ollama wire formats.
 - **GGUF decoder — Gemma 2**: the own MLX decoder now runs Gemma 2 (tanh soft-cap on the attention scores and the
   output logits, sliding window on every other layer, sandwich norms, GeGLU, tied output), checked against an
   independent numpy forward with the same caps.

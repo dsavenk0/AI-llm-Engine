@@ -252,6 +252,11 @@ OpenAI-compatible on `http://localhost:8090/v1`:
 - The memory breakdown is also printed by `./llm status`. The engine's own footprint is measured like Activity
   Monitor does (`phys_footprint`, which includes Metal memory that RSS misses).
 
+The **Ollama API** is served from the same port, so a tool that speaks to Ollama needs no adapter — point it at
+`http://localhost:8090`: `POST /api/chat` and `POST /api/generate` (streaming NDJSON or one object; `options`,
+`tools`, `images` and `think` are translated), and `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version`.
+It is the same loaded model and the same generation path as the OpenAI route.
+
 Any `model` name is accepted, since the server hosts exactly one model.
 
 `POST /v1/chat/completions` also takes `repetition_penalty` (1.0 = off; 1.05–1.2 divides the score of tokens
