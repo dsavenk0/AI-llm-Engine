@@ -21,15 +21,44 @@ Built and tuned for a **MacBook Air M5, 16 GB** running
 
 ## Why
 
-| Same Mac, same prompts, alternating runs | vMLX 1.6.75 | **llm-engine** |
-|---|---|---|
-| Decode speed (256 tokens) | 6.80 – 6.94 tok/s | **7.61 – 9.53 tok/s** (+12 – 37 %) |
-| Code edits (prompt-lookup speculation) | — | **27 – 35 tok/s** (×2.5 vs plain decode) |
-| Prefill speed (2.3K-token prompt) | 73.5 – 88.1 tok/s | **86.7 – 119.5 tok/s** (+18 – 36 %) |
-| Cold start to first request | 19 s | **4 s** |
-| Process memory on top of the weights | 1.26 GB | **0.66 GB** |
-| Install size | 1.9 GB app | **310 MB** venv |
-| `max_tokens` above the safe limit | HTTP 413 error | clamped, request succeeds |
+### Measured, with the conditions
+
+Apple M5, 16 GB, macOS 26.4.1, MLX 0.32.3. Reproduce with `./llm perf --model <path>` (best of several runs
+after a warm-up, on power, idle machine). The hardware ceilings below are what *any* engine on this Mac can
+reach, so every tok/s figure can be sanity-checked against them.
+
+| This Mac's ceiling | |
+|---|---|
+| fp16 matmul, 4096² (prefill is compute-bound) | **12.3 TFLOP/s** |
+| Memory read bandwidth (decode is bandwidth-bound) | **~130 GB/s** |
+
+| MLX model, 4-bit unless noted | Weights | Decode (prose) | Prefill 128 / 1K / 4K | Code edits (speculation) | Load / peak |
+|---|---|---|---|---|---|
+| Qwen3.5-0.8B (8-bit) | 0.93 GB | **114.9 tok/s** | 2032 / 3185 / 3184 tok/s | **510 tok/s** (0.87 accepted) | 0.60 s / 1.11 GB |
+| Qwen3.5-2B | 1.60 GB | **78.8 tok/s** | 1211 / 1638 / 1713 tok/s | **371 tok/s** (1.00 accepted) | 0.47 s / 1.41 GB |
+| Qwen3.5-4B | 2.83 GB | **35.4 tok/s** | 552 / 687 / 724 tok/s | **156 tok/s** (0.90 accepted) | 0.78 s / 3.04 GB |
+
+Against the ~130 GB/s ceiling (reading every weight once per token) that is **82 %, 97 % and 77 %** of what the
+memory bus allows — a decode-bound engine running close to the hardware limit, so the headroom that is left is
+bandwidth, not Python. Prompt-lookup speculation gives **×4.4 – ×4.7** over plain decode on code edits.
+
+<sub>Conditions: best of several runs after a warm-up; prefill prompts are built to exactly 128 / 1024 / 4096
+tokens for *each* model's own tokenizer; prose decode is 200 tokens; the code-edit case rewrites a real source
+file. The ceiling column is an upper bound — it assumes every byte of weights is streamed each token, while the
+embedding table is gathered, not streamed, so the true efficiency is somewhat below these percentages. These runs
+were taken with 68–70 % of system RAM already in use (the harness warns above 45 %), so they are conservative
+rather than best-case.</sub>
+
+| Also true, and easy to check | |
+|---|---|
+| `max_tokens` above the safe limit | clamped, the request succeeds (vMLX returns HTTP 413) |
+| Install size | **310 MB** venv (vMLX ships a 1.9 GB app) |
+
+<sub>An earlier run (October 2026) compared this engine with vMLX 1.6.75 on the 27B model — same Mac, same
+prompts, alternating runs — and measured decode 7.61–9.53 vs 6.80–6.94 tok/s, prefill 86.7–119.5 vs 73.5–88.1
+tok/s, cold start 4 s vs 19 s, and 0.66 vs 1.26 GB of process memory on top of the weights. Those figures are
+**not re-verified in the current numbers above**: the 27B needs ~9.8 GB peak and the measurement wants an idle
+machine. Treat them as a dated earlier measurement, not as a like-for-like comparison with the table above.</sub>
 
 The 413 error is what broke Kilo Code with vMLX. Kilo asks for 32,000 output tokens, and vMLX rejects anything above
 its Metal headroom estimate (~8.5K on 16 GB).

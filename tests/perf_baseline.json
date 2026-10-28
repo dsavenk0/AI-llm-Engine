@@ -1,15 +1,46 @@
 {
   "machine": "arm64",
   "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
-  "date": "2026-10-09",
-  "metrics": {
-    "load_s": 2.36,
-    "decode_step_ms": 67.0,
-    "verify16_cost": 5.2,
-    "prefill_tps": 167.7,
-    "prose_tps": 13.32,
-    "code_edit_tps": 28.59,
-    "code_edit_accept": 1.0,
-    "peak_gb": 9.81
+  "date": "2026-10-28",
+  "models": {
+    "Qwen3.5-0.8B-8bit": {
+      "load_s": 0.51,
+      "decode_step_ms": 9.8,
+      "verify16_cost": 2.1,
+      "prefill_tps_short": 2031.5,
+      "prefill_tps_medium": 3185.2,
+      "prefill_tps_long": 3183.8,
+      "prose_tps": 114.95,
+      "code_edit_tps": 510.17,
+      "code_edit_accept": 0.87,
+      "peak_gb": 1.11,
+      "sys_ram_peak": 0.705
+    },
+    "Qwen3.5-2B-MLX-4bit": {
+      "load_s": 0.47,
+      "decode_step_ms": 14.2,
+      "verify16_cost": 2.56,
+      "prefill_tps_short": 1211.0,
+      "prefill_tps_medium": 1638.2,
+      "prefill_tps_long": 1712.9,
+      "prose_tps": 78.77,
+      "code_edit_tps": 370.7,
+      "code_edit_accept": 1.0,
+      "peak_gb": 1.41,
+      "sys_ram_peak": 0.724
+    },
+    "Qwen3.5-4B-MLX-4bit": {
+      "load_s": 0.78,
+      "decode_step_ms": 31.2,
+      "verify16_cost": 2.34,
+      "prefill_tps_short": 552.0,
+      "prefill_tps_medium": 686.5,
+      "prefill_tps_long": 723.7,
+      "prose_tps": 35.35,
+      "code_edit_tps": 155.62,
+      "code_edit_accept": 0.9,
+      "peak_gb": 3.04,
+      "sys_ram_peak": 0.786
+    }
   }
 }
