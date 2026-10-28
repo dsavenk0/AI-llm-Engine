@@ -14,6 +14,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm start|stop|restart|status|chat|bench|logs|free
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
   ./llm conduct ["<task>"]   optional orchestrator: split a task across models by role (set: conduct set …)
+  ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
   ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
@@ -2465,6 +2466,23 @@ def conduct_cmd(cfg, args):
     return True
 
 
+def convert_cmd(cfg, args):
+    """`./llm convert <model.gguf> [out_dir]` — export a GGUF as an MLX folder (config.json, f16 safetensors,
+    tokenizer.json), so a converted model opens with mlx-lm without the GGUF around."""
+    args = [a for a in args if a and not a.startswith("-")]
+    if not args:
+        print("usage: ./llm convert <model.gguf> [out_dir]")
+        return False
+    src = args[0]
+    if not os.path.isfile(src) or not src.lower().endswith(".gguf"):
+        print(R(f"not a .gguf file: {src}"))
+        return False
+    if not env_ready() and not setup():
+        return False
+    out = args[1] if len(args) > 1 else os.path.splitext(src)[0] + "-mlx"
+    return subprocess.run([VENV_PY, "-m", "engine.convert", src, out], cwd=BASE).returncode == 0
+
+
 def main():
     cmd, arg = (sys.argv[1:] + ["", ""])[:2]
     cfg, tty = load_cfg(), sys.stdin.isatty()
@@ -2492,6 +2510,7 @@ def main():
         "calibrate": lambda: run_calibrate(sys.argv[2:]),
         "agent": lambda: __import__("agent").main(sys.argv[2:]),
         "conduct": lambda: conduct_cmd(cfg, sys.argv[2:]),
+        "convert": lambda: convert_cmd(cfg, sys.argv[2:]),
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
