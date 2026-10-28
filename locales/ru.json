@@ -307,5 +307,9 @@
   "OCR helper source not found:": "Исходник OCR-хелпера не найден:",
   "swiftc is not available (install the Xcode command-line tools).": "swiftc недоступен (установите Xcode command-line tools).",
   "Compiling the OCR helper (Apple Vision)…": "Компиляция OCR-хелпера (Apple Vision)…",
-  "OCR ready:": "OCR готов:"
+  "OCR ready:": "OCR готов:",
+  "stopped — the model was repeating itself": "остановлено — модель зациклилась",
+  "Type /retry to try again.": "Введите /retry, чтобы повторить.",
+  "Nothing to retry.": "Нечего повторять.",
+  "the attached files": "прикреплённые файлы"
 }

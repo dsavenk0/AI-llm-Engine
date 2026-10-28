@@ -383,6 +383,13 @@ class TestUpdate(unittest.TestCase):
         self.assertIn("9.9", out)
 
 
+class TestReplyNote(unittest.TestCase):
+    def test_repetition_is_explained(self):
+        self.assertIn("repeat", llm.reply_note("repetition").lower())
+        self.assertEqual(llm.reply_note(None), "")
+        self.assertEqual(llm.reply_note("stop"), "")
+
+
 class TestReadDocument(unittest.TestCase):
     def capture(self, fn, *a):
         import contextlib

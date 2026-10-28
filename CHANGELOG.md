@@ -14,6 +14,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **CLI chat: a clear reason and retry**: when the engine cuts off a looping answer (`stop_reason` `repetition`),
+  the chat now says so and suggests `/retry`; `/retry` re-sends the last question (dropping the previous answer),
+  handy after an interrupted or repeating reply.
 - **Voice barge-in**: in dialog mode, speaking while the reply is being read aloud stops it and listens, then
   answers the follow-up (ChatGPT-style). A barge-in listener runs during the reply with acoustic echo cancellation
   (`setVoiceProcessingEnabled`) so the mic ignores the assistant's own voice, and only a real couple-of-words

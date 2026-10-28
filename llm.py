@@ -1739,6 +1739,13 @@ def free_memory(interactive=True, quiet=False):
 
 
 # ─────────────────────────── chat / bench ───────────────────────────
+def reply_note(stop_reason):
+    """A short, user-facing note on why a reply ended, when it was not a clean stop (empty otherwise)."""
+    if stop_reason == "repetition":
+        return T("stopped — the model was repeating itself")
+    return ""
+
+
 def chat(cfg, system="", params=None):
     m = current_model(cfg)
     if not m or not health(cfg):
@@ -1762,7 +1769,7 @@ def chat(cfg, system="", params=None):
 
     print(B(T("Chat with {name}.").format(name=m["name"])) +
           DIM(" /think on|off  /effort <lvl>  /show  /system <text>  /image <path> <question>"))
-    print(DIM("  /clear  /save  /exit   " + T("multi-line input:") + ' """ … """'))
+    print(DIM("  /clear  /save  /retry  /exit   " + T("multi-line input:") + ' """ … """'))
     print(DIM("  /history  /open <N>  /rename <N> <title>  /delete <N>  /new   " +
               T("(shared with the code editor)")))
     while True:
@@ -1823,21 +1830,31 @@ def chat(cfg, system="", params=None):
             with open(fn, "w") as f:
                 for x in msgs: f.write(f"## {x['role']}\n\n{x['content'] if isinstance(x['content'], str) else '[image]'}\n\n")
             print(DIM(T("Saved:") + f" {fn}")); continue
-        content, question, attached = s, s, []
-        if s.startswith("/image "):
-            _, path, *q = s.split(" ", 2)
-            path = os.path.expanduser(path)
-            if not os.path.exists(path): print(R(T("File not found"))); continue
-            question, attached = (q[0] if q else T("Describe the image.")), [os.path.abspath(path)]
-            content = [{"type": "image_url", "image_url": {"url": attached[0]}},
-                       {"type": "text", "text": question}]
-        msgs.append({"role": "user", "content": content})
+        resend = s == "/retry"
+        if resend:                                   # re-send the last question (after an interrupted/looping answer)
+            if msgs and msgs[-1]["role"] == "assistant":
+                msgs.pop()
+            if not (msgs and msgs[-1]["role"] == "user"):
+                print(DIM(T("Nothing to retry."))); continue
+            last = msgs[-1]["content"]
+            question, attached = (last if isinstance(last, str) else T("the attached files")), []
+        else:
+            content, question, attached = s, s, []
+            if s.startswith("/image "):
+                _, path, *q = s.split(" ", 2)
+                path = os.path.expanduser(path)
+                if not os.path.exists(path): print(R(T("File not found"))); continue
+                question, attached = (q[0] if q else T("Describe the image.")), [os.path.abspath(path)]
+                content = [{"type": "image_url", "image_url": {"url": attached[0]}},
+                           {"type": "text", "text": question}]
+            msgs.append({"role": "user", "content": content})
         payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
                    "messages": ([{"role": "system", "content": system}] if system else []) + msgs,
                    "chat_template_kwargs": {"enable_thinking": think, **({"reasoning_effort": effort} if effort else {})},
                    **params}
         req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
         answer, reasoning, in_think, t0, first, usage = [], [], False, time.time(), None, None
+        stop_reason = None
         try:
             with urllib.request.urlopen(req, timeout=3600) as r:
                 for raw in r:
@@ -1847,6 +1864,7 @@ def chat(cfg, system="", params=None):
                     usage = ev.get("usage") or usage
                     if ev.get("error"): print(R(ev["error"].get("message"))); break
                     for ch in ev.get("choices", []):
+                        stop_reason = ch.get("stop_reason") or stop_reason
                         d = ch.get("delta", {})
                         if d.get("reasoning_content"):
                             first = first or time.time()
@@ -1864,6 +1882,9 @@ def chat(cfg, system="", params=None):
         except Exception as e:
             print(R("\n" + T("Error:") + f" {e}")); msgs.pop(); continue
         print()
+        note = reply_note(stop_reason)
+        if note:
+            print(Y("[" + note + "]  " + T("Type /retry to try again.")))
         if usage:
             dt = time.time() - (first or t0)
             ct = usage.get("completion_tokens", 0)
@@ -1871,7 +1892,7 @@ def chat(cfg, system="", params=None):
             print(DIM(T("— {inp} in ({cached} cached) / {out} out · {tps:.1f} tok/s · first token {ttft:.1f} s").format(
                 inp=usage.get("prompt_tokens"), cached=cached, out=ct, tps=ct / dt if dt > 0 else 0, ttft=(first or t0) - t0)))
         msgs.append({"role": "assistant", "content": "".join(answer), "reasoning_content": "".join(reasoning)})
-        if answer: remember(question, attached, "".join(answer), "".join(reasoning))
+        if answer and not resend: remember(question, attached, "".join(answer), "".join(reasoning))
 
 
 def bench(cfg):
