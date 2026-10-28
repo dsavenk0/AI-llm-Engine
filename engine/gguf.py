@@ -241,6 +241,16 @@ def native_support(path):
     return True, ""
 
 
+GGML_TYPE_COUNT = 43    # upstream ggml types are [0, 43); anything at or above is a vendor extension
+
+
+def vendor_types(path):
+    """ggml tensor types outside upstream's range — a vendor extension (Prism's ternary PTQ1_0 is type 143).
+    Neither this engine's own decoder nor stock llama.cpp can read them: llama.cpp refuses with
+    "invalid ggml type N, should be in [0, 43)". Empty set when the file uses only standard types."""
+    return {t for t in tensor_types(path) if t >= GGML_TYPE_COUNT}
+
+
 def guess_quant(filename):
     m = re.search(r"(IQ\d_[A-Z]+|Q\d_K(?:_[SML])?|Q\d_\d|BF16|F16|F32|Q8_0)", filename, re.I)
     return m.group(1).upper() if m else "?"

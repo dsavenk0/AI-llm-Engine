@@ -52,6 +52,7 @@ import platform
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -368,11 +369,21 @@ def inspect_gguf(path, name=None):
     base = name or h["name"] or os.path.splitext(os.path.basename(path))[0]
     if h["quant"] and h["quant"].lower() not in base.lower():
         base = f"{base} {h['quant']}"
+    # A vendor ggml type (e.g. Prism's ternary PTQ1_0 = 143) is read by neither our decoder nor stock
+    # llama.cpp, so the file must not be offered as runnable — it used to fail only when the engine started.
+    problems = []
+    try:
+        vendor = gguf.vendor_types(path)
+    except (OSError, gguf.GGUFError, struct.error):
+        vendor = set()
+    if vendor:
+        problems.append(T("vendor quantization (ggml type {t}); needs that vendor's runtime").format(
+            t=", ".join(str(t) for t in sorted(vendor))))
     return {"path": path, "name": base, "size": size / 2**30, "format": f"GGUF {h['quant']}", "type": h["architecture"],
             "route": "gguf", "vision": bool(gguf.projector_for(path)),
             "thinking": "<think>" in tpl or "enable_thinking" in tpl,
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
-            "efforts": [], "hadamard": False, "supported": True, "problems": [],
+            "efforts": [], "hadamard": False, "supported": not problems, "problems": problems,
             "tool_calls": "<tool_call>" in tpl,
             "context_length": h.get("context_length")}
 

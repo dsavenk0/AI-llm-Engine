@@ -312,6 +312,7 @@
   "stopped — it was taking too long": "остановлено — слишком долго",
   "Work on the attached sources.": "Поработай с прикреплёнными источниками.",
   "needs the vendor runtime (newer pack schema)": "нужен рантайм вендора (новая схема упаковки)",
+  "vendor quantization (ggml type {t}); needs that vendor's runtime": "вендорское квантование (ggml-тип {t}); нужен рантайм вендора",
   "Type /retry to try again.": "Введите /retry, чтобы повторить.",
   "Nothing to retry.": "Нечего повторять.",
   "the attached files": "прикреплённые файлы",
