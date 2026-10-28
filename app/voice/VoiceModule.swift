@@ -270,6 +270,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// Listening starts at once — the microphone and the recogniser do not need the model — while the model is
     /// brought up beside it; the question waits for the model only when it has been asked.
     func begin() {
+        synth.stopSpeaking(at: .immediate); pendingUtterances = 0   // pressing to speak always silences the reply
         heard = ""
         Task { await startListening() }
         Task { await refreshModel() }                              // the model's name is on screen at once
