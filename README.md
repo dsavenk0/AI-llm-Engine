@@ -114,6 +114,8 @@ missing connection is named as such. For a Mac that will never see the internet,
 ./llm run qwen3.5 "two plus two?"              # already installed: one answer and exit
 ./llm show qwen3.5               # a quick card: format, route, size, context, capabilities
 ./llm ps                         # the model loaded right now
+./llm create coder --from qwen3.5 --system "You are a terse senior engineer." --param temperature=0.2
+./llm run coder                  # a named profile: its base model, system prompt and sampling
 ./llm use 2                      # switch the active model (restarts the engine if it runs)
 ./llm fav 2                      # star a model (again: unstar) — favourites lead every list and model menu; ./llm fav lists them
 ```

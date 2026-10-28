@@ -12,6 +12,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
   ./llm show [<#|name>]      a quick card: format, route, size, context, capabilities
   ./llm ps                   the model loaded right now
+  ./llm create <name> --from <model> [--system "…"] [--param k=v]   a named profile (run it with ./llm run <name>)
   ./llm use <#|name part>    select a model (restarts it if running)
   ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
@@ -93,6 +94,7 @@ DEFAULTS = {
     "ca_bundle": "",             # PEM file with extra root certificates (TLS-inspecting proxies)
     "favorites": [],             # model paths marked with a star: listed first, and the ones the apps offer to switch to
     "models": {},
+    "profiles": {},              # Ollama-style named presets: {name: {from, system, params}} — see ./llm create
 }
 LOG_LEVELS = ("error", "warning", "info", "debug", "trace")
 
@@ -533,41 +535,57 @@ def resolve_model(models, arg):
     return (hits[0] if len(hits) == 1 else None), hits
 
 
+def profile_params(params):
+    """Keep only the sampling keys the server honours from a profile's params (so a stray key can't break
+    a request). `max_tokens` is allowed through as well."""
+    allow = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty", "max_tokens", "seed")
+    return {k: v for k, v in (params or {}).items() if k in allow}
+
+
 def run_cmd(cfg, args):
-    """`./llm run <model|org/name> [prompt]` — Ollama-style: select the model (download it first if only an
-    org/name is given and it isn't installed), start the engine, then chat. A trailing prompt prints one
-    answer and exits; without it, drops into the interactive chat."""
+    """`./llm run <model|org/name|profile> [prompt]` — Ollama-style: select the model (download it first if
+    only an org/name is given and it isn't installed), start the engine, then chat. A named profile (see
+    `./llm create`) brings its base model, system prompt and sampling. A trailing prompt prints one answer."""
     args = [a for a in args if a and not a.startswith("--")]
     if not args:
-        print(T("Usage: ./llm run <model|org/name> [prompt]")); return False
+        print(T("Usage: ./llm run <model|org/name|profile> [prompt]")); return False
     name, prompt = args[0], " ".join(args[1:]).strip()
-    pick, hits = resolve_model(scan_models(cfg), name)
+    prof = cfg.get("profiles", {}).get(name)
+    target = prof["from"] if prof else name           # a profile runs on top of its base model
+    system = prof.get("system", "") if prof else ""
+    params = prof.get("params", {}) if prof else {}
+    pick, hits = resolve_model(scan_models(cfg), target)
     if not pick and len(hits) > 1:
         print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits))); return False
-    if not pick and "/" in name:                      # not installed, but looks like a hub id → download it
-        if not hf_pull(name, progress=True):
+    if not pick and "/" in target:                    # not installed, but looks like a hub id → download it
+        if not hf_pull(target, progress=True):
             return False
-        pick, _ = resolve_model(scan_models(cfg), name)
+        pick, _ = resolve_model(scan_models(cfg), target)
     if not pick:
         print(R(T("Model not found. Give an installed name/number, or an org/name to download."))); return False
     if pick["path"] != cfg.get("model") and not choose_model(cfg, pick["path"]):
         return False
     if not (read_pid(ENGINE_PID) and health(cfg)) and not start(cfg, sys.stdin.isatty()):
         print(R(T("The engine did not start."))); return False
+    if prof:
+        print(DIM(T("Profile {name}: {base}").format(name=name, base=pick["name"])
+                  + (" · system" if system else "") + (f" · {len(params)} params" if params else "")))
     if prompt:
-        return run_once(cfg, prompt)
-    chat(cfg)
+        return run_once(cfg, prompt, system=system, params=params)
+    chat(cfg, system=system, params=params)
     return True
 
 
-def run_once(cfg, prompt):
+def run_once(cfg, prompt, system="", params=None):
     """Send one prompt and stream the answer to stdout (for `llm run <model> <prompt>`)."""
     m = current_model(cfg)
     if not m or not health(cfg):
         print(R(T("The model is not running."))); return False
     payload = {"model": served_name(m), "stream": True,
-               "messages": [{"role": "user", "content": prompt}],
-               "chat_template_kwargs": {"enable_thinking": think_enabled(mcfg(cfg), m)}}
+               "messages": ([{"role": "system", "content": system}] if system else [])
+               + [{"role": "user", "content": prompt}],
+               "chat_template_kwargs": {"enable_thinking": think_enabled(mcfg(cfg), m)},
+               **profile_params(params)}
     req = urllib.request.Request(f"http://127.0.0.1:{cfg['port']}/v1/chat/completions",
                                  data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     try:
@@ -591,11 +609,77 @@ def run_once(cfg, prompt):
         print(R("\n" + T("Error:") + f" {e}")); return False
 
 
+def _coerce(v):
+    """A `--param` value as its natural JSON type: bool, int, float, else the string."""
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    return v
+
+
+def create_cmd(cfg, args):
+    """`./llm create <name> --from <model> [--system "..."] [--param key=value ...]` — a named profile
+    (Ollama-style): a base model plus a system prompt and sampling, run later with `./llm run <name>`.
+    `./llm create` lists profiles; `./llm create <name> --rm` deletes one."""
+    profiles = cfg.setdefault("profiles", {})
+    bare = [a for a in args if not a.startswith("--")]
+    if not args:
+        if not profiles:
+            print(DIM(T("No profiles yet. Make one: ./llm create <name> --from <model> --system \"...\"")))
+            return True
+        for n, p in profiles.items():
+            print(f"{B(n)}  ← {p['from']}" + (f"  · {len(p.get('params', {}))} params" if p.get("params") else ""))
+        return True
+    name = bare[0] if bare else ""
+    if not name:
+        print(T("Usage: ./llm create <name> --from <model> [--system \"…\"] [--param k=v]")); return False
+    if "--rm" in args:
+        if profiles.pop(name, None) is None:
+            print(R(T("Profile not found."))); return False
+        save_cfg(cfg); print(G(T("Deleted profile: {name}").format(name=name))); return True
+    base, system, params, i = "", "", {}, 1
+    while i < len(args):
+        a = args[i]
+        if a == "--from" and i + 1 < len(args):
+            base = args[i + 1]; i += 2
+        elif a == "--system" and i + 1 < len(args):
+            system = args[i + 1]; i += 2
+        elif a == "--param" and i + 1 < len(args):
+            k, _, v = args[i + 1].partition("=")
+            if k.strip():
+                params[k.strip()] = _coerce(v.strip())
+            i += 2
+        else:
+            i += 1
+    if not base:
+        print(R(T("Give a base model: ./llm create {name} --from <model>").format(name=name))); return False
+    profiles[name] = {"from": base, "system": system, "params": params}
+    save_cfg(cfg)
+    print(G(T("Created profile {name} ← {base}").format(name=name, base=base))
+          + (f"  · {len(params)} params" if params else ""))
+    return True
+
+
 def show_cmd(cfg, args):
-    """`./llm show [model] [--json]` — a quick card for a model (format, route, size, context when loaded,
-    thinking/vision/tools, and any reason the engine cannot run it). Defaults to the selected model."""
+    """`./llm show [model|profile] [--json]` — a quick card for a model (format, route, size, context when
+    loaded, thinking/vision/tools, and any reason the engine cannot run it) or a profile. Defaults to the
+    selected model."""
     as_json = "--json" in args
     key = next((a for a in args if not a.startswith("--")), "")
+    prof = cfg.get("profiles", {}).get(key)
+    if prof:
+        if as_json:
+            print(json.dumps({"profile": key, **prof}, ensure_ascii=False)); return True
+        print(B(key) + DIM(f"  ← {prof['from']}"))
+        if prof.get("system"):
+            print(DIM("  system: " + prof["system"][:200]))
+        if prof.get("params"):
+            print(DIM("  params: " + ", ".join(f"{k}={v}" for k, v in prof["params"].items())))
+        return True
     models = scan_models(cfg)
     if key:
         pick, hits = resolve_model(models, key)
@@ -895,6 +979,9 @@ def remove_cmd(cfg, args):
         arg = input(T("Model number to delete (Enter to cancel)") + " › ").strip()
         if not arg:
             return False
+    if arg in cfg.get("profiles", {}):                # a named profile is removed here too, not deleted from disk
+        cfg["profiles"].pop(arg); save_cfg(cfg)
+        print(G(T("Deleted profile: {name}").format(name=arg))); return True
     if arg.isdigit() and 1 <= int(arg) <= len(models):
         hits = [models[int(arg) - 1]]
     else:
@@ -1555,14 +1642,15 @@ def free_memory(interactive=True, quiet=False):
 
 
 # ─────────────────────────── chat / bench ───────────────────────────
-def chat(cfg):
+def chat(cfg, system="", params=None):
     m = current_model(cfg)
     if not m or not health(cfg):
         print(R(T("The model is not running."))); return
     mc = mcfg(cfg)
     url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
     think, effort, show = think_enabled(mc, m), mc["effort"], True
-    msgs, system = [], ""
+    params = profile_params(params)                 # a named profile may pre-set the system prompt + sampling
+    msgs = []
     # the history is the code editor's: the same file per project, so a chat continues in either place
     from harness import chats as store
     root = os.getcwd()
@@ -1649,7 +1737,8 @@ def chat(cfg):
         msgs.append({"role": "user", "content": content})
         payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
                    "messages": ([{"role": "system", "content": system}] if system else []) + msgs,
-                   "chat_template_kwargs": {"enable_thinking": think, **({"reasoning_effort": effort} if effort else {})}}
+                   "chat_template_kwargs": {"enable_thinking": think, **({"reasoning_effort": effort} if effort else {})},
+                   **params}
         req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
         answer, reasoning, in_think, t0, first, usage = [], [], False, time.time(), None, None
         try:
@@ -2624,6 +2713,7 @@ def main():
         "run": lambda: run_cmd(cfg, sys.argv[2:]),
         "show": lambda: show_cmd(cfg, sys.argv[2:]),
         "ps": lambda: ps_cmd(cfg, sys.argv[2:]),
+        "create": lambda: create_cmd(cfg, sys.argv[2:]),
         "fav": lambda: fav_cmd(cfg, sys.argv[2:]),
         "chat": lambda: chat(cfg), "bench": lambda: bench(cfg), "logs": logs,
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,

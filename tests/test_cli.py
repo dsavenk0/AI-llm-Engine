@@ -417,6 +417,60 @@ class TestOllamaStyleCommands(unittest.TestCase):
         rv, out = self.capture(llm.run_cmd, self.cfg, ["does-not-exist"])
         self.assertFalse(rv)
 
+    # ── create / profiles ──
+    def test_coerce_types(self):
+        self.assertEqual(llm._coerce("true"), True)
+        self.assertEqual(llm._coerce("0.2"), 0.2)
+        self.assertEqual(llm._coerce("8"), 8)
+        self.assertEqual(llm._coerce("hello"), "hello")
+
+    def test_create_builds_a_profile(self):
+        from unittest import mock
+        with mock.patch.object(llm, "save_cfg", lambda c: None):
+            rv, out = self.capture(llm.create_cmd, self.cfg,
+                                   ["coder", "--from", "qwen", "--system", "be brief", "--param", "temperature=0.2",
+                                    "--param", "top_k=20"])
+        self.assertTrue(rv)
+        p = self.cfg["profiles"]["coder"]
+        self.assertEqual(p["from"], "qwen")
+        self.assertEqual(p["system"], "be brief")
+        self.assertEqual(p["params"], {"temperature": 0.2, "top_k": 20})
+
+    def test_create_requires_a_base(self):
+        rv, out = self.capture(llm.create_cmd, self.cfg, ["coder", "--system", "hi"])
+        self.assertFalse(rv)
+
+    def test_create_rm_removes_a_profile(self):
+        from unittest import mock
+        self.cfg["profiles"]["coder"] = {"from": "qwen", "system": "", "params": {}}
+        with mock.patch.object(llm, "save_cfg", lambda c: None):
+            rv, out = self.capture(llm.create_cmd, self.cfg, ["coder", "--rm"])
+        self.assertTrue(rv)
+        self.assertNotIn("coder", self.cfg["profiles"])
+
+    def test_show_profile(self):
+        self.cfg["profiles"]["coder"] = {"from": "qwen", "system": "be brief", "params": {"temperature": 0.2}}
+        rv, out = self.capture(llm.show_cmd, self.cfg, ["coder", "--json"])
+        card = json.loads(out)
+        self.assertEqual(card["profile"], "coder")
+        self.assertEqual(card["from"], "qwen")
+
+    def test_run_profile_selects_base_and_passes_system_and_params(self):
+        from unittest import mock
+        self.cfg["profiles"]["coder"] = {"from": "qwen", "system": "be brief", "params": {"temperature": 0.1}}
+        seen = {}
+        with mock.patch.object(llm, "choose_model", lambda c, p: seen.update(selected=p) or True), \
+             mock.patch.object(llm, "read_pid", lambda p: 1), \
+             mock.patch.object(llm, "health", lambda c, t=3: {"status": "ok"}), \
+             mock.patch.object(llm, "run_once",
+                               lambda c, prompt, system="", params=None: seen.update(prompt=prompt, system=system, params=params) or True):
+            rv, out = self.capture(llm.run_cmd, self.cfg, ["coder", "write", "a", "test"])
+        self.assertTrue(rv)
+        self.assertEqual(seen["selected"], "/m/qwen")        # resolved the profile's base model
+        self.assertEqual(seen["prompt"], "write a test")
+        self.assertEqual(seen["system"], "be brief")
+        self.assertEqual(seen["params"], {"temperature": 0.1})
+
 
 if __name__ == "__main__":
     unittest.main()

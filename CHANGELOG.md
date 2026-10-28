@@ -17,6 +17,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Ollama-style CLI**: `./llm run <model> [prompt]` (select, downloading the model first if only an `org/name`
   is given, start the engine, then chat — or print one answer for a trailing prompt), `./llm show [model]`
   (format, route, size, context, capabilities) and `./llm ps` (the model loaded now). `--json` on `show`/`ps`.
+- **Profiles** (Modelfile-style): `./llm create <name> --from <model> --system "…" --param k=v` saves a named
+  preset — a base model with a system prompt and sampling — that `./llm run <name>` then applies. `./llm create`
+  lists them, `./llm create <name> --rm` (or `./llm rm <name>`) deletes one, `./llm show <name>` prints it.
 - **Ollama API on the same port**: `POST /api/chat` and `/api/generate` (NDJSON streaming or one object; `options`,
   `tools`, `images`, `think` translated), `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` — an
   Ollama-speaking client needs no adapter. One generation path feeds both the OpenAI and the Ollama wire formats.

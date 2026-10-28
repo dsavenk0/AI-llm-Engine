@@ -270,8 +270,15 @@
   "No installed model matches": "Нет установленной модели по запросу",
   "(worker)": "(воркер)",
   "No installed model or worker matches": "Нет установленной модели или воркера по запросу",
-  "Usage: ./llm run <model|org/name> [prompt]": "Использование: ./llm run <модель|org/name> [запрос]",
+  "Usage: ./llm run <model|org/name|profile> [prompt]": "Использование: ./llm run <модель|org/name|профиль> [запрос]",
   "Model not found. Give an installed name/number, or an org/name to download.": "Модель не найдена. Укажите установленное имя/номер или org/name для загрузки.",
   "The engine did not start.": "Движок не запустился.",
-  "No model is loaded.": "Модель не загружена."
+  "No model is loaded.": "Модель не загружена.",
+  "Profile {name}: {base}": "Профиль {name}: {base}",
+  "No profiles yet. Make one: ./llm create <name> --from <model> --system \"...\"": "Профилей пока нет. Создайте: ./llm create <имя> --from <модель> --system \"...\"",
+  "Usage: ./llm create <name> --from <model> [--system \"…\"] [--param k=v]": "Использование: ./llm create <имя> --from <модель> [--system \"…\"] [--param k=v]",
+  "Profile not found.": "Профиль не найден.",
+  "Deleted profile: {name}": "Профиль удалён: {name}",
+  "Give a base model: ./llm create {name} --from <model>": "Укажите базовую модель: ./llm create {name} --from <модель>",
+  "Created profile {name} ← {base}": "Создан профиль {name} ← {base}"
 }
