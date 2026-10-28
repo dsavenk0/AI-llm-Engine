@@ -14,6 +14,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Request admission cap** (`--max-queue N`, or `advanced.max_queue` in `./llm`): refuses a generation request
+  with 503 once this many are in flight, so a coding agent, a chat, the editor and voice all hitting one model
+  stay bounded instead of piling up unbounded threads and prompt buffers; `/health` reports `inflight`/`max_queue`.
+  (Merging several requests into one forward pass — proven losslessly in `engine/batch.py` — is wired on separately
+  with real-model concurrency measurement, since it also has to carry speculation, stop strings and the thinking budget.)
 - **CLI chat: a clear reason and retry**: when the engine cuts off a looping answer (`stop_reason` `repetition`),
   the chat now says so and suggests `/retry`; `/retry` re-sends the last question (dropping the previous answer),
   handy after an interrupted or repeating reply.

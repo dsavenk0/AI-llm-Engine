@@ -62,6 +62,22 @@ class TestFinishReason(unittest.TestCase):
         self.assertEqual(finish_reason({"loop_stopped": True}, True), ("tool_calls", None))   # tool calls win
 
 
+class TestAdmission(unittest.TestCase):
+    """The request-admission cap: over the limit a request is refused, releasing frees a slot, 0 = unlimited."""
+
+    def test_cap_release_and_unlimited(self):
+        from engine.server import Admission
+        a = Admission(2)
+        self.assertTrue(a.acquire())
+        self.assertTrue(a.acquire())
+        self.assertFalse(a.acquire())           # at the cap → refused
+        a.release()
+        self.assertTrue(a.acquire())            # a freed slot is reusable
+        self.assertEqual(a.inflight, 2)
+        u = Admission(0)
+        self.assertTrue(all(u.acquire() for _ in range(50)))   # 0 = no cap
+
+
 class Server:
     def __init__(self, model, *extra):
         self.port = free_port()
@@ -153,8 +169,10 @@ class TestNativeServer(unittest.TestCase):
         self.assertLessEqual(h["context"], 1024)
         self.assertFalse(h["thinking"])                    # the synthetic template has no reasoning
         self.assertFalse(h["vision"])
-        for k in ("memory_gb", "memory_breakdown", "system_ram_used", "mem_limit", "requests", "busy"):
+        for k in ("memory_gb", "memory_breakdown", "system_ram_used", "mem_limit", "requests", "busy",
+                  "inflight", "max_queue"):
             self.assertIn(k, h)
+        self.assertEqual((h["inflight"], h["max_queue"]), (0, 0))   # idle, no cap by default
 
     def test_health_reports_prefill_progress_while_a_long_prompt_is_processed(self):
         import threading

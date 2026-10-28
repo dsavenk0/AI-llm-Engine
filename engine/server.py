@@ -27,6 +27,40 @@ _DONE = object()
 MAX_BODY = 64 * 2**20          # bytes of one request body
 
 
+class Admission:
+    """Caps how many generation requests are in flight at once (running on the engine plus waiting for the
+    lock). Over the cap a request is refused with 503 instead of piling up unbounded threads and prompt
+    buffers — a coding agent, a chat, the editor and voice all hitting one model stay bounded. 0 = no cap.
+
+    This is the scheduler's admission half. Merging several requests into one forward pass is a separate,
+    engine-level change (engine/batch.py proves the lossless batched decode) that is wired on with real-model
+    concurrency measurement, since it has to carry speculation, stop strings and the thinking budget too."""
+
+    def __init__(self, limit=0):
+        self.limit = limit
+        self.n = 0
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        with self.lock:
+            if self.limit and self.n >= self.limit:
+                return False
+            self.n += 1
+            return True
+
+    def release(self):
+        with self.lock:
+            self.n = max(0, self.n - 1)
+
+    @property
+    def inflight(self):
+        return self.n
+
+
+ADMISSION = Admission(0)
+GEN_PATHS = ("/v1/chat/completions", "/chat/completions", "/v1/messages", "/api/chat", "/api/generate")
+
+
 def worker(init):
     """All MLX work runs on this one thread: MLX GPU streams are thread-local.
 
@@ -339,6 +373,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "steer": {"file": os.path.basename(ARGS.steer.rstrip("/")), "alpha": ARGS.steer_alpha}
                 if ARGS.steer else None,
                 "busy": ENGINE.lock.locked(),
+                "inflight": ADMISSION.inflight, "max_queue": ADMISSION.limit,
                 "progress": getattr(ENGINE, "progress", None),
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
                               "peak": round(mx.get_peak_memory() / 2**30, 2),
@@ -385,14 +420,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("the body must be a JSON object")
         except ValueError:
             return self._error(400, "invalid JSON body")
-        if path in ("/v1/chat/completions", "/chat/completions"):
-            return self.chat(body)
-        if path == "/v1/messages":                    # Anthropic Messages API (native, not an OpenAI wrapper)
-            return self.messages_anthropic(body)
-        if path == "/api/chat":                       # Ollama wire format (same loaded model, no adapter)
-            return self.chat_ollama(body)
-        if path == "/api/generate":
-            return self.generate_ollama(body)
+        if path in GEN_PATHS:
+            if not ADMISSION.acquire():
+                return self._error(503, "the server is busy — too many requests in flight; retry shortly",
+                                   "server_error", "overloaded")
+            try:
+                if path in ("/v1/chat/completions", "/chat/completions"):
+                    return self.chat(body)
+                if path == "/v1/messages":            # Anthropic Messages API (native, not an OpenAI wrapper)
+                    return self.messages_anthropic(body)
+                if path == "/api/chat":               # Ollama wire format (same loaded model, no adapter)
+                    return self.chat_ollama(body)
+                return self.generate_ollama(body)     # /api/generate
+            finally:
+                ADMISSION.release()
         if path == "/api/show":
             from engine import ollama
             return self._json(200, ollama.show(self._ollama_card(), context=ENGINE.max_context,
@@ -895,6 +936,8 @@ def main():
                     help="strength of --steer (default: the folder's adapter.json, else 1.0; 0 = off)")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
+    ap.add_argument("--max-queue", type=int, default=0,
+                    help="refuse (503) a generation request when this many are already in flight (0 = no cap)")
     ap.add_argument("--disk-cache-gb", type=_cache_size, default=8,
                     help="SSD prefix cache budget in GB, or \"auto\" for 10%% of free disk space (0 = off)")
     ap.add_argument("--disk-cache-dir", default="", help="where the SSD prefix cache lives (default: "
@@ -922,6 +965,7 @@ def main():
     except ValueError as e:
         ap.error(str(e))
     ARGS.name = ARGS.name or os.path.basename(ARGS.model.rstrip("/")).lower()
+    ADMISSION.limit = max(0, ARGS.max_queue)
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from engine.compat import CompatEngine, pick_backend
