@@ -17,6 +17,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm use <#|name part>    select a model (restarts it if running)
   ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
+  ./llm service install|uninstall|status   optional background service (launchd): up after login, restarts on crash
   ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
   ./llm conduct ["<task>"]   optional orchestrator: split a task across models by role (set: conduct set …)
   ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
@@ -1476,6 +1477,78 @@ def engine_cmd(cfg, m):
     return cmd
 
 
+SERVICE_LABEL = "com.ai-llm-engine"
+LAUNCH_AGENT = os.path.join(HOME, "Library", "LaunchAgents", SERVICE_LABEL + ".plist")
+
+
+def serve_cmd(cfg):
+    """Run the engine in the FOREGROUND for the selected model and replace this process with it (`os.execv`),
+    so launchd — or you, by hand — supervises the real engine. It reads the current config, so a (re)start
+    always serves the model you have selected now."""
+    m = current_model(cfg)
+    if not m:
+        print(R(T("No model selected. Pick one with ./llm use <#|name>"))); return False
+    blocker = route_blocker(cfg, m, interactive=False)
+    if blocker:
+        print(R(blocker)); return False
+    cmd = engine_cmd(cfg, m)
+    os.execv(cmd[0], cmd)                 # launchd (or the shell) now supervises the engine directly
+
+
+def service_plist():
+    """The LaunchAgent that keeps the engine available after login and restarts it on a crash. It runs
+    `./llm serve` (which reads the config each time), not a baked-in command, so switching model/port in
+    Settings needs no reinstall. The model still unloads when idle, so an idle service costs little RAM."""
+    import plistlib
+    return plistlib.dumps({
+        "Label": SERVICE_LABEL,
+        "ProgramArguments": [os.path.join(BASE, "llm"), "serve"],
+        "EnvironmentVariables": {"LLM_HOME": DATA,
+                                 "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+        "RunAtLoad": True,           # start at login
+        "KeepAlive": True,           # restart if it crashes
+        "ThrottleInterval": 10,      # …but not in a tight loop
+        "WorkingDirectory": BASE,
+        "StandardOutPath": os.path.join(STATE, "service.log"),
+        "StandardErrorPath": os.path.join(STATE, "service.log"),
+    })
+
+
+def service_cmd(cfg, args):
+    """`./llm service install | uninstall | status` — an optional background service (off by default). It is
+    independent of the menu-bar app, so the local API is up for coding agents even with the app closed."""
+    action = (args[0].lower() if args else "status")
+    uid = os.getuid()
+    if action == "install":
+        os.makedirs(os.path.dirname(LAUNCH_AGENT), exist_ok=True)
+        os.makedirs(STATE, exist_ok=True)
+        with open(LAUNCH_AGENT, "wb") as f:
+            f.write(service_plist())
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{SERVICE_LABEL}"], capture_output=True)   # idempotent
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", LAUNCH_AGENT], capture_output=True, text=True)
+        if r.returncode != 0:                      # older macOS: load -w
+            r = subprocess.run(["launchctl", "load", "-w", LAUNCH_AGENT], capture_output=True, text=True)
+        if r.returncode == 0:
+            print(G(T("Background service installed — it starts at login and restarts on a crash.")))
+            print(DIM(T("The model still unloads when idle. Remove it with: ./llm service uninstall")))
+            return True
+        print(R(T("Could not start the service:") + " " + (r.stderr or r.stdout).strip())); return False
+    if action == "uninstall":
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{SERVICE_LABEL}"], capture_output=True)
+        subprocess.run(["launchctl", "unload", LAUNCH_AGENT], capture_output=True)
+        try:
+            os.remove(LAUNCH_AGENT)
+        except OSError:
+            pass
+        print(G(T("Background service removed."))); return True
+    if not os.path.exists(LAUNCH_AGENT):
+        print(T("Background service: not installed. Install it with ./llm service install")); return True
+    running = subprocess.run(["launchctl", "list", SERVICE_LABEL], capture_output=True).returncode == 0
+    print(G(T("Background service: installed and running")) if running
+          else Y(T("Background service: installed, not running")))
+    return True
+
+
 def route_blocker(cfg, m, interactive):
     """None when the model's route is ready; else a message (after offering the fix, if interactive).
     Only the optional mlx-lm backend needs anything installed; PTQ1 is enabled by the model itself."""
@@ -2873,6 +2946,7 @@ def main():
         "convert": lambda: convert_cmd(cfg, sys.argv[2:]),
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
+        "serve": lambda: serve_cmd(cfg), "service": lambda: service_cmd(cfg, sys.argv[2:]),
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),

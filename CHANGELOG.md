@@ -17,6 +17,11 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 - **Ollama-style CLI**: `./llm run <model> [prompt]` (select, downloading the model first if only an `org/name`
   is given, start the engine, then chat — or print one answer for a trailing prompt), `./llm show [model]`
   (format, route, size, context, capabilities) and `./llm ps` (the model loaded now). `--json` on `show`/`ps`.
+- **Optional background service** (`./llm service install | uninstall | status`): a per-user launchd agent that
+  keeps the API available after login and restarts the engine on a crash, independent of the menu-bar app (so a
+  coding agent can reach the local API with the app closed). Off by default; on-demand with the app/CLI stays the
+  norm. The agent runs `./llm serve`, which reads the current config each start (switching model/port needs no
+  reinstall), and the model still unloads when idle — an idle service costs little RAM, not the weights.
 - **Custom source** (Settings → "Custom source", or `./llm fetch <url|magnet> [name]`): add a model from a source
   **you** provide — a direct http(s) link to a `.gguf` or an archive (`.zip`/`.tar*`, extracted safely), or a
   magnet/`.torrent` via `aria2c` if installed. It only downloads what you point it at, into your models folder.

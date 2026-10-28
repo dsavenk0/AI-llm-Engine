@@ -218,6 +218,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm                      interactive menu
 ./llm open | up            new window with chat | start + chat + menu in this terminal
 ./llm start|stop|restart|status|chat|bench|logs
+./llm service install      optional background service (launchd): the API is up after login, restarts on a crash
 ./llm models | use <n>     discover / select models
 ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
 ./llm web search "<q>"     web search + the top pages as one JSON line (what the voice chat uses)

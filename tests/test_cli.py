@@ -327,6 +327,65 @@ class TestTranslations(unittest.TestCase):
             self.assertEqual(set(re.findall(r"\{(\w+)", k)), set(re.findall(r"\{(\w+)", v)), k)
 
 
+class TestBackgroundService(unittest.TestCase):
+    """The optional launchd service: plist shape, the foreground `serve` guard, install/status/uninstall."""
+
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    def test_plist_shape(self):
+        import plistlib
+        d = plistlib.loads(llm.service_plist())
+        self.assertEqual(d["Label"], "com.ai-llm-engine")
+        self.assertEqual(d["ProgramArguments"][-1], "serve")
+        self.assertTrue(d["RunAtLoad"])
+        self.assertTrue(d["KeepAlive"])
+        self.assertIn("LLM_HOME", d["EnvironmentVariables"])
+
+    def test_serve_without_a_model_does_not_exec(self):
+        from unittest import mock
+        with mock.patch.object(llm, "current_model", lambda c: None):
+            rv, out = self.capture(llm.serve_cmd, cfg())   # returns before os.execv
+        self.assertFalse(rv)
+
+    def test_install_writes_plist_and_bootstraps(self):
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        agent = os.path.join(d, "com.ai-llm-engine.plist")
+        calls = []
+        fake = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(llm, "LAUNCH_AGENT", agent), mock.patch.object(llm, "STATE", d), \
+             mock.patch.object(llm.subprocess, "run", lambda *a, **k: calls.append(a[0]) or fake):
+            rv, out = self.capture(llm.service_cmd, cfg(), ["install"])
+        self.assertTrue(rv)
+        self.assertTrue(os.path.exists(agent))
+        self.assertTrue(any("bootstrap" in c for c in calls))
+
+    def test_status_not_installed(self):
+        from unittest import mock
+        with mock.patch.object(llm, "LAUNCH_AGENT", os.path.join(tempfile.mkdtemp(), "none.plist")):
+            rv, out = self.capture(llm.service_cmd, cfg(), ["status"])
+        self.assertTrue(rv)
+        self.assertIn("not installed", out.lower())
+
+    def test_uninstall_removes_plist(self):
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        agent = os.path.join(d, "a.plist")
+        with open(agent, "wb") as f:
+            f.write(llm.service_plist())
+        with mock.patch.object(llm, "LAUNCH_AGENT", agent), \
+             mock.patch.object(llm.subprocess, "run", mock.Mock(return_value=mock.Mock(returncode=0))):
+            rv, out = self.capture(llm.service_cmd, cfg(), ["uninstall"])
+        self.assertTrue(rv)
+        self.assertFalse(os.path.exists(agent))
+
+
 class TestFetchCustomSource(unittest.TestCase):
     """`./llm fetch <url|magnet>` — a user-provided source: name derivation, archive safety, dispatch."""
 

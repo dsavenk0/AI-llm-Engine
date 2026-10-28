@@ -287,5 +287,13 @@
   "Fetched: {dest}": "Загружено: {dest}",
   "Download failed": "Загрузка не удалась",
   "Unsafe path in archive: {name}": "Небезопасный путь в архиве: {name}",
-  "Not a .zip or .tar archive": "Не архив .zip или .tar"
+  "Not a .zip or .tar archive": "Не архив .zip или .tar",
+  "No model selected. Pick one with ./llm use <#|name>": "Модель не выбрана. Выберите: ./llm use <#|имя>",
+  "Background service installed — it starts at login and restarts on a crash.": "Фоновый сервис установлен — запускается после входа и перезапускается при сбое.",
+  "The model still unloads when idle. Remove it with: ./llm service uninstall": "Модель всё равно выгружается в простое. Удалить: ./llm service uninstall",
+  "Could not start the service:": "Не удалось запустить сервис:",
+  "Background service removed.": "Фоновый сервис удалён.",
+  "Background service: not installed. Install it with ./llm service install": "Фоновый сервис: не установлен. Установить: ./llm service install",
+  "Background service: installed and running": "Фоновый сервис: установлен и работает",
+  "Background service: installed, not running": "Фоновый сервис: установлен, не запущен"
 }
