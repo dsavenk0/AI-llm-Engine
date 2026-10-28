@@ -269,5 +269,9 @@
   "(local)": "(локально)",
   "No installed model matches": "Нет установленной модели по запросу",
   "(worker)": "(воркер)",
-  "No installed model or worker matches": "Нет установленной модели или воркера по запросу"
+  "No installed model or worker matches": "Нет установленной модели или воркера по запросу",
+  "Usage: ./llm run <model|org/name> [prompt]": "Использование: ./llm run <модель|org/name> [запрос]",
+  "Model not found. Give an installed name/number, or an org/name to download.": "Модель не найдена. Укажите установленное имя/номер или org/name для загрузки.",
+  "The engine did not start.": "Движок не запустился.",
+  "No model is loaded.": "Модель не загружена."
 }

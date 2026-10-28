@@ -327,6 +327,97 @@ class TestTranslations(unittest.TestCase):
             self.assertEqual(set(re.findall(r"\{(\w+)", k)), set(re.findall(r"\{(\w+)", v)), k)
 
 
+class TestOllamaStyleCommands(unittest.TestCase):
+    """resolve_model and the Ollama-style verbs run / show / ps."""
+
+    def setUp(self):
+        from unittest import mock
+        self.models = [
+            {"name": "Bonsai-2-27B", "path": "/m/bonsai", "format": "JANG", "route": "native", "size": 7.7,
+             "thinking": True, "vision": False, "tool_calls": True, "efforts": ["low", "high"],
+             "supported": True, "problems": []},
+            {"name": "Qwen3-0.6B", "path": "/m/qwen", "format": "MLX 4-bit", "route": "native", "size": 0.5,
+             "thinking": False, "vision": False, "tool_calls": True, "efforts": [], "supported": True,
+             "problems": []},
+        ]
+        self.cfg = cfg()
+        self.cfg["model"] = "/m/bonsai"
+        for patch in (mock.patch.object(llm, "scan_models", lambda c: list(self.models)),):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    # ── resolve_model ──
+    def test_resolve_by_path_index_and_name(self):
+        self.assertEqual(llm.resolve_model(self.models, "/m/qwen")[0]["name"], "Qwen3-0.6B")
+        self.assertEqual(llm.resolve_model(self.models, "1")[0]["name"], "Bonsai-2-27B")
+        self.assertEqual(llm.resolve_model(self.models, "qwen")[0]["name"], "Qwen3-0.6B")
+
+    def test_resolve_ambiguous_and_missing(self):
+        pick, hits = llm.resolve_model(self.models, "n")           # "Bonsai" and "Qwen3" both contain 'n'
+        self.assertIsNone(pick)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(llm.resolve_model(self.models, "nope"), (None, []))
+
+    # ── show ──
+    def test_show_json_for_named_model(self):
+        from unittest import mock
+        with mock.patch.object(llm, "health", lambda c, t=3: None):
+            rv, out = self.capture(llm.show_cmd, self.cfg, ["qwen", "--json"])
+        self.assertTrue(rv)
+        card = json.loads(out)
+        self.assertEqual(card["name"], "Qwen3-0.6B")
+        self.assertEqual(card["capabilities"], ["tools"])         # no thinking/vision for this one
+        self.assertEqual(card["size_gb"], 0.5)
+
+    def test_show_defaults_to_selected_and_reports_context_when_loaded(self):
+        from unittest import mock
+        with mock.patch.object(llm, "health", lambda c, t=3: {"status": "ok", "context": 40960}):
+            rv, out = self.capture(llm.show_cmd, self.cfg, ["--json"])
+        card = json.loads(out)
+        self.assertEqual(card["name"], "Bonsai-2-27B")
+        self.assertEqual(card["context"], 40960)
+        self.assertIn("thinking", card["capabilities"])
+
+    def test_show_unknown_model(self):
+        rv, out = self.capture(llm.show_cmd, self.cfg, ["nope"])
+        self.assertFalse(rv)
+
+    # ── ps ──
+    def test_ps_empty_when_engine_down(self):
+        from unittest import mock
+        with mock.patch.object(llm, "read_pid", lambda p: None):
+            rv, out = self.capture(llm.ps_cmd, self.cfg, ["--json"])
+        self.assertEqual(json.loads(out), {"models": []})
+
+    def test_ps_lists_the_loaded_model(self):
+        from unittest import mock
+        with mock.patch.object(llm, "read_pid", lambda p: 123), \
+             mock.patch.object(llm, "health", lambda c, t=3: {"status": "ok", "state": "awake",
+                              "context": 40960, "memory_gb": {"model": 7.7}}), \
+             mock.patch.object(llm, "current_model", lambda c: self.models[0]):
+            rv, out = self.capture(llm.ps_cmd, self.cfg, ["--json"])
+        row = json.loads(out)["models"][0]
+        self.assertEqual((row["name"], row["state"], row["size_gb"], row["port"]),
+                         ("Bonsai-2-27B", "awake", 7.7, 8090))
+
+    # ── run (non-network paths) ──
+    def test_run_without_args_is_usage(self):
+        rv, out = self.capture(llm.run_cmd, self.cfg, [])
+        self.assertFalse(rv)
+
+    def test_run_unknown_local_name_without_slash_fails(self):
+        rv, out = self.capture(llm.run_cmd, self.cfg, ["does-not-exist"])
+        self.assertFalse(rv)
+
+
 if __name__ == "__main__":
     unittest.main()
 

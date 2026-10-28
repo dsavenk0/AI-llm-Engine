@@ -9,6 +9,9 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm models               discovered models and compatibility
   ./llm search <query>       search MLX models on Hugging Face (HF_ENDPOINT / HF_TOKEN respected)
   ./llm pull <org/name>      download a model (resumable) into ~/.cache/huggingface/hub
+  ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
+  ./llm show [<#|name>]      a quick card: format, route, size, context, capabilities
+  ./llm ps                   the model loaded right now
   ./llm use <#|name part>    select a model (restarts it if running)
   ./llm rm <#|name part> [--yes]   delete a downloaded model from disk
   ./llm start|stop|restart|status|chat|bench|logs|free
@@ -516,6 +519,131 @@ def fav_cmd(cfg, args):
     return True
 
 
+def resolve_model(models, arg):
+    """Find the one model `arg` names — by exact path, 1-based list number, or a unique name substring.
+    Returns (pick, matches): pick is None when nothing or several things match (matches lists them, for a
+    "be more specific" message)."""
+    arg = str(arg)
+    exact = next((m for m in models if m["path"] == arg), None)
+    if exact:
+        return exact, [exact]
+    if arg.isdigit() and 1 <= int(arg) <= len(models):
+        return models[int(arg) - 1], [models[int(arg) - 1]]
+    hits = [m for m in models if arg.lower() in m["name"].lower()]
+    return (hits[0] if len(hits) == 1 else None), hits
+
+
+def run_cmd(cfg, args):
+    """`./llm run <model|org/name> [prompt]` — Ollama-style: select the model (download it first if only an
+    org/name is given and it isn't installed), start the engine, then chat. A trailing prompt prints one
+    answer and exits; without it, drops into the interactive chat."""
+    args = [a for a in args if a and not a.startswith("--")]
+    if not args:
+        print(T("Usage: ./llm run <model|org/name> [prompt]")); return False
+    name, prompt = args[0], " ".join(args[1:]).strip()
+    pick, hits = resolve_model(scan_models(cfg), name)
+    if not pick and len(hits) > 1:
+        print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits))); return False
+    if not pick and "/" in name:                      # not installed, but looks like a hub id → download it
+        if not hf_pull(name, progress=True):
+            return False
+        pick, _ = resolve_model(scan_models(cfg), name)
+    if not pick:
+        print(R(T("Model not found. Give an installed name/number, or an org/name to download."))); return False
+    if pick["path"] != cfg.get("model") and not choose_model(cfg, pick["path"]):
+        return False
+    if not (read_pid(ENGINE_PID) and health(cfg)) and not start(cfg, sys.stdin.isatty()):
+        print(R(T("The engine did not start."))); return False
+    if prompt:
+        return run_once(cfg, prompt)
+    chat(cfg)
+    return True
+
+
+def run_once(cfg, prompt):
+    """Send one prompt and stream the answer to stdout (for `llm run <model> <prompt>`)."""
+    m = current_model(cfg)
+    if not m or not health(cfg):
+        print(R(T("The model is not running."))); return False
+    payload = {"model": served_name(m), "stream": True,
+               "messages": [{"role": "user", "content": prompt}],
+               "chat_template_kwargs": {"enable_thinking": think_enabled(mcfg(cfg), m)}}
+    req = urllib.request.Request(f"http://127.0.0.1:{cfg['port']}/v1/chat/completions",
+                                 data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=3600) as r:
+            for raw in r:
+                raw = raw.strip()
+                if not raw.startswith(b"data:") or raw == b"data: [DONE]":
+                    continue
+                ev = json.loads(raw[5:])
+                if ev.get("error"):
+                    print(R(ev["error"].get("message"))); return False
+                for ch in ev.get("choices", []):
+                    piece = ch.get("delta", {}).get("content")
+                    if piece:
+                        print(piece, end="", flush=True)
+        print()
+        return True
+    except KeyboardInterrupt:
+        print(Y("\n[" + T("interrupted") + "]")); return False
+    except Exception as e:
+        print(R("\n" + T("Error:") + f" {e}")); return False
+
+
+def show_cmd(cfg, args):
+    """`./llm show [model] [--json]` — a quick card for a model (format, route, size, context when loaded,
+    thinking/vision/tools, and any reason the engine cannot run it). Defaults to the selected model."""
+    as_json = "--json" in args
+    key = next((a for a in args if not a.startswith("--")), "")
+    models = scan_models(cfg)
+    if key:
+        pick, hits = resolve_model(models, key)
+        if not pick:
+            print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)) if len(hits) > 1
+                  else R(T("Model not found.")))
+            return False
+    else:
+        pick = next((m for m in models if m["path"] == cfg.get("model")), None)
+        if not pick:
+            print(R(T("No model selected."))); return False
+    ctx = None
+    if pick["path"] == cfg.get("model") and (h := health(cfg)):
+        ctx = h.get("context")
+    caps = [c for c, on in (("thinking", pick["thinking"]), ("vision", pick["vision"]),
+                            ("tools", pick["tool_calls"])) if on]
+    if as_json:
+        print(json.dumps({"name": pick["name"], "path": pick["path"], "format": pick["format"],
+                          "route": pick["route"], "size_gb": round(pick["size"], 2), "context": ctx,
+                          "capabilities": caps, "efforts": pick["efforts"], "supported": pick["supported"],
+                          "problems": pick["problems"]}, ensure_ascii=False))
+        return True
+    print(B(pick["name"]))
+    print(DIM(f"  {pick['format']} · {pick['route']} · {pick['size']:.1f} GB" + (f" · ctx {ctx}" if ctx else "")))
+    print(DIM("  " + (", ".join(caps) or "—")))
+    if not pick["supported"]:
+        print(R(T("The engine does not support this model:") + " " + ", ".join(pick["problems"])))
+    return True
+
+
+def ps_cmd(cfg, args):
+    """`./llm ps [--json]` — the model loaded right now (Ollama-style)."""
+    as_json = "--json" in args
+    h = health(cfg) if read_pid(ENGINE_PID) else None
+    m = current_model(cfg) if h and h.get("status") == "ok" else None
+    rows = []
+    if m:
+        rows = [{"name": m["name"], "state": h.get("state"), "size_gb": (h.get("memory_gb") or {}).get("model"),
+                 "context": h.get("context"), "port": cfg["port"]}]
+    if as_json:
+        print(json.dumps({"models": rows}, ensure_ascii=False)); return True
+    if not rows:
+        print(DIM(T("No model is loaded."))); return True
+    r = rows[0]
+    print(f"{r['name']}  ·  {r['state']}  ·  {r['size_gb']} GB  ·  ctx {r['context']}  ·  :{r['port']}")
+    return True
+
+
 def choose_model(cfg, arg=None):
     models = scan_models(cfg)
     if arg is None:
@@ -523,15 +651,9 @@ def choose_model(cfg, arg=None):
         if not models: return False
         arg = input(T("Model number (Enter to cancel)") + " › ").strip()
         if not arg: return False
-    exact = next((m for m in models if m["path"] == arg), None)
-    if exact:
-        pick = exact
-    elif arg.isdigit() and 1 <= int(arg) <= len(models):
-        pick = models[int(arg) - 1]
-    else:
-        hits = [m for m in models if arg.lower() in m["name"].lower()]
-        pick = hits[0] if len(hits) == 1 else None
-        if len(hits) > 1: print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
+    pick, hits = resolve_model(models, arg)
+    if not pick and len(hits) > 1:
+        print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
     if not pick:
         print(R(T("Model not found."))); return False
     if not pick["supported"]:
@@ -2499,6 +2621,9 @@ def main():
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),
         "models": lambda: print(json.dumps(scan_models(cfg), ensure_ascii=False)) if arg == "--json"
         else list_models(cfg, scan_models(cfg)), "use": lambda: choose_model(cfg, arg or None),
+        "run": lambda: run_cmd(cfg, sys.argv[2:]),
+        "show": lambda: show_cmd(cfg, sys.argv[2:]),
+        "ps": lambda: ps_cmd(cfg, sys.argv[2:]),
         "fav": lambda: fav_cmd(cfg, sys.argv[2:]),
         "chat": lambda: chat(cfg), "bench": lambda: bench(cfg), "logs": logs,
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,

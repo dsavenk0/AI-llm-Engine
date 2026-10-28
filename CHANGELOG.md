@@ -14,6 +14,9 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Ollama-style CLI**: `./llm run <model> [prompt]` (select, downloading the model first if only an `org/name`
+  is given, start the engine, then chat — or print one answer for a trailing prompt), `./llm show [model]`
+  (format, route, size, context, capabilities) and `./llm ps` (the model loaded now). `--json` on `show`/`ps`.
 - **Ollama API on the same port**: `POST /api/chat` and `/api/generate` (NDJSON streaming or one object; `options`,
   `tools`, `images`, `think` translated), `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` — an
   Ollama-speaking client needs no adapter. One generation path feeds both the OpenAI and the Ollama wire formats.
