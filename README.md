@@ -224,6 +224,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
 ./llm web search "<q>"     web search + the top pages as one JSON line (what the voice chat uses)
 ./llm inspect [<#|name>]   what is inside a model, from its headers: layers, storage types, bits per weight, biggest tensors
+./llm read <file>          extract text from a PDF/DOCX/PPTX/HTML/text document to attach as one source
 ./llm agent [dir]          terminal coding agent (files, search, edits, shell)
 ./llm connect [client]     register the model in Continue, Kilo Code or opencode
 ./llm free                 quit vMLX / oMLX / Ollama to free memory

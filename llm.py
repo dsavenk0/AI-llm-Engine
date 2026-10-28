@@ -23,6 +23,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
+  ./llm read <file> [--json]  extract text from a document (PDF/DOCX/PPTX/HTML/text) to attach as one source
   ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
   ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
   ./llm update [--check]     is there a newer release on GitHub? (--check only reports; else downloads the .dmg)
@@ -2642,6 +2643,40 @@ def update_cmd(cfg, args):
     return True
 
 
+def read_doc_cmd(cfg, args):
+    """`./llm read <file> [--json] [--max N]` — extract plain text from a document (PDF, DOCX, PPTX, HTML,
+    text/markdown/CSV…) so it can be attached to the model as one source. PDF is best-effort; a scanned PDF
+    (no text layer) is reported rather than sent empty."""
+    mx, files, i = None, [], 0
+    while i < len(args):
+        if args[i] == "--max" and i + 1 < len(args):
+            try:
+                mx = int(args[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif args[i].startswith("--"):
+            i += 1
+        else:
+            files.append(args[i]); i += 1
+    if not files:
+        print(T("Usage: ./llm read <file> [--json] [--max N]")); return False
+    from engine import documents
+    try:
+        r = documents.extract_text(os.path.expanduser(files[0]))
+    except documents.DocError as e:
+        print(R(T("Cannot read the document:") + f" {e}")); return False
+    text = r["text"]
+    if mx and len(text) > mx:
+        text, r = text[:mx], {**r, "truncated": True}
+    if "--json" in args:
+        print(json.dumps({**r, "text": text}, ensure_ascii=False)); return True
+    print(text)
+    for tag in ([r["note"]] if r["note"] else []) + ([T("truncated")] if r["truncated"] else []):
+        print(DIM("[" + tag + "]"), file=sys.stderr)
+    return True
+
+
 def search_cmd(query, as_json=False, source="hf"):
     if not query:
         query = input(T("Search MLX models on Hugging Face") + " › ").strip()
@@ -3012,6 +3047,7 @@ def main():
         "up": lambda: up(cfg), "open": open_window,
         "serve": lambda: serve_cmd(cfg), "service": lambda: service_cmd(cfg, sys.argv[2:]),
         "update": lambda: update_cmd(cfg, sys.argv[2:]),
+        "read": lambda: read_doc_cmd(cfg, sys.argv[2:]),
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),

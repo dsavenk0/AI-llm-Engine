@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **Documents as sources** (`./llm read <file>`, `engine/documents.py`): extracts plain text from PDF, DOCX,
+  PPTX, HTML and text/markdown/CSV so a document can be attached to the model as one source — stdlib only, no new
+  dependencies (Office files are zipped XML; PDF text is pulled from the content streams). A scanned PDF with no
+  text layer is reported (OCR would be needed) rather than sent empty; long documents are truncated with a flag.
 - **More editor languages**: syntax colouring now covers ~40 languages — added Scala, Dart, Haskell, Elixir,
   Erlang, Clojure, R, Julia, Perl, Groovy, Zig, Nim, PowerShell, GraphQL, Protobuf, Solidity, HCL/Terraform and
   CMake (the last two closed `cmake`/`perl` mappings that had no highlighter). Declarative keyword/comment/string

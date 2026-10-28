@@ -383,6 +383,34 @@ class TestUpdate(unittest.TestCase):
         self.assertIn("9.9", out)
 
 
+class TestReadDocument(unittest.TestCase):
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    def test_read_text_file_and_json(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "note.md")
+        with open(p, "w") as f:
+            f.write("hello doc")
+        rv, out = self.capture(llm.read_doc_cmd, cfg(), [p])
+        self.assertIn("hello doc", out)
+        rv, out = self.capture(llm.read_doc_cmd, cfg(), [p, "--json"])
+        self.assertEqual(json.loads(out)["text"], "hello doc")
+
+    def test_read_without_args_is_usage(self):
+        rv, out = self.capture(llm.read_doc_cmd, cfg(), [])
+        self.assertFalse(rv)
+
+    def test_read_missing_file_is_clean_error(self):
+        rv, out = self.capture(llm.read_doc_cmd, cfg(), ["/no/such/file.pdf"])
+        self.assertFalse(rv)
+
+
 class TestBackgroundService(unittest.TestCase):
     """The optional launchd service: plist shape, the foreground `serve` guard, install/status/uninstall."""
 
