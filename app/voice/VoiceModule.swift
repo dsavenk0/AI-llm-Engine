@@ -573,7 +573,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // ---- listening
 
-    private func startListening() async {
+    private func startListening(bargeIn: Bool = false) async {
+        stopCapture()                               // never two capture sessions at once
         let speechOK: Bool = await withCheckedContinuation { c in
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0 == .authorized) }
         }
@@ -590,6 +591,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        if bargeIn { try? input.setVoiceProcessingEnabled(true) }  // echo cancellation so the mic ignores the reply being read aloud
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
             req.append(buf)
@@ -604,12 +606,18 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         do { try engine.start() } catch { state = .failed("Cannot use the microphone: \(error.localizedDescription)"); return }
         self.engine = engine
         request = req
-        state = .listening
+        if !bargeIn { state = .listening }           // a barge-in listener stays quiet while the state is .speaking
         lastChange = Date()
         task = rec.recognitionTask(with: req) { [weak self] result, error in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, self.state == .listening else { return }
+                    guard let self else { return }
+                    if bargeIn {                       // only there to catch the person breaking in over the reply
+                        guard self.state == .speaking, let r = result else { return }
+                        if BargeIn.isInterruption(r.bestTranscription.formattedString) { self.onBargeIn() }
+                        return
+                    }
+                    guard self.state == .listening else { return }
                     if let r = result {
                         let text = r.bestTranscription.formattedString
                         if text != self.heard { self.heard = text; self.lastChange = Date() }
@@ -619,14 +627,25 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             }
         }
         silenceTimer?.invalidate()
-        silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, self.state == .listening else { return }
-                let quiet = Date().timeIntervalSince(self.lastChange)
-                if !self.heard.isEmpty, quiet > 1.4 { self.finishListening() }
-                else if self.heard.isEmpty, quiet > 25 { self.stopCapture(); self.dialogActive = false; self.state = .idle }
+        if !bargeIn {
+            silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.state == .listening else { return }
+                    let quiet = Date().timeIntervalSince(self.lastChange)
+                    if !self.heard.isEmpty, quiet > 1.4 { self.finishListening() }
+                    else if self.heard.isEmpty, quiet > 25 { self.stopCapture(); self.dialogActive = false; self.state = .idle }
+                }
             }
         }
+    }
+
+    /// The person started talking while the reply was being read: stop reading and open a fresh listen for the
+    /// whole new utterance, which is then sent as the next turn (so the answer is supplemented, ChatGPT-style).
+    private func onBargeIn() {
+        synth.stopSpeaking(at: .immediate)
+        pendingUtterances = 0
+        heard = ""
+        Task { await startListening() }
     }
 
     private func stopCapture() {
@@ -824,7 +843,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             u.voice = voice
         }
         pendingUtterances += 1
-        if state != .speaking { state = .speaking }
+        if state != .speaking {
+            state = .speaking
+            if dialogMode { Task { await startListening(bargeIn: true) } }   // listen for a barge-in over the reply
+        }
         synth.speak(u)
     }
 
@@ -839,6 +861,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         Task { @MainActor in
             self.pendingUtterances = max(0, self.pendingUtterances - 1)
             if self.pendingUtterances == 0, self.streamDone {
+                self.stopCapture()                  // end the barge-in listener before the dialog listener opens
                 self.state = .idle
                 self.levelTarget = 0
                 self.resumeDialog()

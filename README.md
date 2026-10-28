@@ -399,6 +399,8 @@ there is a progress bar with the bytes the engine process holds so far, and a sl
 
 - **Dialog mode** (menu, on by default): after each answer the microphone opens again by itself, so a conversation
   needs no button presses; it ends on a long silence, a click on the sphere while nothing is said, or a typed message.
+  **Barge-in:** start speaking while a reply is being read and it stops and listens (echo cancellation keeps it from
+  hearing its own voice), then answers the follow-up — ChatGPT-style, no button needed.
 - **The whole conversation** goes with every question (oldest turns dropped only past a budget), so follow-ups
   ("and its population?") refer to what was just said.
 - **The web** (menu, on by default): a question about news, weather, prices, scores or "today" is looked up — the

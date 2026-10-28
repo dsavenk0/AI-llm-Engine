@@ -264,6 +264,14 @@ check(!DialogPolicy.shouldResume(dialogMode: false, dialogActive: true, failed: 
 check(!DialogPolicy.shouldResume(dialogMode: true, dialogActive: false, failed: false), "the person stopped it")
 check(!DialogPolicy.shouldResume(dialogMode: true, dialogActive: true, failed: true), "never from a failure")
 
+// barge-in: a real interruption stops the reply, noise does not
+check(BargeIn.isInterruption("wait no I meant tomorrow"), "a sentence interrupts")
+check(BargeIn.isInterruption("добавь ещё"), "two words interrupt")
+check(!BargeIn.isInterruption("ok"), "one short word is not an interruption")
+check(!BargeIn.isInterruption("uh"), "a filler is not an interruption")
+check(!BargeIn.isInterruption("   "), "silence is not an interruption")
+check(!BargeIn.isInterruption("yes"), "a single word does not cut off the reply")
+
 // web lookups
 eq(WebLookup.query(from: "NO"), nil, "no lookup")
 eq(WebLookup.query(from: "No."), nil, "no lookup, with a full stop")

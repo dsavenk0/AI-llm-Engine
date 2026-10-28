@@ -105,6 +105,18 @@ enum DialogPolicy {
     }
 }
 
+enum BargeIn {
+    /// While the assistant is speaking, is what the microphone picked up a real interruption — the person
+    /// adding to or redirecting the answer — rather than a stray word, a cough or the tail of the reply the
+    /// echo canceller let through? Requires a couple of words of real content so the reply is not cut off by
+    /// noise. (ChatGPT-style: when it hears you, it stops and listens.)
+    static func isInterruption(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).filter { !$0.isEmpty }
+        return t.count >= 6 && words.count >= 2
+    }
+}
+
 // MARK: - looking things up on the web (pure, tested)
 
 enum WebLookup {
