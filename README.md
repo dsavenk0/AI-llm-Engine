@@ -12,6 +12,13 @@ Built and tuned for a **MacBook Air M5, 16 GB** running
 
 [Русская версия](README.ru.md)
 
+<p align="center">
+  <img src="docs/assets/screenshot-engine.png" width="210" alt="Menu-bar engine: status, token ledger, memory">
+  <img src="docs/assets/screenshot-editor-ide.png" width="210" alt="Code editor with the assistant">
+  <img src="docs/assets/screenshot-voice.png" width="210" alt="Voice chat">
+  <img src="docs/assets/screenshot-models.png" width="210" alt="Models: installed, hub search and download">
+</p>
+
 ## Why
 
 | Same Mac, same prompts, alternating runs | vMLX 1.6.75 | **llm-engine** |
@@ -26,6 +33,26 @@ Built and tuned for a **MacBook Air M5, 16 GB** running
 
 The 413 error is what broke Kilo Code with vMLX. Kilo asks for 32,000 output tokens, and vMLX rejects anything above
 its Metal headroom estimate (~8.5K on 16 GB).
+
+### What it does that LM Studio, Ollama and plain llama.cpp do not
+
+- **Adaptive Hadamard-rotated quantization (JANG / ternary TQ1).** It runs Prism/JANG Hadamard-rotated affine bundles
+  and 1.75-bit ternary formats (TQ1_G128 / PTQ1_0) on its own Metal lookup-table kernel — not only the generic GGUF
+  quants the others load. Ordinary GGUF still runs too, on the engine's own MLX decoder (no llama.cpp needed).
+- **Fused matmuls through one Hadamard transform.** The bundle stores one sign vector per input width, so q|k|v,
+  gate|up and qkv|z each run as a single fused quantized matmul after one shared transform, instead of a transform
+  per projection.
+- **Compiled layer blocks.** `mx.compile`d blocks (norm→Hadamard, gated-delta pre/post, attention pre/post, MLP +
+  residual) cut the thousands of small per-token kernel launches that dominate decode latency — to within ~11 % of
+  the raw weight-read time.
+- **Exact prompt-lookup speculative decoding.** Code edits, quotes and tool arguments decode ~2.5× faster (27–35 vs
+  ~10 tok/s) with output bit-identical to plain greedy; it switches itself off on prose, so nothing is lost.
+- **Smart out-of-memory protection.** A whole-machine RAM ceiling (88 % by default) the others do not have: before a
+  request it frees caches, caps the output to what fits and refuses an oversized prompt with a clear error — instead
+  of swapping and freezing a 16 GB Mac. It shrinks the prefill chunk under pressure and checks every 32 tokens while
+  generating. (Where vMLX returns HTTP 413 and fails, this clamps and succeeds.)
+
+Numbers and the full mechanism are in [How it is fast](#how-it-is-fast).
 
 ## How it is fast
 
@@ -102,7 +129,8 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 
 - **Own decoder (no llama.cpp).** A file whose architecture, quantization and tokenizer the engine implements runs on
   its own MLX decoder: llama and Qwen2/Qwen3 families (Llama 3.x, Mistral, SmolLM2, DeepSeek-R1-Distill-Qwen, Qwen2.5…),
-  **Gemma 3** (sliding-window layers, two rope bases, GeGLU), **Granite** and **MiniCPM** (with LongRoPE), and
+  **Gemma 2** (soft-capped attention and logits, sliding window on every other layer) and **Gemma 3**
+  (sliding-window layers, two rope bases, GeGLU), **Granite** and **MiniCPM** (with LongRoPE), and
   **mixture-of-experts** files (Mixtral-style, Qwen3-MoE, Granite-MoE: experts stay stacked and quantized, a token
   runs only its top-k with `gather_qmm`). Quantizations `Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K F16 BF16 F32` plus
   `Q2_K Q3_K IQ4_NL IQ4_XS`; vocabularies are byte-level BPE or SentencePiece (incl. the dummy space prefix). The
@@ -114,6 +142,10 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 - **llama.cpp for the rest.** Any other GGUF (other architectures, IQ1–IQ3 quantizations, MoE with per-expert tensors
   or a shared expert, files with an image projector) goes to llama.cpp's `llama-server` behind the same API. It is
   downloaded only when such a file is chosen (`./llm setup --gguf`); with `gguf_native` off every GGUF uses it.
+- **Export to MLX.** `./llm convert <model.gguf> [out]` writes a GGUF as a plain MLX folder — `config.json`, a
+  float16 `model.safetensors` (dequantized by the decoder's own unpacking, so the values match what the engine
+  runs) and a `tokenizer.json` rebuilt from the file's vocabulary — so a converted model opens with mlx-lm without
+  the GGUF around. llama / Qwen2 / Qwen3 for now.
 - **How close.** Against llama.cpp on the same files (logits on 11 prompts, 24-token greedy continuation): Qwen2.5 0.5B
   and 3B, DeepSeek-R1-Distill-Qwen 1.5B and SmolLM2 135M agree on the top token on every prompt (log-probabilities
   within 0.02–0.08) and on 24 of 24 greedy tokens; Llama 3.2 1B agrees on 10 of 11 prompts (≤ 0.18). Gemma 3 1B,
@@ -456,7 +488,7 @@ subprocess so a hard crash at one size only rules out that size. `--apply` write
 | native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
 | mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
-| GGUF, own decoder | llama / Qwen2 / Qwen3 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
+| GGUF, own decoder | llama / Qwen2 / Qwen3 / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
 | GGUF, llama.cpp | every other GGUF (other architectures, IQ1–IQ3, per-expert MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
 
 What each route can do (also printed under every model by `./llm models` and in the panel's tooltip):

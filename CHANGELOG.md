@@ -14,6 +14,19 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **GGUF decoder — Gemma 2**: the own MLX decoder now runs Gemma 2 (tanh soft-cap on the attention scores and the
+  output logits, sliding window on every other layer, sandwich norms, GeGLU, tied output), checked against an
+  independent numpy forward with the same caps.
+- **GGUF → MLX converter**: `./llm convert <model.gguf> [out]` exports a GGUF as a plain MLX folder — `config.json`,
+  a float16 `model.safetensors` (dequantized by the decoder's own unpacking, renamed to the Hugging Face layout) and
+  a `tokenizer.json` rebuilt from the file's vocabulary — so a converted model opens with mlx-lm without the GGUF
+  around. llama / Qwen2 / Qwen3 for now.
+- **Conductor** (optional, off by default): `./llm conduct` splits a task across models by role (heavy / code / fast
+  → a local model switched in turn, or a remote API model run in parallel), with an editor panel to map the roles.
+- **Reliability**: an answer cut off for looping says why; a watchdog stops the engine (and any llama-server) if the
+  app that launched it crashes; a document that cannot be read stops the send and keeps the text; the chat is saved
+  before generation and as it streams, with a Retry for an unfinished reply; Voice stops reading when you speak and
+  lets the model, not just keywords, decide when to search the web.
 - **Editor remembers its sizes**: the widths of the columns (chats / conversation / files in the chat layout,
   files / editor / outline+assistant in the editor layout), the height of the bottom panel and of the outline, and
   the window's size and place are kept between launches (dividers are plain draggable handles that save what you
