@@ -25,6 +25,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
   ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
   ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
+  ./llm update [--check]     is there a newer release on GitHub? (--check only reports; else downloads the .dmg)
   ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
   ./llm test                 engine tests (integration tests too when a model is selected)
   ./llm perf [--save]        performance suite vs tests/perf_baseline.json (regression check)
@@ -56,6 +57,8 @@ from engine import family, gguf  # noqa: E402  (stdlib only: no MLX needed to ro
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 HOME = os.path.expanduser("~")
+VERSION = "1.0"                                             # the 1.0 line; keep in step with build-app.sh's default
+GITHUB_REPO = "dsavenk0/AI-llm-Engine"                     # where `./llm update` looks for a newer release
 BASE = os.path.dirname(os.path.abspath(__file__))          # code (repo or LLMBar.app/Contents/Resources/llm)
 DATA = os.environ.get("LLM_HOME") or BASE                   # state + .venv (LLMBar.app: ~/Library/Application Support/LLMBar)
 STATE = os.path.join(DATA, ".llm")
@@ -2578,6 +2581,67 @@ def _fetch_http(url, dest, progress):
     return True
 
 
+def _parse_version(s):
+    """A version string → a tuple of ints for comparison, ignoring a leading v and any pre-release suffix
+    ("v1.2.0", "1.2", "1.2.3-beta" → (1, 2, 0) / (1, 2) / (1, 2, 3))."""
+    m = re.match(r"(\d+(?:\.\d+)*)", str(s).lstrip("vV").strip())
+    return tuple(int(x) for x in m.group(1).split(".")) if m else (0,)
+
+
+def _version_newer(a, b):
+    """Is version a strictly newer than b? Padded so 1.2 and 1.2.0 compare equal, and 1.10 > 1.9."""
+    pa, pb = _parse_version(a), _parse_version(b)
+    n = max(len(pa), len(pb))
+    return pa + (0,) * (n - len(pa)) > pb + (0,) * (n - len(pb))
+
+
+def _latest_release(obj):
+    """The fields `./llm update` needs out of a GitHub "latest release" response: version, the DMG asset's
+    download URL (the stable LLMBar.dmg if present, else any .dmg) and the notes."""
+    assets = obj.get("assets") or []
+    dmg = next((a["browser_download_url"] for a in assets if a.get("name", "").lower() == "llmbar.dmg"), None) \
+        or next((a["browser_download_url"] for a in assets if a.get("name", "").lower().endswith(".dmg")), None)
+    return {"version": str(obj.get("tag_name", "")).lstrip("vV"), "dmg": dmg, "notes": obj.get("body") or ""}
+
+
+def update_cmd(cfg, args):
+    """`./llm update [--check] [--json]` — is there a newer release on GitHub? `--check` only reports; otherwise
+    the DMG is downloaded and opened so you can drag the new app over the old one."""
+    as_json, check_only = "--json" in args, "--check" in args
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={"User-Agent": "AI-llm-Engine", "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            obj = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        print(T("No releases published yet.") if e.code == 404 else R(T("Update check failed:") + f" {e}"))
+        return False
+    except (OSError, urllib.error.URLError, ValueError) as e:
+        print(R(T("Update check failed:") + f" {e}")); return False
+    rel = _latest_release(obj)
+    newer = _version_newer(rel["version"], VERSION)
+    if as_json:
+        print(json.dumps({"current": VERSION, "latest": rel["version"], "update": newer, "dmg": rel["dmg"]},
+                         ensure_ascii=False))
+        return True
+    if not newer:
+        print(G(T("Up to date (v{v}).").format(v=VERSION))); return True
+    print(B(T("New version available: v{v}  (you have v{cur})").format(v=rel["version"], cur=VERSION)))
+    if check_only or not rel["dmg"]:
+        if rel["dmg"]:
+            print(DIM(rel["dmg"]))
+        return True
+    dest = os.path.join(os.path.expanduser("~/Downloads"), "LLMBar.dmg")
+    print(T("Fetching {url} → {dest}").format(url=rel["dmg"][:60], dest=dest), flush=True)
+    try:
+        download_file(rel["dmg"], dest, 0, None, {"User-Agent": "AI-llm-Engine"})
+    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as e:
+        print("\n" + R(T("Download failed: {name}: {err}").format(name="LLMBar.dmg", err=e))); return False
+    subprocess.run(["open", dest])
+    print(G(T("Opened {dest} — drag LLMBar to Applications to update.").format(dest=dest)))
+    return True
+
+
 def search_cmd(query, as_json=False, source="hf"):
     if not query:
         query = input(T("Search MLX models on Hugging Face") + " › ").strip()
@@ -2947,6 +3011,7 @@ def main():
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
         "serve": lambda: serve_cmd(cfg), "service": lambda: service_cmd(cfg, sys.argv[2:]),
+        "update": lambda: update_cmd(cfg, sys.argv[2:]),
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),

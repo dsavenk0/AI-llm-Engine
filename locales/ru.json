@@ -295,5 +295,10 @@
   "Background service removed.": "Фоновый сервис удалён.",
   "Background service: not installed. Install it with ./llm service install": "Фоновый сервис: не установлен. Установить: ./llm service install",
   "Background service: installed and running": "Фоновый сервис: установлен и работает",
-  "Background service: installed, not running": "Фоновый сервис: установлен, не запущен"
+  "Background service: installed, not running": "Фоновый сервис: установлен, не запущен",
+  "No releases published yet.": "Релизов пока нет.",
+  "Update check failed:": "Не удалось проверить обновление:",
+  "Up to date (v{v}).": "Актуальная версия (v{v}).",
+  "New version available: v{v}  (you have v{cur})": "Доступна новая версия: v{v}  (у вас v{cur})",
+  "Opened {dest} — drag LLMBar to Applications to update.": "Открыто {dest} — перетащите LLMBar в Applications для обновления."
 }

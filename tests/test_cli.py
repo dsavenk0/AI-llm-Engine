@@ -327,6 +327,62 @@ class TestTranslations(unittest.TestCase):
             self.assertEqual(set(re.findall(r"\{(\w+)", k)), set(re.findall(r"\{(\w+)", v)), k)
 
 
+class TestUpdate(unittest.TestCase):
+    """`./llm update` — version comparison, release parsing, the GitHub check (mocked)."""
+
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    def test_version_compare(self):
+        self.assertEqual(llm._parse_version("v1.2.3-beta"), (1, 2, 3))
+        self.assertTrue(llm._version_newer("1.2.0", "1.1.9"))
+        self.assertTrue(llm._version_newer("1.10", "1.9"))         # not string order
+        self.assertFalse(llm._version_newer("1.2", "1.2.0"))       # padded equal
+        self.assertFalse(llm._version_newer("1.0", "2.0"))
+
+    def test_latest_release_prefers_stable_dmg(self):
+        rel = llm._latest_release({"tag_name": "v2.1", "body": "notes", "assets": [
+            {"name": "LLMBar-2.1.dmg", "browser_download_url": "u1"},
+            {"name": "LLMBar.dmg", "browser_download_url": "u2"}]})
+        self.assertEqual(rel["version"], "2.1")
+        self.assertEqual(rel["dmg"], "u2")                         # the stable name wins
+
+    def _patch_release(self, obj):
+        from unittest import mock
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(obj).encode()
+        return mock.patch.object(llm.urllib.request, "urlopen", lambda *a, **k: Resp())
+
+    def test_update_json_reports_newer(self):
+        with self._patch_release({"tag_name": "v9.9", "assets": [
+                {"name": "LLMBar.dmg", "browser_download_url": "http://x/LLMBar.dmg"}]}):
+            rv, out = self.capture(llm.update_cmd, cfg(), ["--json"])
+        card = json.loads(out)
+        self.assertTrue(card["update"])
+        self.assertEqual(card["latest"], "9.9")
+        self.assertEqual(card["current"], llm.VERSION)
+
+    def test_update_json_up_to_date(self):
+        with self._patch_release({"tag_name": "v" + llm.VERSION, "assets": []}):
+            rv, out = self.capture(llm.update_cmd, cfg(), ["--json"])
+        self.assertFalse(json.loads(out)["update"])
+
+    def test_update_check_announces_without_downloading(self):
+        with self._patch_release({"tag_name": "v9.9", "assets": [
+                {"name": "LLMBar.dmg", "browser_download_url": "http://x/LLMBar.dmg"}]}):
+            rv, out = self.capture(llm.update_cmd, cfg(), ["--check"])
+        self.assertTrue(rv)
+        self.assertIn("9.9", out)
+
+
 class TestBackgroundService(unittest.TestCase):
     """The optional launchd service: plist shape, the foreground `serve` guard, install/status/uninstall."""
 
