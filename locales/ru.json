@@ -301,7 +301,7 @@
   "Up to date (v{v}).": "Актуальная версия (v{v}).",
   "New version available: v{v}  (you have v{cur})": "Доступна новая версия: v{v}  (у вас v{cur})",
   "Opened {dest} — drag LLMBar to Applications to update.": "Открыто {dest} — перетащите LLMBar в Applications для обновления.",
-  "Usage: ./llm read <file> [--json] [--max N]": "Использование: ./llm read <файл> [--json] [--max N]",
+  "Usage: ./llm read <file> [--query \"…\"] [--budget N] [--json]": "Использование: ./llm read <файл> [--query \"…\"] [--budget N] [--json]",
   "Cannot read the document:": "Не удалось прочитать документ:",
   "truncated": "обрезано",
   "OCR helper source not found:": "Исходник OCR-хелпера не найден:",

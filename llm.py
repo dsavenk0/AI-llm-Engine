@@ -24,7 +24,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
   ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
-  ./llm read <file> [--json]  extract text from a document (PDF/DOCX/PPTX/HTML/text) to attach as one source
+  ./llm read <file> [--query "…"]  extract text from a document (PDF/DOCX/PPTX/HTML/text, OCR for scans); a query picks the relevant excerpts
   ./llm inspect [<#|name|path>] what is inside a model: layers, storage types, bits per weight, biggest tensors
   ./llm web search "<query>" web search (+ the top pages as text) as one JSON line, for the voice chat
   ./llm update [--check]     is there a newer release on GitHub? (--check only reports; else downloads the .dmg)
@@ -2666,27 +2666,33 @@ def read_doc_cmd(cfg, args):
     """`./llm read <file> [--json] [--max N]` — extract plain text from a document (PDF, DOCX, PPTX, HTML,
     text/markdown/CSV…) so it can be attached to the model as one source. PDF is best-effort; a scanned PDF
     (no text layer) is reported rather than sent empty."""
-    mx, files, i = None, [], 0
+    mx, query, files, i = None, "", [], 0
     while i < len(args):
-        if args[i] == "--max" and i + 1 < len(args):
+        if args[i] in ("--max", "--budget") and i + 1 < len(args):
             try:
                 mx = int(args[i + 1])
             except ValueError:
                 pass
             i += 2
+        elif args[i] in ("--query", "-q") and i + 1 < len(args):
+            query = args[i + 1]; i += 2
         elif args[i].startswith("--"):
             i += 1
         else:
             files.append(args[i]); i += 1
     if not files:
-        print(T("Usage: ./llm read <file> [--json] [--max N]")); return False
+        print(T("Usage: ./llm read <file> [--query \"…\"] [--budget N] [--json]")); return False
     from engine import documents
     try:
         r = documents.extract_text(os.path.expanduser(files[0]))
     except documents.DocError as e:
         print(R(T("Cannot read the document:") + f" {e}")); return False
     text = r["text"]
-    if mx and len(text) > mx:
+    if query:                                 # long document → the passages relevant to the question
+        ex = documents.select_excerpts(text, query, budget=mx or documents.MAX_CHARS)
+        text = ex["text"]
+        r = {**r, "excerpts": ex["selected"], "passages": ex["passages"]}
+    elif mx and len(text) > mx:
         text, r = text[:mx], {**r, "truncated": True}
     if "--json" in args:
         print(json.dumps({**r, "text": text}, ensure_ascii=False)); return True

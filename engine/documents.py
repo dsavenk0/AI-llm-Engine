@@ -8,6 +8,7 @@
 # pulled out — enough for a text PDF, and a scanned one (no text layer) is reported so OCR can be
 # offered instead of sending an empty source. Plain text / markup is read directly.
 import html
+import math
 import os
 import re
 import subprocess
@@ -204,6 +205,81 @@ def extract_text(path):
             raise DocError("looks like an Office/zip file with an unsupported layout")
         raise DocError(f"cannot read {os.path.basename(path)} as text (binary file)")
     return _result(_read_text(data), "text")
+
+
+# ───────────────────────────── excerpts for long documents ─────────────────────────────
+_STOP = frozenset("a an the and or of to in on for is are be was were this that it its with as at by from "
+                  "not but if then else what which who how why when where".split())
+_TOK = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _passages(text, size):
+    """Split text into ~size-char passages, snapping each end back to a nearby paragraph/line break so a
+    passage is whole sentences, not a mid-word cut. Returns (start, end, text) with real char offsets."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        end = min(i + size, n)
+        if end < n:
+            window = text[max(i + size // 2, end - 300):end]
+            br = window.rfind("\n\n")
+            if br == -1:
+                br = window.rfind("\n")
+            if br == -1:
+                br = window.rfind(". ")
+            if br != -1:
+                end = max(i + size // 2, end - 300) + br + 1
+        out.append((i, end, text[i:end]))
+        if end <= i:
+            break
+        i = end
+    return out
+
+
+def select_excerpts(text, query, budget=MAX_CHARS, size=1400, max_passages=12):
+    """The passages of `text` most relevant to `query`, in document order, within a character budget — so a
+    long document contributes the parts that bear on the question instead of just its opening. Lexical
+    scoring (TF·IDF over passages, length-normalised); no model, no embedding, no dependency.
+
+    Returns {"text", "passages": [{start, end, score}], "selected", "total"}. With no query or no match it
+    falls back to the head of the document (same as a plain truncation)."""
+    terms = {t for t in (w.lower() for w in _TOK.findall(query or "")) if len(t) >= 2 and t not in _STOP}
+    passes = _passages(text, size)
+    if not terms or not passes:
+        return {"text": text[:budget], "passages": [], "selected": 0, "total": len(passes)}
+    toks_per = [[w.lower() for w in _TOK.findall(p)] for _, _, p in passes]
+    df = {t: sum(1 for toks in toks_per if t in set(toks)) for t in terms}
+    n = len(passes)
+    idf = {t: math.log(1 + n / (1 + df[t])) for t in terms}
+    scored = []
+    for idx, toks in enumerate(toks_per):
+        if not toks:
+            continue
+        tf = {}
+        for w in toks:
+            if w in terms:
+                tf[w] = tf.get(w, 0) + 1
+        score = sum(c * idf[t] for t, c in tf.items()) / (1 + len(toks) / 200)
+        if score > 0:
+            scored.append((score, idx))
+    if not scored:
+        return {"text": text[:budget], "passages": [], "selected": 0, "total": n}
+    scored.sort(reverse=True)
+    chosen, used = [], 0
+    for score, idx in scored:
+        s, e, p = passes[idx]
+        if chosen and used + len(p) > budget:
+            break
+        chosen.append((idx, s, e, p.strip(), score)); used += len(p)
+        if len(chosen) >= max_passages:
+            break
+    chosen.sort(key=lambda x: x[0])                    # back into document order
+    pieces, passages = [], []
+    for k, (idx, s, e, p, score) in enumerate(chosen):
+        if k and chosen[k - 1][0] != idx - 1:          # a gap between passages
+            pieces.append("[…]")
+        pieces.append(p)
+        passages.append({"start": s, "end": e, "score": round(score, 3)})
+    return {"text": "\n\n".join(pieces), "passages": passages, "selected": len(chosen), "total": n}
 
 
 SUPPORTED = ("pdf", "docx", "pptx", "html/xml", "txt/md/csv/json/yaml/…")

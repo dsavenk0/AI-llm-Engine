@@ -16,8 +16,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 ### Added
 - **Documents as sources** (`./llm read <file>`, `engine/documents.py`): extracts plain text from PDF, DOCX,
   PPTX, HTML and text/markdown/CSV so a document can be attached to the model as one source — stdlib only, no new
-  dependencies (Office files are zipped XML; PDF text is pulled from the content streams). Long documents are
-  truncated with a flag.
+  dependencies (Office files are zipped XML; PDF text is pulled from the content streams). A long document can be
+  reduced to the passages relevant to a question — `./llm read <file> --query "…"` scores passages by TF·IDF
+  (no model, no embedding) and returns the top ones in document order with char offsets for citations; without a
+  query it truncates with a flag.
 - **On-device OCR** (Apple Vision): a scanned PDF (no text layer) or an image file is read with `VNRecognizeText`
   through a small local helper (`app/ocr`, bundled with the app; `./llm setup --ocr` builds it for the standalone
   CLI). No network and no third-party dependency; without the helper those files are reported as "needs OCR".

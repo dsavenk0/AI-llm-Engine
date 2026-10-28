@@ -144,6 +144,32 @@ class TestDocuments(unittest.TestCase):
         self.assertEqual(r["text"], "")
         self.assertIn("scanned", r["note"])
 
+    def test_excerpts_pick_the_relevant_passage(self):
+        doc = ("Intro about gardens.\n\n" + "A section on cooking pasta with tomato sauce. " * 40 + "\n\n"
+               + "A section on quantum entanglement and qubits. " * 40 + "\n\n" + "Closing weather notes.")
+        ex = D.select_excerpts(doc, "how do qubits entangle", budget=2000, size=400)
+        self.assertGreater(ex["selected"], 0)
+        self.assertLess(ex["selected"], ex["total"])        # not everything — a selection
+        self.assertIn("qubit", ex["text"].lower())
+        self.assertNotIn("pasta", ex["text"].lower())
+        self.assertTrue(all("start" in p and "end" in p for p in ex["passages"]))   # offsets for citations
+
+    def test_excerpts_fall_back_to_head_without_a_query(self):
+        doc = "x" * 500
+        self.assertEqual(D.select_excerpts(doc, "", budget=50)["text"], doc[:50])
+        self.assertEqual(D.select_excerpts(doc, "", budget=50)["selected"], 0)
+
+    def test_excerpts_fall_back_when_nothing_matches(self):
+        doc = "alpha beta gamma. " * 50
+        ex = D.select_excerpts(doc, "zzzznomatch", budget=100)
+        self.assertEqual(ex["selected"], 0)
+        self.assertEqual(ex["text"], doc[:100])
+
+    def test_excerpts_respect_the_budget(self):
+        doc = ("topic one here. " * 30 + "\n\n") * 10 + "the special keyword appears here once"
+        ex = D.select_excerpts(doc, "special keyword", budget=300, size=200)
+        self.assertLessEqual(len(ex["text"]), 400)          # budget plus a little joining slack
+
     def test_truncation_flag(self):
         orig = D.MAX_CHARS
         try:
