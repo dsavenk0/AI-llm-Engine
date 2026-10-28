@@ -347,7 +347,7 @@ Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one se
   reasoning level (off, then the levels its template offers).
 - **Context:** a ring shows how much of the model's window the conversation fills; **Compact** folds older turns into
   a short note (the same two-stage compaction as the terminal agent). Chats are renamed and deleted from the ⋯ menu.
-- **Editor:** syntax colours and an outline for ~25 languages, line numbers, problems underlined as you type
+- **Editor:** syntax colours and an outline for ~40 languages, line numbers, problems underlined as you type
   (built-in checks, plus `swiftc -parse`, `node --check`, `bash -n` … when installed), unsaved-changes protection.
 - **Problems and terminal:** ⌘J. Send a problem, or terminal output, to the assistant with one click. Several
   terminals (a plus in the strip, each its own shell). Type errors from `mypy` (Python) and `tsc` (TypeScript) join the

@@ -25,6 +25,13 @@ EXT = {
     ".css": "css", ".scss": "css", ".json": "json", ".jsonc": "json", ".yaml": "yaml", ".yml": "yaml",
     ".toml": "toml", ".md": "markdown", ".markdown": "markdown", ".sql": "sql", ".txt": "plaintext",
     ".ini": "ini", ".cfg": "ini", ".conf": "ini",
+    ".scala": "scala", ".sc": "scala", ".dart": "dart", ".hs": "haskell", ".lhs": "haskell",
+    ".ex": "elixir", ".exs": "elixir", ".erl": "erlang", ".hrl": "erlang",
+    ".clj": "clojure", ".cljs": "clojure", ".cljc": "clojure", ".edn": "clojure",
+    ".r": "r", ".jl": "julia", ".pl": "perl", ".pm": "perl", ".groovy": "groovy", ".gradle": "groovy",
+    ".zig": "zig", ".nim": "nim", ".nims": "nim", ".ps1": "powershell", ".psm1": "powershell", ".psd1": "powershell",
+    ".graphql": "graphql", ".gql": "graphql", ".proto": "protobuf", ".sol": "solidity",
+    ".tf": "hcl", ".tfvars": "hcl", ".hcl": "hcl", ".cmake": "cmake",
 }
 NAMES = {"dockerfile": "dockerfile", "makefile": "makefile", "gnumakefile": "makefile", "rakefile": "ruby",
          "gemfile": "ruby", "podfile": "ruby", "cmakelists.txt": "cmake", ".gitignore": "plaintext",
@@ -172,6 +179,75 @@ LANGS = {
                               "ONBUILD STOPSIGNAL HEALTHCHECK SHELL AS"), line=["#"], block=[], strings=['"', "'"]),
     "makefile": dict(kw=_kw("ifeq ifneq ifdef ifndef else endif include define endef export .PHONY"),
                      line=["#"], block=[], strings=['"', "'"]),
+    "scala": dict(kw=_kw("abstract case catch class def do else extends false final finally for forSome if "
+                         "implicit import lazy match new null object override package private protected return "
+                         "sealed super this throw trait try true type val var while with yield"),
+                  line=["//"], block=[("/*", "*/")], strings=['"""', '"', "'"]),
+    "dart": dict(kw=_kw("abstract as assert async await break case catch class const continue covariant default "
+                        "deferred do dynamic else enum export extends extension external factory false final "
+                        "finally for Function get hide if implements import in interface is late library mixin "
+                        "new null on operator part required rethrow return set show static super switch sync "
+                        "this throw true try typedef var void while with yield"),
+                 line=["//"], block=[("/*", "*/")], strings=['"""', "'''", '"', "'"]),
+    "haskell": dict(kw=_kw("case class data default deriving do else foreign if import in infix infixl infixr "
+                           "instance let module newtype of then type where"),
+                    line=["--"], block=[("{-", "-}")], strings=['"']),
+    "elixir": dict(kw=_kw("after and case catch cond def defmacro defmodule defp defstruct do else end false fn "
+                          "for if import in nil not or quote raise receive require rescue true try unless "
+                          "unquote use when with"),
+                   line=["#"], block=[], strings=['"""', '"', "'"]),
+    "erlang": dict(kw=_kw("after and andalso band begin bnot bor bsl bsr bxor case catch cond div end fun if "
+                          "let not of or orelse receive rem try when xor"),
+                   line=["%"], block=[], strings=['"']),
+    "clojure": dict(kw=_kw("def defn defn- defmacro defmulti defmethod defprotocol defrecord deftype let fn if "
+                           "do cond case when when-not if-not loop recur for doseq while try catch finally "
+                           "throw ns require import use true false nil"),
+                    line=[";"], block=[], strings=['"']),
+    "r": dict(kw=_kw("if else for while repeat function return break next in TRUE FALSE NULL NA Inf NaN "
+                     "library require"), line=["#"], block=[], strings=['"', "'"]),
+    "julia": dict(kw=_kw("baremodule begin break catch const continue do else elseif end export false finally "
+                         "for function global if import in let local macro module quote return struct true try "
+                         "using while abstract mutable primitive type where"),
+                  line=["#"], block=[("#=", "=#")], strings=['"""', '"']),
+    "perl": dict(kw=_kw("my our local sub if elsif else unless while until for foreach do return last next redo "
+                        "use require package no and or not eq ne lt gt le ge cmp qw undef defined"),
+                 line=["#"], block=[], strings=['"', "'"]),
+    "groovy": dict(kw=C_LIKE | _kw("def as assert boolean extends implements import in instanceof interface "
+                                   "package trait threadsafe it println each"),
+                   line=["//"], block=[("/*", "*/")], strings=['"""', "'''", '"', "'"]),
+    "zig": dict(kw=_kw("align allowzero and anyframe anytype asm async await break catch comptime const continue "
+                       "defer else enum errdefer error export extern false fn for if inline noalias nosuspend "
+                       "or orelse packed pub resume return struct suspend switch test threadlocal true try "
+                       "undefined union unreachable usingnamespace var volatile while"),
+                line=["//"], block=[], strings=['"', "'"]),
+    "nim": dict(kw=_kw("addr and as asm bind block break case cast concept const continue converter defer "
+                       "discard distinct div do elif else end enum except export finally for from func if "
+                       "import include interface is isnot iterator let macro method mixin mod nil not notin "
+                       "object of or out proc ptr raise ref return shl shr static template try tuple type "
+                       "using var when while xor yield true false"),
+                line=["#"], block=[("#[", "]#")], strings=['"""', '"', "'"]),
+    "powershell": dict(kw=_kw("begin break catch class continue data define do dynamicparam else elseif end "
+                             "enum exit filter finally for foreach from function if in param process return "
+                             "switch throw trap try until using while workflow"),
+                       line=["#"], block=[("<#", "#>")], strings=['"', "'"]),
+    "graphql": dict(kw=_kw("query mutation subscription fragment type interface union enum input scalar schema "
+                           "directive implements extend on true false null"),
+                    line=["#"], block=[], strings=['"""', '"']),
+    "protobuf": dict(kw=_kw("syntax package import option message enum service rpc returns repeated optional "
+                            "required reserved map oneof extend extensions to true false"),
+                     line=["//"], block=[("/*", "*/")], strings=['"', "'"]),
+    "solidity": dict(kw=_kw("abstract address bool break bytes calldata constant constructor continue contract "
+                            "do else emit enum event external false for function if immutable import indexed "
+                            "interface internal is library mapping memory modifier new override payable pragma "
+                            "private public pure require return returns revert storage string struct true try "
+                            "uint using view virtual while"),
+                     line=["//"], block=[("/*", "*/")], strings=['"', "'"]),
+    "hcl": dict(kw=_kw("resource variable data module output provider locals terraform true false null for in if"),
+                line=["#", "//"], block=[("/*", "*/")], strings=['"']),
+    "cmake": dict(kw=_kw("if elseif else endif foreach endforeach while endwhile function endfunction macro "
+                         "endmacro set list string file include find_package add_executable add_library "
+                         "target_link_libraries project cmake_minimum_required option message return break"),
+                  line=["#"], block=[], strings=['"']),
 }
 _NUM = re.compile(r"(?<![\w.])(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|\d[\d_]*\.?\d*(?:[eE][+-]?\d+)?)(?![\w])")
 _WORD = re.compile(r"[A-Za-z_$@#][\w$]*(?:\?)?")

@@ -38,6 +38,23 @@ class TestDetect(unittest.TestCase):
             with self.subTest(path):
                 self.assertEqual(C.detect_language(path), want)
 
+    def test_additional_languages(self):
+        cases = {"a.scala": "scala", "app.dart": "dart", "Main.hs": "haskell", "m.ex": "elixir",
+                 "node.erl": "erlang", "core.clj": "clojure", "plot.R": "r", "calc.jl": "julia",
+                 "script.pl": "perl", "build.gradle": "groovy", "main.zig": "zig", "lib.nim": "nim",
+                 "deploy.ps1": "powershell", "schema.graphql": "graphql", "api.proto": "protobuf",
+                 "Token.sol": "solidity", "main.tf": "hcl", "CMakeLists.txt": "cmake"}
+        for path, want in cases.items():
+            with self.subTest(path):
+                self.assertEqual(C.detect_language(path), want)
+
+    def test_every_detected_language_has_a_highlighter(self):
+        # EXT / NAMES / shebang targets must resolve to a real highlighter (or a known markup/plain special),
+        # so a mapping can never point at a language highlight() silently can't colour (cmake/perl were such gaps).
+        special = {"markdown", "html", "xml", "plaintext"}
+        targets = set(C.EXT.values()) | set(C.NAMES.values()) | {lang for _, lang in C.SHEBANG}
+        self.assertEqual(sorted(t for t in targets if t not in C.LANGS and t not in special), [])
+
     def test_shebang_decides_when_there_is_no_extension(self):
         self.assertEqual(C.detect_language("tool", "#!/usr/bin/env python3\nprint(1)\n"), "python")
         self.assertEqual(C.detect_language("tool", "#!/bin/bash\necho hi\n"), "shell")
@@ -120,6 +137,15 @@ class TestHighlight(unittest.TestCase):
         self.assertIn(("div", "tag"), html)
         self.assertIn(('"a"', "string"), html)
         self.assertIn(("<!-- c -->", "comment"), html)
+
+    def test_additional_language_highlighting(self):
+        # a keyword, a comment and a string land in the right kinds for a sampling of the new languages
+        self.assertIn(("object", "keyword"), kinds_at("object X // c\n", "scala"))
+        self.assertIn(("-- c", "comment"), kinds_at('main = putStrLn "hi"  -- c\n', "haskell"))
+        self.assertIn(("contract", "keyword"), kinds_at("// c\ncontract A {}\n", "solidity"))
+        self.assertIn(("# c", "comment"), kinds_at('# c\n$x = "v"\n', "powershell"))
+        self.assertIn(("resource", "keyword"), kinds_at('resource "x" "y" {}\n', "hcl"))
+        self.assertIn(("{- c -}", "comment"), kinds_at("{- c -}\nx = 1\n", "haskell"))
 
     def test_spans_are_ordered_non_overlapping_and_in_bounds(self):
         text = open(os.path.join(ROOT, "agent.py")).read()

@@ -14,6 +14,10 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   model is on; the state dot is a filled circle when it is on and an empty ring when it is off.
 
 ### Added
+- **More editor languages**: syntax colouring now covers ~40 languages — added Scala, Dart, Haskell, Elixir,
+  Erlang, Clojure, R, Julia, Perl, Groovy, Zig, Nim, PowerShell, GraphQL, Protobuf, Solidity, HCL/Terraform and
+  CMake (the last two closed `cmake`/`perl` mappings that had no highlighter). Declarative keyword/comment/string
+  rules, no heavyweight grammar engine.
 - **Ollama-style CLI**: `./llm run <model> [prompt]` (select, downloading the model first if only an `org/name`
   is given, start the engine, then chat — or print one answer for a trailing prompt), `./llm show [model]`
   (format, route, size, context, capabilities) and `./llm ps` (the model loaded now). `--json` on `show`/`ps`.
