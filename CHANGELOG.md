@@ -19,6 +19,8 @@ is part of the 1.0 line. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
   (format, route, size, context, capabilities) and `./llm ps` (the model loaded now). `--json` on `show`/`ps`.
 - **Update check** (`./llm update [--check]`): asks GitHub for the latest release, compares it to the running
   version, and — unless `--check` — downloads the `.dmg` and opens it to drag over the old app. `--json` for tools.
+  LLMBar checks in the background (at most every few hours) and shows an "Update available" banner with an
+  Update button; it never replaces the app on its own.
 - **Optional background service** (`./llm service install | uninstall | status`): a per-user launchd agent that
   keeps the API available after login and restarts the engine on a crash, independent of the menu-bar app (so a
   coding agent can reach the local API with the app closed). Off by default; on-demand with the app/CLI stays the

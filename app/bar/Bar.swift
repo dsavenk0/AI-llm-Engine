@@ -254,6 +254,29 @@ struct CheckBanner: View {
     }
 }
 
+/// Shown when GitHub has a newer release. "Update" downloads and opens the .dmg (via `llm update`); it never
+/// replaces the app on its own, and the × dismisses it until the next check.
+struct UpdateBanner: View {
+    @ObservedObject var e: EngineState
+    let up: UpdateInfo
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle.fill").font(.system(size: 13)).foregroundColor(HUD.phosphor)
+            Text(L("Update available · v", "Доступно обновление · v") + up.version)
+                .font(.system(size: 11, weight: .semibold)).foregroundColor(HUD.text).lineLimit(1)
+            Spacer(minLength: 0)
+            Button(action: { e.update = nil; e.command(["update"], label: L("update", "обновление")) }) {
+                Text(L("Update", "Обновить")).font(HUD.mono(10, .semibold))
+            }.buttonStyle(.plain).foregroundColor(HUD.cyan).disabled(e.busy != nil)
+            Button(action: { e.update = nil }) { Image(systemName: "xmark").font(.system(size: 10)) }
+                .buttonStyle(.plain).foregroundColor(HUD.dim)
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 8).fill(HUD.phosphor.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(HUD.phosphor.opacity(0.5), lineWidth: 1))
+    }
+}
+
 enum CLI {
     /// `line` (main queue) gets each finished output line without colour codes — long first-run steps show progress.
     static func run(_ args: [String], line: ((String) -> Void)? = nil, done: @escaping (Int32, String) -> Void) {
@@ -332,8 +355,15 @@ struct CheckItem: Identifiable, Equatable {
     var isError: Bool { level == "error" }
 }
 
+struct UpdateInfo: Equatable {
+    let version: String
+    let dmg: String?
+}
+
 final class EngineState: ObservableObject {
     @Published var checks: [CheckItem] = []     // warnings and errors only; empty = ready
+    @Published var update: UpdateInfo? = nil     // set when a newer release is on GitHub (the banner offers it)
+    private var lastUpdateCheck = Date.distantPast
     @Published var health: [String: Any]? = nil
     @Published var stats: [String: Any]? = nil
     @Published var busy: String? = nil
@@ -461,6 +491,19 @@ final class EngineState: ObservableObject {
     func openVoice() { MainActor.assumeIsolated { AppHost.openVoice() } }
 
     /// The launch-time readiness check (Python, libraries, network when something must be downloaded, disk, models).
+    /// Is there a newer release? Runs `llm update --check --json` at most every few hours (off the hot path).
+    /// The banner it drives offers to download and open the .dmg; it never updates anything on its own.
+    func checkUpdate() {
+        guard Date().timeIntervalSince(lastUpdateCheck) > 6 * 3600 else { return }
+        lastUpdateCheck = Date()
+        CLI.run(["update", "--check", "--json"]) { _, out in
+            guard let data = out.split(separator: "\n").last.flatMap({ String($0).data(using: .utf8) }),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["update"] as? Bool == true, let v = obj["latest"] as? String else { return }
+            self.update = UpdateInfo(version: v, dmg: obj["dmg"] as? String)
+        }
+    }
+
     func runCheck() {
         CLI.run(["check", "--json"]) { _, out in
             guard let data = out.split(separator: "\n").last.flatMap({ String($0).data(using: .utf8) }),
@@ -1845,6 +1888,9 @@ struct ContentView: View {
             if e.busy == nil, !e.checks.isEmpty {
                 CheckBanner(e: e)
             }
+            if let up = e.update {
+                UpdateBanner(e: e, up: up)
+            }
             if let msg = e.message {
                 Text(msg).font(HUD.mono(10)).foregroundColor(HUD.magenta).lineLimit(3)
             }
@@ -1872,7 +1918,7 @@ struct ContentView: View {
         .background(background)
         .environment(\.colorScheme, lightTheme ? .light : .dark)
         .tint(HUD.cyan)
-        .onAppear { e.loadModels(); e.runCheck() }
+        .onAppear { e.loadModels(); e.runCheck(); e.checkUpdate() }
         .background(Button("") { NSApp.keyWindow?.orderOut(nil) }.keyboardShortcut(.cancelAction).opacity(0))
     }
 
