@@ -58,10 +58,10 @@ for x in [80 as CGFloat, 830] {
     accent.withAlphaComponent(0.20).setStroke()
     card.lineWidth = 2; card.stroke()
 }
-draw("1", NSPoint(x: 116, y: 530), font(22, bold: true), accent)
-draw("LLMBar", NSPoint(x: 164, y: 530), font(22, bold: true), text)
-draw("2", NSPoint(x: 866, y: 530), font(22, bold: true), accent)
-draw("Applications", NSPoint(x: 914, y: 530), font(22, bold: true), text)
+// Nothing is written inside the cards. The Finder draws each icon's own name under it, so a name drawn
+// here as well appeared twice on the installer, at two different heights. Step numbers went the same way:
+// the line above says what to do, the arrow says which direction, and the two cards say where — a numeral
+// on top of that is one more thing to read and nothing more to learn.
 
 let glow = NSShadow()
 glow.shadowColor = accent.withAlphaComponent(0.6)
