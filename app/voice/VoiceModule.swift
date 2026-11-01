@@ -600,6 +600,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     private func startListening(bargeIn: Bool = false) async {
         stopCapture()                               // never two capture sessions at once
+        vtrace("startListening bargeIn=\(bargeIn) state=\(state)")
         let speechOK: Bool = await withCheckedContinuation { c in
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0 == .authorized) }
         }
@@ -616,7 +617,13 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        if bargeIn { try? input.setVoiceProcessingEnabled(true) }  // echo cancellation so the mic ignores the reply being read aloud
+        if bargeIn {
+            // Echo cancellation, meant to stop the microphone hearing the reply. Note it can only subtract
+            // audio played through *this* engine, and the reply is spoken by AVSpeechSynthesizer on its own
+            // path — so the trace records whether it even turned on, and what the mic then heard.
+            do { try input.setVoiceProcessingEnabled(true); vtrace("voice processing on") }
+            catch { vtrace("voice processing FAILED: \(error.localizedDescription)") }
+        }
         let format = input.outputFormat(forBus: 0)
         var recordFile: AVAudioFile? = nil          // captured strongly by the tap; flushed when the tap is removed
         recordURL = nil
@@ -637,7 +644,11 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             let v = min(1.0, rms * 9)                                   // speech is ~0.02–0.1 RMS
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.levelTarget = v } }
         }
-        do { try engine.start() } catch { state = .failed("Cannot use the microphone: \(error.localizedDescription)"); return }
+        do { try engine.start() } catch {
+            vtrace("engine start FAILED: \(error.localizedDescription)")
+            state = .failed("Cannot use the microphone: \(error.localizedDescription)"); return
+        }
+        vtrace("listening, tap installed (bargeIn=\(bargeIn))")
         self.engine = engine
         request = req
         if !bargeIn { state = .listening }           // a barge-in listener stays quiet while the state is .speaking
@@ -647,8 +658,15 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     if bargeIn {                       // only there to catch the person breaking in over the reply
-                        guard self.state == .speaking, let r = result else { return }
-                        if BargeIn.isInterruption(r.bestTranscription.formattedString) { self.onBargeIn() }
+                        if let e = error { self.vtrace("bargeIn recognizer error: \(e.localizedDescription)") }
+                        guard self.state == .speaking, let r = result else {
+                            self.vtrace("bargeIn ignored: state=\(self.state) result=\(result != nil)")
+                            return
+                        }
+                        let heard = r.bestTranscription.formattedString
+                        let hit = BargeIn.isInterruption(heard)
+                        self.vtrace("bargeIn heard \(heard.debugDescription) interruption=\(hit)")
+                        if hit { self.onBargeIn() }
                         return
                     }
                     guard self.state == .listening else { return }
@@ -676,10 +694,35 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// The person started talking while the reply was being read: stop reading and open a fresh listen for the
     /// whole new utterance, which is then sent as the next turn (so the answer is supplemented, ChatGPT-style).
     private func onBargeIn() {
+        vtrace("onBargeIn — cutting the reply off")
         synth.stopSpeaking(at: .immediate)
         pendingUtterances = 0
         heard = ""
         Task { await startListening() }
+    }
+
+    /// A line in the barge-in trace, written only when it has been switched on:
+    ///
+    ///     defaults write local.llm-engine.llmbar voiceTrace -bool true
+    ///
+    /// It lands next to the chat history, in ~/Library/Application Support/LLMBar/voice-trace.log, so one
+    /// spoken exchange can be read back afterwards. Off by default: nothing is written and no file appears.
+    nonisolated func vtrace(_ line: String) {
+        guard UserDefaults.standard.bool(forKey: "voiceTrace")
+                || ProcessInfo.processInfo.environment["LLMBAR_VOICE_TRACE"] == "1" else { return }
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/LLMBar/voice-trace.log")
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        guard let data = "\(stamp)  \(line)\n".data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: data)
+        } else {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? data.write(to: url)
+        }
     }
 
     private func stopCapture() {
@@ -901,7 +944,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         pendingUtterances += 1
         if state != .speaking {
             state = .speaking
-            if dialogMode { Task { await startListening(bargeIn: true) } }   // listen for a barge-in over the reply
+            // Barge-in exists only in dialog mode: with it off nothing listens while the reply is read, so
+            // talking over it cannot do anything. The trace says which of the two happened.
+            if dialogMode { Task { await startListening(bargeIn: true) } }
+            else { vtrace("speaking, but dialogMode is off — no barge-in listener") }
         }
         synth.speak(u)
     }
