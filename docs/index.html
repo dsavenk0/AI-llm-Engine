@@ -454,7 +454,7 @@
                     <div class="term-log"><span class="dim">$</span> ./llm open</div>
                     <div class="term-log text-cyan">▸ Model: dealignai/Bonsai-2-27B-CRACK-Ternary-JANG (27B, ~7.6 GB)</div>
                     <div class="term-log dim">▸ Metal wired budget: 11.2 GB | Context limit: 45,056 tokens</div>
-                    <div class="term-log dim">▸ Loaded weights in 3.8s | OpenAI server running on http://127.0.0.1:8000/v1</div>
+                    <div class="term-log dim">▸ Loaded weights in 3.8s | OpenAI server running on http://127.0.0.1:8090/v1</div>
                     <div class="term-log"><br></div>
                     <div class="term-log"><span class="prompt-symbol">&gt;&gt;&gt;</span> <span class="user-input">Optimize speculative decode loop for Apple Silicon.</span></div>
                     <div class="term-log"><br></div>
@@ -477,7 +477,7 @@
                   <div class="integ-intro">
                     <h3 class="integ-head" data-i18n="integ_head">Seamless OpenAI API Compatibility</h3>
                     <p class="integ-sub" data-i18n="integ_sub_desc">
-                      AI-llm-Engine serves on <code>http://127.0.0.1:8000/v1</code>. Drop-in ready for Continue, Kilo Code, OpenCode, Claude Code, and Cursor with automatic <code>max_tokens</code> clamping.
+                      AI-llm-Engine serves on <code>http://127.0.0.1:8090/v1</code>. Drop-in ready for Continue, Kilo Code, OpenCode, Claude Code, and Cursor with automatic <code>max_tokens</code> clamping. Guaranteed JSON with <code>response_format</code>, embeddings from the loaded model, and several requests merged into one forward pass.
                     </p>
                   </div>
 
@@ -493,11 +493,11 @@
     "title": "Bonsai 27B",
     "provider": "openai",
     "model": "bonsai-27b",
-    "apiBase": "http://127.0.0.1:8000/v1",
+    "apiBase": "http://127.0.0.1:8090/v1",
     "apiKey": "none"
   }]
 }</code></pre>
-                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet='{"models":[{"title":"Bonsai 27B","provider":"openai","model":"bonsai-27b","apiBase":"http://127.0.0.1:8000/v1","apiKey":"none"}]}'>
+                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet='{"models":[{"title":"Bonsai 27B","provider":"openai","model":"bonsai-27b","apiBase":"http://127.0.0.1:8090/v1","apiKey":"none"}]}'>
                         <span data-i18n="copy_config">Copy Configuration</span>
                       </button>
                     </div>
@@ -508,11 +508,11 @@
                         <span class="apple-tag tag-blue">Safe Headroom</span>
                       </div>
                       <p class="integ-box-note">No HTTP 413 errors on oversized token requests:</p>
-                      <pre class="integ-code"><code>Base URL: http://127.0.0.1:8000/v1
+                      <pre class="integ-code"><code>Base URL: http://127.0.0.1:8090/v1
 Model: default
 Max Tokens: 32,000 (auto-clamped)
 Streaming: Enabled</code></pre>
-                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet="http://127.0.0.1:8000/v1">
+                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet="http://127.0.0.1:8090/v1">
                         <span data-i18n="copy_url">Copy Base URL</span>
                       </button>
                     </div>
@@ -526,7 +526,7 @@ Streaming: Enabled</code></pre>
                       <pre class="integ-code"><code>POST /api/chat      POST /api/generate
 GET  /api/tags      POST /api/show
 GET  /api/ps        GET  /api/version</code></pre>
-                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet="http://127.0.0.1:8000">
+                      <button type="button" class="apple-pill-btn apple-pill-btn-copy copy-snippet-btn" data-snippet="http://127.0.0.1:8090">
                         <span data-i18n="copy_url">Copy Base URL</span>
                       </button>
                     </div>
@@ -1149,7 +1149,7 @@ GET  /api/ps        GET  /api/version</code></pre>
             <summary class="faq-summary" data-i18n="faq_q3">How do I connect this to Continue.dev or Cursor?</summary>
             <div class="faq-content">
               <p data-i18n="faq_a3">
-                The engine runs a standard OpenAI-compatible HTTP server at <code>http://127.0.0.1:8000/v1</code>. In Continue.dev, configure provider as "openai" with model "default" and apiBase pointing to this address. Any OpenAI client works out of the box.
+                The engine runs a standard OpenAI-compatible HTTP server at <code>http://127.0.0.1:8090/v1</code>. In Continue.dev, configure provider as "openai" with model "default" and apiBase pointing to this address. Any OpenAI client works out of the box.
               </p>
             </div>
           </details>

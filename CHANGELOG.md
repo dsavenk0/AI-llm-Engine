@@ -2,6 +2,51 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## Unreleased
+
+### Added
+- **Merged-pass batching in the server** (`--batch-window <ms>`, `--batch-max`): requests that arrive within the
+  window are generated in one forward pass, so the weights are read once for the batch instead of once per
+  request. Measured 1.70x at two requests, 2.51x at four, 2.48x at eight (`tests/bench_batch.py`); off by
+  default, and a pass that ends up with one request runs the ordinary path so it keeps the prefix cache and
+  speculation. Requests with images, a reasoning block or a `response_format` are never merged.
+- **Embeddings on the native engine**: `POST /v1/embeddings` (float or base64) and Ollama's `/api/embed` and
+  `/api/embeddings`. The vector is the loaded model's final hidden state at the last token, L2-normalized;
+  nothing extra is loaded, each input is prefilled on a cache of its own and the conversation's prefix cache is
+  left untouched. `dimensions` is refused with the model's real width rather than truncating.
+- **Constrained decoding** (`response_format`, Ollama `format`): `engine/structured.py` is a character-level
+  pushdown automaton, and the sampler takes the highest-ranked token that keeps the document valid, ending the
+  reply when it is whole. The answer parses or the request fails. Enforces `type`, `properties`, `required`,
+  `additionalProperties`, `items`, `enum`; any other schema construct is refused with a 400 naming it, before
+  the model is woken. About 10 % of decode speed.
+- **A stop button for the spoken reply** in LLM Voice: the send button becomes a stop while the answer is being
+  written or read aloud, and stops both without opening the microphone.
+- **Measurements that did not exist**: `tests/startup.py` (server ready, time to first token, shutdown),
+  `tests/context_decode.py` (decode against context length), `tests/layer_profile.py` (per-layer timing inside
+  the real forward), `tests/bench_batch.py`.
+
+### Fixed
+- The request timeout started when the engine lock was acquired, so waiting for the model ate it. It now starts
+  at the first token check.
+- `tools/make-tiles.py` trims the dead field around each screenshot and puts them on one canvas, so the README
+  row reads as a set rather than a pile; the transparent background is kept.
+
+### Changed
+- **The README's efficiency figures were overstated and are corrected**: the weights column counted the
+  checkpoint on disk, which for these vision-language models includes a vision tower that is not loaded for text
+  work. Against the memory-bus ceiling the three models reach **70 %, 64 % and 64 %**, not 82 / 97 / 77.
+- Gatekeeper blocks a downloaded build on first launch (it is signed ad hoc, not notarized). The README, the
+  site's install steps and `build-dmg.sh` now say so and name the two ways through; `build-dmg.sh` notarizes and
+  staples when `LLMBAR_SIGN_IDENTITY` and `LLMBAR_NOTARY_PROFILE` are set.
+
+### Measured, not changed
+- Decode halves between a short context and 32K (76.7 → 36.9 tok/s on the 2B), and all of it is in the six
+  layers holding a KV cache; the eighteen GatedDeltaNet layers grow by 0.64 ms between them. Five candidate
+  causes were measured and ruled out — see `tests/layer_profile.py`. The whole step reaches 77 GB/s at a short
+  context and 51 GB/s at 32K while every operation in it reaches 86-88 alone, which is chain efficiency rather
+  than a defect.
+- Cold CLI start is 0.06-0.31 s and the server answers 0.50-0.97 s after launch, so neither was optimized.
+
 ## 1.0.0 — 28 October
 
 ### Changed — one app

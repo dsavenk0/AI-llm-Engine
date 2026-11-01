@@ -77,7 +77,7 @@
       act_context: "COMPUTED CONTEXT",
 
       integ_head: "Seamless OpenAI API Compatibility",
-      integ_sub_desc: "AI-llm-Engine serves on http://127.0.0.1:8000/v1. Drop-in ready for Continue, Kilo Code, OpenCode, Claude Code, and Cursor with automatic max_tokens clamping.",
+      integ_sub_desc: "AI-llm-Engine serves on http://127.0.0.1:8090/v1. Drop-in ready for Continue, Kilo Code, OpenCode, Claude Code, and Cursor with automatic max_tokens clamping. Guaranteed JSON with response_format, embeddings from the loaded model, and several requests merged into one forward pass.",
       integ_ollama_title: "Ollama API (no adapter)",
       integ_ollama_tag: "Same port",
       integ_ollama_note: "Point any Ollama client at the same server:",
@@ -186,7 +186,7 @@
       faq_q2: "Can a 16 GB MacBook Air really run a 27-billion parameter model?",
       faq_a2: "Yes. With Hadamard ternary quantization (JANG / Prism), the 27B weights require only ~7.6 GB of unified memory. Process overhead is capped at 0.66 GB, and the RAM Guard ceiling keeps total system memory under 88%, preventing macOS from swapping to disk or stuttering.",
       faq_q3: "How do I connect this to Continue.dev or Cursor?",
-      faq_a3: "The engine runs a standard OpenAI-compatible HTTP server at http://127.0.0.1:8000/v1. In Continue.dev, configure provider as 'openai' with model 'default' and apiBase pointing to this address. Any OpenAI client works out of the box.",
+      faq_a3: "The engine runs a standard OpenAI-compatible HTTP server at http://127.0.0.1:8090/v1. In Continue.dev, configure provider as 'openai' with model 'default' and apiBase pointing to this address. Any OpenAI client works out of the box.",
       faq_q4: "What are the macOS system requirements?",
       faq_a4: "Any Mac with Apple Silicon (M1, M2, M3, M4, or M5) running macOS 14.0 (Sonoma) or macOS 15.0+ (Sequoia). Works with as little as 8 GB RAM (for 4B models) up to 16 GB, 24 GB, 36 GB, 64 GB, 128 GB+.",
       faq_q5: "Do I need Python or an internet connection to start?",
@@ -269,7 +269,7 @@
       act_context: "РАССЧИТАННЫЙ КОНТЕКСТ",
 
       integ_head: "Совместимость с OpenAI API",
-      integ_sub_desc: "AI-llm-Engine работает на http://127.0.0.1:8000/v1. Готов к работе с Continue, Kilo Code, OpenCode, Claude Code и Cursor с автоматической защитой от переполнения токенов.",
+      integ_sub_desc: "AI-llm-Engine работает на http://127.0.0.1:8090/v1. Готов к работе с Continue, Kilo Code, OpenCode, Claude Code и Cursor с автоматической защитой от переполнения токенов. Гарантированный JSON через response_format, эмбеддинги от загруженной модели и слияние нескольких запросов в один проход.",
       integ_ollama_title: "API Ollama (без адаптера)",
       integ_ollama_tag: "Тот же порт",
       integ_ollama_note: "Наведите любой клиент Ollama на тот же сервер:",
@@ -378,7 +378,7 @@
       faq_q2: "Действительно ли MacBook Air 16 GB может запустить 27B модель?",
       faq_a2: "Да! Благодаря тернарному квантованию Адамара (JANG / Prism) веса 27B занимают всего ~7.6 GB. Накладные расходы процесса ограничены 0.66 GB, а сторож RAM удерживает общую память системы ниже 88%, исключая своп на SSD и подвисания.",
       faq_q3: "Как подключить движок к Continue.dev или Cursor?",
-      faq_a3: "Движок запускает стандартный OpenAI-совместимый HTTP-сервер на http://127.0.0.1:8000/v1. В Continue.dev укажите provider: 'openai', apiBase на этот адрес. Любой клиент OpenAI работает из коробки.",
+      faq_a3: "Движок запускает стандартный OpenAI-совместимый HTTP-сервер на http://127.0.0.1:8090/v1. В Continue.dev укажите provider: 'openai', apiBase на этот адрес. Любой клиент OpenAI работает из коробки.",
       faq_q4: "Каковы системные требования macOS?",
       faq_a4: "Любой Mac на чипах Apple Silicon (M1, M2, M3, M4 или M5) под управлением macOS 14.0 (Sonoma) или macOS 15.0+ (Sequoia). Работает от 8 GB RAM (для 4B моделей) до 16, 24, 36, 64, 128 GB+.",
       faq_q5: "Нужны ли Python и интернет, чтобы начать?",
@@ -508,7 +508,7 @@
   });
 
   document.getElementById('btn-copy-api')?.addEventListener('click', (e) => {
-    copyToClipboard('http://127.0.0.1:8000/v1', e.currentTarget);
+    copyToClipboard('http://127.0.0.1:8090/v1', e.currentTarget);
   });
 
   const sleepBtn = document.getElementById('btn-sleep-test');

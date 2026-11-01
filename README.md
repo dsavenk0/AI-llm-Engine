@@ -17,7 +17,7 @@ Open the app, pick a model from the list, and it downloads and starts. What you 
 - **A chat in the menu bar.** Click the small icon, type or speak, and hear the answer read back.
 - **A code editor with an assistant** that reads your project and proposes edits you approve or reject.
 - **Your own private API.** Continue, Kilo Code, opencode — anything that talks to OpenAI, Ollama or Claude can
-  point at `http://localhost:8080` instead of the internet.
+  point at `http://localhost:8090` instead of the internet.
 - **Documents, scans and recordings.** Attach a PDF, a photo of a page or a voice memo: it is read on the Mac
   itself and handed to the model.
 
@@ -57,22 +57,45 @@ reach, so every tok/s figure can be sanity-checked against them.
 | fp16 matmul, 4096² (prefill is compute-bound) | **12.3 TFLOP/s** |
 | Memory read bandwidth (decode is bandwidth-bound) | **~130 GB/s** |
 
-| MLX model, 4-bit unless noted | Weights | Decode (prose) | Prefill 128 / 1K / 4K | Code edits (speculation) | Load / peak |
+| MLX model, 4-bit unless noted | Weights read | Decode (prose) | Prefill 128 / 1K / 4K | Code edits (speculation) | Load / peak |
 |---|---|---|---|---|---|
-| Qwen3.5-0.8B (8-bit) | 0.93 GB | **114.9 tok/s** | 2032 / 3185 / 3184 tok/s | **510 tok/s** (0.87 accepted) | 0.60 s / 1.11 GB |
-| Qwen3.5-2B | 1.60 GB | **78.8 tok/s** | 1211 / 1638 / 1713 tok/s | **371 tok/s** (1.00 accepted) | 0.47 s / 1.41 GB |
-| Qwen3.5-4B | 2.83 GB | **35.4 tok/s** | 552 / 687 / 724 tok/s | **156 tok/s** (0.90 accepted) | 0.78 s / 3.04 GB |
+| Qwen3.5-0.8B (8-bit) | 0.74 GiB | **114.9 tok/s** | 2032 / 3185 / 3184 tok/s | **510 tok/s** (0.87 accepted) | 0.60 s / 1.11 GB |
+| Qwen3.5-2B | 0.99 GiB | **78.8 tok/s** | 1211 / 1638 / 1713 tok/s | **371 tok/s** (1.00 accepted) | 0.47 s / 1.41 GB |
+| Qwen3.5-4B | 2.20 GiB | **35.4 tok/s** | 552 / 687 / 724 tok/s | **156 tok/s** (0.90 accepted) | 0.78 s / 3.04 GB |
 
-Against the ~130 GB/s ceiling (reading every weight once per token) that is **82 %, 97 % and 77 %** of what the
-memory bus allows — a decode-bound engine running close to the hardware limit, so the headroom that is left is
-bandwidth, not Python. Prompt-lookup speculation gives **×4.4 – ×4.7** over plain decode on code edits.
+Against the ~130 GB/s ceiling that is **70 %, 64 % and 64 %** of what the memory bus allows: decode-bound, with
+about a third of each step spent above what the bus alone owes. Prompt-lookup speculation gives **×4.4 – ×4.7**
+over plain decode on code edits.
 
 <sub>Conditions: best of several runs after a warm-up; prefill prompts are built to exactly 128 / 1024 / 4096
 tokens for *each* model's own tokenizer; prose decode is 200 tokens; the code-edit case rewrites a real source
-file. The ceiling column is an upper bound — it assumes every byte of weights is streamed each token, while the
-embedding table is gathered, not streamed, so the true efficiency is somewhat below these percentages. These runs
-were taken with 68–70 % of system RAM already in use (the harness warns above 45 %), so they are conservative
-rather than best-case.</sub>
+file. "Weights read" is what the engine actually loads and streams per token, not the size of the checkpoint on
+disk: these are vision-language models, and the vision tower (0.19–0.62 GiB of the file) is not loaded for text
+work, so counting the file would overstate the efficiency by a third. These runs were taken with 68–70 % of
+system RAM already in use (the harness warns above 45 %), so they are conservative rather than best-case.</sub>
+
+### What the first second costs, and what a long conversation costs
+
+Two things the table above does not show, both measured on the same Mac
+(`tests/startup.py`, `tests/context_decode.py`, `tests/layer_profile.py`):
+
+| | 0.8B | 2B | 4B |
+|---|---|---|---|
+| Server ready (process start → answering) | 0.57 s | 0.50 s | 0.97 s |
+| Time to first token | 0.05 s | 0.08 s | 0.14 s |
+| Clean shutdown | 0.09 s | 0.09 s | 0.20 s |
+
+Decode slows as the conversation grows, because every step reads the whole KV cache as well as the weights.
+On the 2B:
+
+| Context | 512 | 8K | 32K |
+|---|---|---|---|
+| Decode | 76.7 tok/s | 61.1 tok/s | **36.9 tok/s** |
+| KV cache read per token | 0.03 GB | 0.16 GB | 0.59 GB |
+
+All of that slowdown is in the six layers that hold a KV cache; the eighteen GatedDeltaNet layers between them
+grow by 0.64 ms, because their state is a fixed size whatever the context. That is the hybrid architecture
+earning its keep — a pure transformer of this size would fall off considerably faster.
 
 ### Against vMLX 1.6.75 — same Mac, same prompts, alternating runs
 
@@ -349,11 +372,35 @@ The **Anthropic Messages API** is native, not a wrapper: `POST /v1/messages` (st
 the reply returned as Anthropic `thinking`/`text`/`tool_use` content blocks. Auth takes `x-api-key` as well as
 `Authorization: Bearer`. The same loaded model, again on the one generation path.
 
+**Structured output** is enforced, not requested. `response_format: {"type": "json_object"}` or
+`{"type": "json_schema", "json_schema": {"schema": {...}}}` — and Ollama's `format` ("json", or the schema
+itself) — constrain the sampler itself: at every step it takes the token the model ranks highest *among those
+that keep the answer valid*, and the reply ends the moment the document is whole. So the answer parses or the
+request fails; it is never prose, and never half a document. Of JSON Schema it enforces `type`, `properties`,
+`required`, `additionalProperties`, `items` and `enum`; a schema using anything else is refused with a 400 that
+names the part, before the model is woken, rather than being half-applied. Speculation is off while a constraint
+is active and no reasoning block is opened. It costs about 10 % of decode speed.
+
+**Embeddings**: `POST /v1/embeddings` (`input` as a string, a list of strings or token ids; `encoding_format`
+`float` or `base64`) and Ollama's `POST /api/embed` and `POST /api/embeddings`. The vector is the loaded model's
+own final hidden state at the last token, L2-normalized — nothing extra is downloaded or loaded. Read the caveat
+in `Engine.embed`: unless the loaded model was trained for retrieval, these vectors compare texts *this same
+model* embedded and should not be expected to match a dedicated embedding model. `dimensions` is refused with
+the model's real width instead of truncating a vector that was never trained to be truncated.
+
 Any `model` name is accepted, since the server hosts exactly one model.
 
 `POST /v1/chat/completions` also takes `repetition_penalty` (1.0 = off; 1.05–1.2 divides the score of tokens
 already written — `presence_penalty` alone cannot break a closed cycle), and an answer that visibly loops (the same
 chunk repeated back to back) is cut off by the engine itself instead of running to the token limit.
+
+**Several requests in one pass.** Served one at a time, four clients get the same total throughput as one
+(1.01×), because most of a decode step is reading the weights and every request reads them again. `--batch-window
+<ms>` merges requests that arrive within that window into a single forward pass, so the weights are read once for
+the batch: measured 1.70× at two requests, 2.51× at four, 2.48× at eight (`tests/bench_batch.py`). It is off by
+default, and a pass that ends up with one request runs the ordinary path instead — which keeps the prefix cache
+and speculation a merged pass has to give up. Requests carrying images, a reasoning block or a `response_format`
+are never merged. `--batch-max` caps a pass (8).
 
 Engine switches (also in LLMBar's settings): `--log-level error|warning|info|debug|trace` (every line is tagged
 `[request]`, `[memory]`, `[model]`, `[cache]`, `[sleep]`, `[quality]` or `[error]`), `--fallback-model off` (a request
