@@ -78,6 +78,19 @@ class TestAdmission(unittest.TestCase):
         self.assertTrue(all(u.acquire() for _ in range(50)))   # 0 = no cap
 
 
+class TestBatcher(unittest.TestCase):
+    """The merging half of the scheduler: what it will and will not take into one pass."""
+
+    def test_takes_only_plain_text_requests_and_only_when_enabled(self):
+        from engine.server import Batcher
+        plain = {"media": None, "thinking_open": False}
+        self.assertFalse(Batcher(0).takes(plain))                 # no --batch-window: off
+        on = Batcher(10)
+        self.assertTrue(on.takes(plain))
+        self.assertFalse(on.takes({"media": ["an image"], "thinking_open": False}))   # no media path
+        self.assertFalse(on.takes({"media": None, "thinking_open": True}))            # no thinking budget
+
+
 class Server:
     def __init__(self, model, *extra):
         self.port = free_port()
@@ -472,6 +485,25 @@ class TestNativeServerOptions(unittest.TestCase):
         srv = self.with_server()
         code, r = srv.chat(model="gpt-4o")
         self.assertEqual(code, 200, r)
+
+    def test_batched_requests_each_get_a_complete_answer_of_their_own(self):
+        """--batch-window merges overlapping requests into one forward pass. Every client must still get its
+        own full answer; the log line proves the merge actually happened rather than the requests queueing."""
+        srv = self.with_server("--batch-window", "300")
+        out = {}
+
+        def go(i):
+            out[i] = srv.chat(f"request number {i}", max_tokens=8)
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(4)]
+        [t.start() for t in threads]
+        [t.join(120) for t in threads]
+        self.assertEqual(sorted(out), [0, 1, 2, 3])
+        for i in sorted(out):
+            code, r = out[i]
+            self.assertEqual(code, 200, r)
+            self.assertGreater(r["usage"]["completion_tokens"], 0, r)
+            self.assertIsInstance(r["choices"][0]["message"]["content"], str)
+        self.assertIn("batch:", open(srv.log.name).read())
 
     def test_request_timeout_ends_as_a_timeout(self):
         srv = self.with_server("--request-timeout", "0.001")        # the deadline passes before any token

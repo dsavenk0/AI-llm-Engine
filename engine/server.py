@@ -32,9 +32,7 @@ class Admission:
     lock). Over the cap a request is refused with 503 instead of piling up unbounded threads and prompt
     buffers — a coding agent, a chat, the editor and voice all hitting one model stay bounded. 0 = no cap.
 
-    This is the scheduler's admission half. Merging several requests into one forward pass is a separate,
-    engine-level change (engine/batch.py proves the lossless batched decode) that is wired on with real-model
-    concurrency measurement, since it has to carry speculation, stop strings and the thinking budget too."""
+    This is the scheduler's admission half; `Batcher` below is the merging half."""
 
     def __init__(self, limit=0):
         self.limit = limit
@@ -57,6 +55,122 @@ class Admission:
         return self.n
 
 
+class Batcher:
+    """Merges concurrent generation requests into one forward pass, so the weights are read once per step for
+    the whole batch instead of once per step per request.
+
+    Measured motivation, Qwen3.5-2B-4bit on an M5 (tests/concurrency.py): served one at a time, four clients
+    together reach 75.3 tok/s — the same as one client alone (1.01x), because ~68 % of a decode step is
+    reading the weights and every request reads them again. One merged pass (tests/bench_batch.py, 48 tokens
+    per request) gives 1.69x at two rows, 2.52x at four and 2.45x at eight.
+
+    A lone request never pays for this: a pass that ends up with one row runs the ordinary path, which keeps
+    the prefix cache and speculative decoding that a merged pass has to give up (and which are worth ×4.4 on
+    code edits). Requests carrying images or an open reasoning block are not merged either — `generate_batch`
+    has no media path and does not apply the thinking budget. Off unless `--batch-window` is set.
+    """
+
+    def __init__(self, window_ms=0, max_rows=8):
+        self.window = max(0.0, window_ms / 1000.0)
+        self.max_rows = max(1, max_rows)
+        self.cv = threading.Condition()
+        self.waiting = []                  # rows that have arrived and are not yet in a pass
+        self.thread = None
+
+    @property
+    def enabled(self):
+        return self.window > 0
+
+    def takes(self, req):
+        """Only plain text requests are merged; see the class docstring for why."""
+        return self.enabled and not req["media"] and not req["thinking_open"]
+
+    def start(self):
+        if self.enabled and self.thread is None:
+            self.thread = threading.Thread(target=self._loop, daemon=True, name="batcher")
+            self.thread.start()
+
+    def submit(self, req):
+        """Hands the request to the batch thread and yields the engine's items as they come back."""
+        row = _Row(req)
+        with self.cv:
+            self.waiting.append(row)
+            self.cv.notify()
+        while True:
+            item = row.out.get()
+            if item is _DONE:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+    def _loop(self):
+        while True:
+            with self.cv:
+                while not self.waiting:
+                    self.cv.wait()
+                deadline = time.time() + self.window          # let the others in the window catch up
+                while len(self.waiting) < self.max_rows:
+                    left = deadline - time.time()
+                    if left <= 0 or not self.cv.wait(timeout=left):
+                        break
+                rows, self.waiting = self.waiting[:self.max_rows], self.waiting[self.max_rows:]
+            self._run(rows)
+
+    def _run(self, rows):
+        try:
+            with ENGINE.lock:
+                if len(rows) == 1:
+                    self._solo(rows[0])
+                else:
+                    self._merged(rows)
+        except BaseException as e:                            # forwarded to every waiting HTTP thread
+            for r in rows:
+                r.out.put(e)
+        finally:
+            for r in rows:
+                r.out.put(_DONE)
+
+    def _solo(self, row):
+        q = row.req
+        gen = lambda: ENGINE.generate(q["ids"], q["media"], q["max_tokens"], q["sampling"], q["stop"],
+                                      q["should_stop"], seed=q["seed"], thinking_open=q["thinking_open"])
+        for item in run_job(gen):
+            row.out.put(item)
+
+    def _merged(self, rows):
+        reqs = [{"ids": r.req["ids"], "max_tokens": r.req["max_tokens"], "sampling": r.req["sampling"],
+                 "stop": r.req["stop"], "should_stop": r.req["should_stop"], "seed": r.req["seed"]}
+                for r in rows]
+        log(f"batch: {len(rows)} requests in one pass")
+        stats = next(run_job(lambda: iter([ENGINE.generate_batch(reqs, on_piece=lambda i, t: rows[i].out.put(("", t)))])))
+        for i, r in enumerate(rows):
+            r.out.put(stats[i])
+
+
+class _Row:
+    """One request waiting for, or being served by, a batch pass."""
+
+    def __init__(self, req):
+        self.req = req
+        self.out = queue.Queue()
+
+
+BATCHER = Batcher(0)
+
+
+def generate_stream(req):
+    """The engine's items for one request — text pieces, then the final stats dict — taking either the
+    ordinary single-request path or, when other requests overlap it, one merged batch pass."""
+    if BATCHER.takes(req):
+        yield from BATCHER.submit(req)
+        return
+    with ENGINE.lock:
+        yield from run_job(lambda: ENGINE.generate(req["ids"], req["media"], req["max_tokens"], req["sampling"],
+                                                   req["stop"], req["should_stop"], seed=req["seed"],
+                                                   thinking_open=req["thinking_open"]))
+
+
 ADMISSION = Admission(0)
 GEN_PATHS = ("/v1/chat/completions", "/chat/completions", "/v1/messages", "/api/chat", "/api/generate")
 SHUTTING_DOWN = threading.Event()        # set on SIGTERM: new generation requests are refused, in-flight drain
@@ -75,6 +189,7 @@ def worker(init):
     global ENGINE
     ENGINE = init()
     READY.set()
+    BATCHER.start()                      # no-op unless --batch-window is set; needs ENGINE for its lock
     # how often an idle engine looks at the clock: 20 s, or a quarter of a very short idle-sleep
     poll = 20.0 if ARGS.idle_sleep <= 0 else max(0.2, min(20.0, ARGS.idle_sleep * 60 / 4))
     while True:
@@ -545,39 +660,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         yield ("ready", rid, created)
 
         reasoning, content, stats = [], [], {}
-        with ENGINE.lock:
-            timeout = getattr(ARGS, "request_timeout", 0) or 0
-            deadline = time.time() + timeout if timeout else None
-            timed_out = [False]
+        timeout = getattr(ARGS, "request_timeout", 0) or 0
+        deadline = [None]                              # started on the first token check, so waiting for the
+        timed_out = [False]                            # model (lock or batch window) does not eat the timeout
 
-            def should_stop():                         # the client hung up, or the wall-clock deadline passed
-                if cancelled.is_set():
-                    return True
-                if deadline and time.time() > deadline:
-                    timed_out[0] = True
-                    return True
-                return False
-            try:
-                gen = lambda: ENGINE.generate(ids, media, max_tokens, sampling, stop, should_stop,
-                                              seed=body.get("seed"), thinking_open=bool(thinking_open))
-                for item in run_job(gen):
-                    if isinstance(item, dict):
-                        stats = item
-                        break
-                    for kind, s in parser.feed(item[1]):
-                        (reasoning if kind == "reasoning" else content).append(s)
-                        yield ("delta", kind, s)
-                for kind, s in parser.finish():
+        def should_stop():                             # the client hung up, or the wall-clock deadline passed
+            if cancelled.is_set():
+                return True
+            if timeout and deadline[0] is None:
+                deadline[0] = time.time() + timeout
+            if deadline[0] and time.time() > deadline[0]:
+                timed_out[0] = True
+                return True
+            return False
+
+        req = {"ids": ids, "media": media, "max_tokens": max_tokens, "sampling": sampling, "stop": stop,
+               "should_stop": should_stop, "seed": body.get("seed"), "thinking_open": bool(thinking_open)}
+        try:
+            for item in generate_stream(req):
+                if isinstance(item, dict):
+                    stats = item
+                    break
+                for kind, s in parser.feed(item[1]):
                     (reasoning if kind == "reasoning" else content).append(s)
                     yield ("delta", kind, s)
-            except MemoryLimitError as e:
-                log(f"memory: {e}")
-                raise ChatError(503, str(e), "server_error", "insufficient_memory")
-            except ContextError as e:
-                raise ChatError(400, str(e), code="context_length_exceeded")
-            except Exception as e:  # keep the server alive on model errors
-                log(f"generation error: {e!r}")
-                raise ChatError(500, str(e), "server_error")
+            for kind, s in parser.finish():
+                (reasoning if kind == "reasoning" else content).append(s)
+                yield ("delta", kind, s)
+        except MemoryLimitError as e:
+            log(f"memory: {e}")
+            raise ChatError(503, str(e), "server_error", "insufficient_memory")
+        except ContextError as e:
+            raise ChatError(400, str(e), code="context_length_exceeded")
+        except Exception as e:  # keep the server alive on model errors
+            log(f"generation error: {e!r}")
+            raise ChatError(500, str(e), "server_error")
 
         calls = parse_calls(parser.tool_text, tools) if parser.tool_text else []
         finish, stop_reason = finish_reason(stats, bool(calls))
@@ -955,6 +1072,11 @@ def main():
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
     ap.add_argument("--max-queue", type=int, default=0,
                     help="refuse (503) a generation request when this many are already in flight (0 = no cap)")
+    ap.add_argument("--batch-window", type=float, default=0,
+                    help="merge generation requests that arrive within N ms into one forward pass "
+                         "(0 = off; a pass that ends up with one request runs the ordinary path)")
+    ap.add_argument("--batch-max", type=int, default=8,
+                    help="most requests in one merged pass (see --batch-window)")
     ap.add_argument("--request-timeout", type=float, default=0,
                     help="stop a generation after N seconds and end it as a timeout (0 = no limit)")
     ap.add_argument("--shutdown-grace", type=float, default=10,
@@ -987,6 +1109,8 @@ def main():
         ap.error(str(e))
     ARGS.name = ARGS.name or os.path.basename(ARGS.model.rstrip("/")).lower()
     ADMISSION.limit = max(0, ARGS.max_queue)
+    BATCHER.window = max(0.0, ARGS.batch_window / 1000.0)
+    BATCHER.max_rows = max(1, ARGS.batch_max)
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from engine.compat import CompatEngine, pick_backend
