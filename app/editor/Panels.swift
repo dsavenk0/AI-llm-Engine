@@ -580,6 +580,8 @@ struct ConductorSheet: View {
     @Binding var shown: Bool
     @State private var status: ConductorStatus?
     @State private var busy = false
+    @State private var task = ""
+    @State private var files: [URL] = []
 
     private let roles = ["heavy", "code", "fast"]
     private let about = ["heavy": "plans and synthesizes — architecture, hard reasoning",
@@ -600,11 +602,38 @@ struct ConductorSheet: View {
             if let s = status {
                 List {
                     Section("Roles") { ForEach(roles, id: \.self) { roleRow($0, s) } }
+                    Section("Task") {
+                        TextField("What should it do?", text: $task, axis: .vertical)
+                            .textFieldStyle(.roundedBorder).lineLimit(1...4)
+                        HStack(spacing: 8) {
+                            Button("Attach files…") { pickFiles() }
+                            Text("scans, photos, recordings and documents are recognised on this Mac first")
+                                .font(.caption2).foregroundColor(.secondary)
+                        }
+                        ForEach(files, id: \.self) { u in
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc").font(.caption)
+                                Text(u.lastPathComponent).font(.caption).lineLimit(1)
+                                Spacer()
+                                Button { files.removeAll { $0 == u } } label: {
+                                    Image(systemName: "xmark.circle.fill").font(.caption)
+                                }.buttonStyle(.plain).foregroundColor(.secondary)
+                            }
+                        }
+                    }
                     Section {
-                        Text("Run it from a terminal (it switches the engine between local models, so the model "
-                             + "you have loaded will change):").font(.caption).foregroundColor(.secondary)
-                        Text("./llm conduct \"<task>\"").font(.system(size: 12, design: .monospaced))
-                            .textSelection(.enabled).foregroundColor(Palette.accent)
+                        Text("Run it from a terminal — it switches the engine between local models, so the model "
+                             + "you have loaded will change. The line below is built from what you entered:")
+                            .font(.caption).foregroundColor(.secondary)
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(command).font(.system(size: 12, design: .monospaced))
+                                .textSelection(.enabled).foregroundColor(Palette.accent)
+                            Spacer()
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(command, forType: .string)
+                            }
+                        }
                         if s.installed.count < 2 {
                             Text("Only one model is installed — install more to give the roles different models "
                                  + "(the Conductor still works with one).").font(.caption2).foregroundColor(Palette.yellow)
@@ -648,6 +677,24 @@ struct ConductorSheet: View {
             }
             Text(about[role] ?? "").font(.caption2).foregroundColor(.secondary)
         }.padding(.vertical, 2)
+    }
+
+    /// The command the person is about to run, quoted so a path with a space in it survives the shell.
+    private var command: String {
+        let quote = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        var line = "./llm conduct " + quote(task.isEmpty ? "<task>" : task)
+        for u in files { line += " --file " + quote(u.path) }
+        return line
+    }
+
+    private func pickFiles() {
+        let p = NSOpenPanel()
+        p.allowsMultipleSelection = true
+        p.canChooseDirectories = false
+        p.prompt = "Attach"
+        if p.runModal() == .OK {
+            for u in p.urls where !files.contains(u) { files.append(u) }
+        }
     }
 
     private func reload() async { status = await ws.conductorStatus() }

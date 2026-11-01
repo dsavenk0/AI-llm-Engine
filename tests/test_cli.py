@@ -64,6 +64,48 @@ class TestContinueConfig(unittest.TestCase):
         self.assertIn("models:\n  " + llm.BEGIN, text)
 
 
+class TestClineConfig(unittest.TestCase):
+    """Cline reads its settings from a plain JSON file, so the CLI writes the keys its own UI would have
+    stored (apps/vscode/src/shared/storage/storage-context.ts): a shared base URL, and the provider and
+    model id once per mode."""
+
+    def test_writes_the_keys_cline_reads_and_keeps_the_rest(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "globalState.json")
+        with open(p, "w") as f:
+            json.dump({"telemetrySetting": "off", "taskHistory": [{"id": "1"}]}, f)
+        llm._write_cline(p, cfg(), MODEL, 40960, 8192)
+        with open(p) as f:
+            data = json.load(f)
+        self.assertEqual(data["openAiBaseUrl"], "http://localhost:%d/v1" % cfg()["port"])
+        for mode in ("planMode", "actMode"):
+            self.assertEqual(data[mode + "ApiProvider"], "openai")
+            self.assertEqual(data[mode + "OpenAiModelId"], llm.served_name(MODEL))
+        self.assertEqual(data["telemetrySetting"], "off")      # everything else Cline keeps is untouched
+        self.assertEqual(data["taskHistory"], [{"id": "1"}])
+        self.assertTrue(os.path.exists(p + ".bak"))
+
+    def test_creates_the_file_and_never_writes_a_secret(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "data", "globalState.json")
+        c = cfg()
+        c["api_key"] = "sk-secret"
+        llm._write_cline(p, c, MODEL, 40960, 8192)
+        with open(p) as f:
+            text = f.read()
+        self.assertNotIn("sk-secret", text)     # secrets live in Cline's own secrets.json, not here
+        self.assertIn("openAiBaseUrl", text)
+
+    def test_the_data_directory_follows_cline_s_own_environment_variables(self):
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"CLINE_DATA_DIR": os.path.join(d, "explicit")}):
+            self.assertEqual(llm.cline_state_path(), os.path.join(d, "explicit", "globalState.json"))
+        with mock.patch.dict(os.environ, {"CLINE_DIR": os.path.join(d, "home")}, clear=False):
+            os.environ.pop("CLINE_DATA_DIR", None)
+            self.assertEqual(llm.cline_state_path(), os.path.join(d, "home", "data", "globalState.json"))
+
+
 class TestOpencodeStyleConfig(unittest.TestCase):
     def test_kilo_aliases_legacy_provider_and_keeps_others(self):
         d = tempfile.mkdtemp()

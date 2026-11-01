@@ -22,7 +22,7 @@ llm — manager for local MLX models running on the bundled engine (engine/).
   ./llm rm <#|name> [--yes]  delete a downloaded model from disk
   ./llm convert <m.gguf> [out]   export a GGUF as an MLX folder (config + f16 safetensors + tokenizer)
   ./llm inspect [<#|name|path>]  what is inside a model: layers, storage types, bits per weight, biggest tensors
-  ./llm connect [client]     register the model in Continue, Kilo Code or opencode (your choice)
+  ./llm connect [client]     register the model in Continue, Kilo Code, opencode or Cline (your choice)
 
  Audio & documents   (./llm setup --audio installs Whisper + Kokoro; --ocr builds the OCR helper)
   ./llm transcribe <audio>   speech-to-text with Whisper (MLX), on-device (--model <hf-repo>, --json)
@@ -2031,10 +2031,21 @@ def _read_jsonc(path):
         return json.loads(re.sub(r",(\s*[}\]])", r"\1", no_comments))
 
 
+def cline_state_path():
+    """Cline keeps its settings in a plain JSON file, so it can be configured without opening its UI.
+    The data directory is CLINE_DATA_DIR, else CLINE_DIR/data, else ~/.cline/data — the same order the
+    extension itself resolves (apps/vscode/src/shared/storage/storage-context.ts)."""
+    d = (os.environ.get("CLINE_DATA_DIR") or "").strip()
+    if not d:
+        d = os.path.join((os.environ.get("CLINE_DIR") or "").strip() or os.path.join(HOME, ".cline"), "data")
+    return os.path.join(d, "globalState.json")
+
+
 CLIENTS = {
     "continue": ("Continue", os.path.join(HOME, ".continue", "config.yaml")),
     "kilo": ("Kilo Code", KILO_CFG),
     "opencode": ("opencode", os.path.join(HOME, ".config", "opencode", "opencode.json")),
+    "cline": ("Cline", cline_state_path()),
 }
 
 
@@ -2144,6 +2155,37 @@ def _write_continue(path, cfg, m, ctx, out):
         f.write(text)
 
 
+def _write_cline(path, cfg, m, ctx, out):
+    """Write the keys Cline's own UI would have stored, into its globalState.json.
+
+    `openAiBaseUrl` is shared by both of Cline's modes; the provider and the model id are per mode
+    (plan / act), which is why each is written twice. The file is read verbatim as the extension's global
+    state, so merging into it leaves everything else Cline keeps there untouched.
+
+    The API key is deliberately not written: Cline keeps secrets in a separate secrets.json whose key
+    names this has not verified, and writing a guess would either be ignored or corrupt the file. With a
+    key set on the engine, the person pastes it into Cline once — the message below says so.
+    """
+    data = {}
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (ValueError, OSError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    name = served_name(m)
+    data["openAiBaseUrl"] = f"http://localhost:{cfg['port']}/v1"
+    for mode in ("planMode", "actMode"):
+        data[mode + "ApiProvider"] = "openai"
+        data[mode + "OpenAiModelId"] = name
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
 def connect_client(cfg, which=None):
     """Register the model in an editor/agent client of the user's choice."""
     m = current_model(cfg)
@@ -2163,12 +2205,16 @@ def connect_client(cfg, which=None):
     ctx, out = client_limits(cfg, m)
     if which == "continue":
         _write_continue(path, cfg, m, ctx, out)
+    elif which == "cline":
+        _write_cline(path, cfg, m, ctx, out)
     else:
         _write_opencode_style(path, cfg, m, ctx, out, alias=("local_qwen",) if which == "kilo" else (),
                               others=_other_models(cfg, m))
     print(G(T("{client} configured: {name}, context {ctx}, output {out}").format(
         client=title, name=served_name(m), ctx=ctx, out=out)))
     print(DIM(T("File: {path} (backup: .bak) · reload the editor window to apply.").format(path=path)))
+    if which == "cline" and cfg["api_key"]:
+        print(Y(T("Cline keeps API keys in its own secrets file — paste the engine's key into Cline once.")))
     return True
 
 
