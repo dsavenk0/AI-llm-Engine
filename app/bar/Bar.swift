@@ -1874,7 +1874,11 @@ struct ContentView: View {
                 Text(L("Settings", "Настройки")).tag(3)
                 Text(L("Tools", "Тулзы")).tag(4)
             }.pickerStyle(.segmented).labelsHidden()
-            ScrollView(showsIndicators: false) {
+            // `showsIndicators: false` only hides the scroller: with the system set to "Show scroll bars:
+            // Always" the legacy scroller still reserves its ~15pt gutter, which pushes every card left and
+            // leaves the panel visibly off-centre (23pt of margin on the left against 37pt on the right).
+            // .scrollIndicators(.never) gives the width back.
+            ScrollView {
                 Group {
                     switch tab {
                     case 0: EngineTab(e: e, mon: mon)
@@ -1884,7 +1888,9 @@ struct ContentView: View {
                     default: ToolsTab(e: e)
                     }
                 }
-            }.frame(height: ContentView.scrollHeight)
+            }
+            .scrollIndicators(.never)
+            .frame(height: ContentView.scrollHeight)
             if e.busy == nil, !e.checks.isEmpty {
                 CheckBanner(e: e)
             }
