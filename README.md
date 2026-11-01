@@ -20,6 +20,9 @@ Open the app, pick a model from the list, and it downloads and starts. What you 
   point at `http://localhost:8090` instead of the internet.
 - **Documents, scans and recordings.** Attach a PDF, a photo of a page or a voice memo: it is read on the Mac
   itself and handed to the model.
+- **It can look things up.** Ask about today's news, the weather or a price and it searches the web and reads the
+  pages as clean text — DuckDuckGo with no key, or your own SearxNG. On in the voice chat, off by default in the
+  coding agent, and private addresses are always refused.
 
 **Why this one rather than another local runner**
 
@@ -120,21 +123,18 @@ its Metal headroom estimate (~8.5K on 16 GB).
 
 ### What it does that LM Studio, Ollama and plain llama.cpp do not
 
-- **Adaptive Hadamard-rotated quantization (JANG / ternary TQ1).** It runs Prism/JANG Hadamard-rotated affine bundles
-  and 1.75-bit ternary formats (TQ1_G128 / PTQ1_0) on its own Metal lookup-table kernel — not only the generic GGUF
-  quants the others load. Ordinary GGUF still runs too, on the engine's own MLX decoder (no llama.cpp needed).
-- **Fused matmuls through one Hadamard transform.** The bundle stores one sign vector per input width, so q|k|v,
-  gate|up and qkv|z each run as a single fused quantized matmul after one shared transform, instead of a transform
-  per projection.
-- **Compiled layer blocks.** `mx.compile`d blocks (norm→Hadamard, gated-delta pre/post, attention pre/post, MLP +
-  residual) cut the thousands of small per-token kernel launches that dominate decode latency — to within ~11 % of
-  the raw weight-read time.
-- **Exact prompt-lookup speculative decoding.** Code edits, quotes and tool arguments decode ~2.5× faster (27–35 vs
-  ~10 tok/s) with output bit-identical to plain greedy; it switches itself off on prose, so nothing is lost.
-- **Smart out-of-memory protection.** A whole-machine RAM ceiling (88 % by default) the others do not have: before a
-  request it frees caches, caps the output to what fits and refuses an oversized prompt with a clear error — instead
-  of swapping and freezing a 16 GB Mac. It shrinks the prefill chunk under pressure and checks every 32 tokens while
-  generating. (Where vMLX returns HTTP 413 and fails, this clamps and succeeds.)
+- **Formats the others cannot open.** Prism/JANG Hadamard-rotated bundles and 1.75-bit ternary (TQ1_G128 / PTQ1_0)
+  run on the engine's own Metal kernels — not only the generic GGUF quants the others load. Ordinary GGUF runs too,
+  on the engine's own MLX decoder, with no llama.cpp needed.
+- **It tells you before the download whether a model will start.** `./llm search` reads a repo's headers and marks
+  what will not run, with the reason — a vendor runtime it does not ship, or a ggml type outside upstream's range.
+  Checked against `prism-ml/bonsai-2-small`, where llama.cpp only fails at load time.
+- **A ceiling on the whole Mac's memory, not just its own.** The others watch their own process; this one refuses or
+  trims a request that would push the machine into swap, and says so. See [How it is fast](#how-it-is-fast).
+- **Three wire formats on one port.** OpenAI, Ollama and Anthropic — the same loaded model and the same generation
+  path, so a tool written for any of them needs no adapter.
+- **JSON that is guaranteed, not requested.** `response_format` constrains the sampler, so the reply parses or the
+  request fails. Most local servers pass the field to the prompt and hope.
 - **On-device multimodal orchestration — the flagship.** Attach a scan, a photo, a recording or a document and it
   is recognised *on the Mac* (OCR via Apple Vision, speech via Whisper, PDF/DOCX/HTML text), then the optional
   **Conductor** splits the task across your installed models by role — a fast model reads and extracts, the senior
@@ -149,8 +149,10 @@ Numbers and the full mechanism are in [How it is fast](#how-it-is-fast).
   module. That was verified on load, and a bundle that differs is rejected. So q|k|v, gate|up and qkv|z each run as a
   single fused quantized matmul after one transform, where vMLX does one transform per projection.
 - **Compiled layer blocks.** Decode is latency-bound by thousands of small dependent kernels, not only by weight
-  bandwidth. `mx.compile`d blocks (norm→Hadamard, gated-delta pre/post, attention pre/post, MLP + residual) bring the
-  full decode step to within ~11 % of the raw weight-read time.
+  bandwidth. `mx.compile`d blocks (norm→Hadamard, gated-delta pre/post, attention pre/post, MLP + residual) cut those
+  launches. What is left above the weight-read floor is about a third of the step — measurable per layer with
+  `tests/layer_profile.py`, which also shows the whole step reaching 77 GB/s at a short context against 86–88 GB/s
+  for any single operation in it.
 - **Pinned weights.** The wired limit keeps the weights resident, so macOS cannot compress or swap them.
 - **Hybrid-aware prefix cache.** The GatedDeltaNet state can't be rewound, so the engine snapshots it at the start of
   the generation prompt. An agent that resends the whole conversation only prefills the new tail (310 of 340 tokens
@@ -172,9 +174,9 @@ Numbers and the full mechanism are in [How it is fast](#how-it-is-fast).
 - **Last-position logits only** during prefill, chunked prefill, GPU-side top-k/top-p/min-p sampling and a pipelined
   (`async_eval`) decode loop.
 
-A note on numbers: a fanless MacBook Air lowers GPU/memory clocks after a few seconds of full-bandwidth load. The raw
-weight-read time goes from ~60 ms to ~95–120 ms per token regardless of engine, so expect 7–10 tok/s sustained on
-this 27B model.
+A note on numbers: a fanless MacBook Air lowers GPU and memory clocks after a few seconds of full-bandwidth load,
+by roughly a third and regardless of engine. Every figure in [Why](#why) is the best of several runs after a
+warm-up, so sustained numbers on a hot machine are lower.
 
 ## Quick start
 
@@ -565,7 +567,7 @@ datasets come from the Hugging Face datasets server and are cached. The score is
 95 % interval, so it is comparable between models and between runs of this tool, not with published
 log-likelihood or few-shot numbers. Stop the engine first.
 
-### Editors: Continue, Kilo Code, opencode
+### Editors: Continue, Kilo Code, opencode, Cline
 
 Nothing is tied to one editor. Run `./llm connect` and pick one, or name it directly:
 
@@ -573,13 +575,16 @@ Nothing is tied to one editor. Run `./llm connect` and pick one, or name it dire
 ./llm connect continue   # ~/.continue/config.yaml — adds a managed block, keeps your other models
 ./llm connect kilo       # ~/.config/kilo/kilo.jsonc
 ./llm connect opencode   # ~/.config/opencode/opencode.json
+./llm connect cline      # ~/.cline/data/globalState.json (CLINE_DATA_DIR / CLINE_DIR are honoured)
 ```
 
 Each one gets the engine URL, tool and image capabilities, and the context and output limits of the running engine,
 and **every installed model** is registered (under the id it is served as and the older `org/name` id), so the
 client's model picker sees what is on disk; the entry is refreshed whenever the engine starts or a model is selected.
 A `.bak` copy is kept, and running it again only updates its own entry. Any other OpenAI-compatible client works with
-`http://localhost:8090/v1`.
+`http://localhost:8090/v1`. Cline is the exception to the "every installed model" part: it stores one provider and
+one model id per mode, and its API keys live in a separate secrets file, so a key set on the engine is pasted into
+Cline once by hand rather than written for it.
 
 ## Run the engine directly
 
