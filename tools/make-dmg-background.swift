@@ -52,16 +52,10 @@ let w1 = ("llm" as NSString).size(withAttributes: [.font: title]).width
 draw("Bar", NSPoint(x: 80 + w1, y: 738), title, accent)
 draw("Drag to Applications to install", NSPoint(x: 80, y: 680), font(25), muted)
 
-for x in [80 as CGFloat, 830] {
-    let card = NSBezierPath(roundedRect: NSRect(x: x, y: 160, width: 450, height: 430), xRadius: 34, yRadius: 34)
-    panel.setFill(); card.fill()
-    accent.withAlphaComponent(0.20).setStroke()
-    card.lineWidth = 2; card.stroke()
-}
-// Nothing is written inside the cards. The Finder draws each icon's own name under it, so a name drawn
-// here as well appeared twice on the installer, at two different heights. Step numbers went the same way:
-// the line above says what to do, the arrow says which direction, and the two cards say where — a numeral
-// on top of that is one more thing to read and nothing more to learn.
+// Nothing is drawn where the two icons go — no cards, no names, no step numbers. The Finder puts the app
+// and the Applications folder there and writes their names underneath, so a frame only boxes in what is
+// already obvious, and a name drawn here appeared twice at two different heights. The line at the top says
+// what to do and the arrow says which way; that is the whole instruction.
 
 let glow = NSShadow()
 glow.shadowColor = accent.withAlphaComponent(0.6)
