@@ -134,8 +134,38 @@ if [[ "$OFFLINE" == 1 ]]; then
   python3 "$ROOT/tools/bundle-deps.py" "$APP"
 fi
 
-echo "▸ Ad-hoc signing…"
-codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" "$APP"   # ad-hoc by default; a stable identity keeps the microphone permission across rebuilds
+# Ad hoc by default; a stable identity also keeps the microphone permission across rebuilds. With a real
+# Developer ID, sign the way notarization requires — Apple rejects a submission that lacks the hardened
+# runtime or a secure timestamp, and neither can be applied to an ad-hoc signature.
+#
+# The hardened runtime then needs telling that this app legitimately loads code it did not sign: the
+# bundled Python and MLX are .so files from pip, and MLX compiles Metal kernels at runtime. Without these
+# three entitlements the app signs and notarizes but refuses to start.
+if [ -n "${LLMBAR_SIGN_IDENTITY:-}" ]; then
+  echo "▸ Signing with ${LLMBAR_SIGN_IDENTITY} (hardened runtime, timestamped)…"
+  cat > "$TMP/app.entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+</dict></plist>
+PLIST
+  # nested code first, outside in: a bundle is only valid once everything inside it is signed
+  find "$APP/Contents" \( -name "*.dylib" -o -name "*.so" \) -print0 2>/dev/null \
+    | xargs -0 -r codesign --force --timestamp --options runtime --sign "$LLMBAR_SIGN_IDENTITY" 2>/dev/null || true
+  for nested in "$APP/Contents/Resources/llm/bin/ocr" "$APP/Contents/PlugIns/"*.appex; do
+    [ -e "$nested" ] && codesign --force --timestamp --options runtime \
+      --entitlements "$TMP/app.entitlements" --sign "$LLMBAR_SIGN_IDENTITY" "$nested" || true
+  done
+  codesign --force --timestamp --options runtime --entitlements "$TMP/app.entitlements" \
+    --sign "$LLMBAR_SIGN_IDENTITY" "$APP"
+  codesign --verify --strict --verbose=2 "$APP" 2>&1 | tail -2
+else
+  echo "▸ Ad-hoc signing…"
+  codesign --force --sign - "$APP"
+fi
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
 rm -rf "$FINAL"
