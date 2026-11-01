@@ -78,7 +78,21 @@ def to_openai_chat(body):
         out["tools"] = body["tools"]
     if body.get("think") is not None:
         out["enable_thinking"] = bool(body["think"])
+    _apply_format(out, body.get("format"))
     return out
+
+
+def _apply_format(out, fmt):
+    """Ollama's `format` ("json", or a schema object) is OpenAI's `response_format`. Translating here keeps
+    the one generation path free of wire-format knowledge."""
+    if fmt in (None, ""):
+        return
+    if fmt == "json":
+        out["response_format"] = {"type": "json_object"}
+    elif isinstance(fmt, dict):
+        out["response_format"] = {"type": "json_schema", "json_schema": {"name": "format", "schema": fmt}}
+    else:
+        out["response_format"] = {"type": fmt}      # unusable: the core answers with a clear 400
 
 
 def to_openai_generate(body):
@@ -94,6 +108,7 @@ def to_openai_generate(body):
     _apply_options(out, body.get("options") or {})
     if body.get("think") is not None:
         out["enable_thinking"] = bool(body["think"])
+    _apply_format(out, body.get("format"))
     return out
 
 

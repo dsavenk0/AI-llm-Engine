@@ -350,6 +350,73 @@ class TestNativeServer(unittest.TestCase):
         code, r = self.srv.json("POST", "/v1/chat/completions", raw=b'["not", "an", "object"]')
         self.assertEqual(code, 400)
 
+    # ───────────── structured output ─────────────
+    # The synth bundle has random weights, so these use schemas that admit exactly one document: whatever
+    # the model prefers, the grammar leaves it one legal path. That makes the test about the constraint
+    # rather than about the model.
+    ONLY_EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
+    ONLY_OK = {"type": "object", "properties": {"ok": {"enum": [True]}}, "required": ["ok"]}
+
+    def schema_body(self, schema, **kw):
+        body = {"model": "synth", "temperature": 0, "max_tokens": 40,
+                "messages": [{"role": "user", "content": "answer"}],
+                "response_format": {"type": "json_schema",
+                                    "json_schema": {"name": "t", "schema": schema}}}
+        body.update(kw)
+        return self.srv.json("POST", "/v1/chat/completions", body)
+
+    def test_json_schema_leaves_one_legal_document(self):
+        code, r = self.schema_body(self.ONLY_EMPTY)
+        self.assertEqual(code, 200, r)
+        self.assertEqual(json.loads(r["choices"][0]["message"]["content"]), {})
+
+    def test_json_schema_enforces_required_and_enum(self):
+        code, r = self.schema_body(self.ONLY_OK)
+        self.assertEqual(code, 200, r)
+        self.assertEqual(json.loads(r["choices"][0]["message"]["content"]), {"ok": True})
+
+    def test_json_object_output_always_parses(self):
+        code, r = self.srv.chat("answer", max_tokens=40, response_format={"type": "json_object"})
+        if code == 200:
+            self.assertIsInstance(json.loads(r["choices"][0]["message"]["content"]), dict)
+        else:
+            # a random model can run out of room before closing: that must be a clean error, never a
+            # truncated document handed to a client that asked for JSON
+            self.assertEqual(code, 400, r)
+            self.assertEqual(r["error"]["code"], "format_incomplete")
+
+    def test_a_format_that_cannot_finish_in_the_budget_is_an_error(self):
+        code, r = self.schema_body({"type": "object", "properties": {"text": {"type": "string"}},
+                                    "required": ["text"]}, max_tokens=2)
+        self.assertEqual(code, 400, r)
+        self.assertEqual(r["error"]["code"], "format_incomplete")
+
+    def test_a_schema_we_cannot_enforce_is_refused_before_generating(self):
+        code, r = self.schema_body({"type": "object", "patternProperties": {"^a": {}}})
+        self.assertEqual(code, 400, r)
+        self.assertIn("patternProperties", r["error"]["message"])
+
+    def test_bad_response_format_is_a_400(self):
+        for rf in ({"type": "yaml"}, {"type": "json_schema"}, {"type": "json_schema", "json_schema": 5},
+                   "json"):
+            code, r = self.srv.chat("answer", response_format=rf)
+            self.assertEqual(code, 400, (rf, r))
+        code, r = self.srv.chat("answer", max_tokens=8, response_format={"type": "text"})
+        self.assertEqual(code, 200, r)          # "text" is the default, not an error
+
+    def test_ollama_format_json_and_schema(self):
+        code, r = self.srv.json("POST", "/api/chat",
+                                {"model": "synth", "stream": False, "format": self.ONLY_OK,
+                                 "options": {"temperature": 0, "num_predict": 40},
+                                 "messages": [{"role": "user", "content": "answer"}]})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(json.loads(r["message"]["content"]), {"ok": True})
+        code, r = self.srv.json("POST", "/api/generate",
+                                {"model": "synth", "stream": False, "format": self.ONLY_EMPTY,
+                                 "options": {"temperature": 0, "num_predict": 40}, "prompt": "answer"})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(json.loads(r["response"]), {})
+
     # ───────────── embeddings ─────────────
     def test_openai_embeddings_one_string(self):
         code, r = self.srv.json("POST", "/v1/embeddings", {"model": "synth", "input": "hello world"})

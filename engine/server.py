@@ -83,7 +83,7 @@ class Batcher:
 
     def takes(self, req):
         """Only plain text requests are merged; see the class docstring for why."""
-        return self.enabled and not req["media"] and not req["thinking_open"]
+        return self.enabled and not req["media"] and not req["thinking_open"] and not req.get("fmt")
 
     def start(self):
         if self.enabled and self.thread is None:
@@ -134,7 +134,8 @@ class Batcher:
     def _solo(self, row):
         q = row.req
         gen = lambda: ENGINE.generate(q["ids"], q["media"], q["max_tokens"], q["sampling"], q["stop"],
-                                      q["should_stop"], seed=q["seed"], thinking_open=q["thinking_open"])
+                                      q["should_stop"], seed=q["seed"], thinking_open=q["thinking_open"],
+                                      fmt=q["fmt"])
         for item in run_job(gen):
             row.out.put(item)
 
@@ -178,7 +179,7 @@ def generate_stream(req):
     with ENGINE.lock:
         yield from run_job(lambda: ENGINE.generate(req["ids"], req["media"], req["max_tokens"], req["sampling"],
                                                    req["stop"], req["should_stop"], seed=req["seed"],
-                                                   thinking_open=req["thinking_open"]))
+                                                   thinking_open=req["thinking_open"], fmt=req["fmt"]))
 
 
 ADMISSION = Admission(0)
@@ -416,6 +417,55 @@ def check_params(body):
                                                            and all(isinstance(x, str) for x in stop))):
         return "stop must be a string or a list of up to 16 strings"
     return None
+
+
+def response_format(body, ollama=False):
+    """None, or (schema, root) for constrained decoding; raises ChatError on a format we cannot honour.
+
+    OpenAI sends `response_format`: {"type": "json_object"} or {"type": "json_schema", "json_schema":
+    {"schema": {...}}}. Ollama sends `format`: "json", or the schema itself. Both end up the same here.
+
+    A schema is checked against what the grammar really enforces *before* the model is woken: a client is
+    never told its reply was schema-checked when half of its schema was quietly dropped.
+    """
+    from engine import structured
+    if ollama:
+        fmt = body.get("format")
+        if fmt in (None, ""):
+            return None
+        if fmt == "json":
+            return (None, "object")
+        if isinstance(fmt, dict):
+            schema = fmt
+        else:
+            raise ChatError(400, f"format must be \"json\" or a JSON schema object, not {fmt!r}",
+                            "invalid_request_error")
+    else:
+        rf = body.get("response_format")
+        if rf in (None, ""):
+            return None
+        if not isinstance(rf, dict):
+            raise ChatError(400, "response_format must be an object", "invalid_request_error")
+        kind = rf.get("type")
+        if kind == "text":
+            return None
+        if kind == "json_object":
+            return (None, "object")
+        if kind != "json_schema":
+            raise ChatError(400, f"response_format type {kind!r} is not supported "
+                                 f"(text, json_object, json_schema)", "invalid_request_error")
+        wrap = rf.get("json_schema")
+        if not isinstance(wrap, dict):
+            raise ChatError(400, "response_format.json_schema must be an object", "invalid_request_error")
+        schema = wrap.get("schema")
+        if not isinstance(schema, dict):
+            raise ChatError(400, "response_format.json_schema.schema must be a JSON Schema object",
+                            "invalid_request_error")
+    gap = structured.supported(schema)
+    if gap:
+        raise ChatError(400, f"this schema cannot be enforced here — {gap}. Enforced: type, properties, "
+                             f"required, additionalProperties, items, enum.", "invalid_request_error")
+    return (schema, schema.get("type", "any"))
 
 
 def resolve_options(body):
@@ -704,7 +754,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         bad = check_params(body)
         if bad:
             raise ChatError(400, bad, "invalid_request_error")
+        fmt = response_format(body)
         thinking, effort, extra = resolve_options(body)
+        if fmt is not None:
+            thinking = False      # a reasoning block is not JSON; the constraint starts at the first token
         log(f"trace: request model={body.get('model')!r} messages={len(messages)} tools={len(tools or [])} "
             f"stream={bool(body.get('stream'))} max_tokens={body.get('max_tokens') or body.get('max_completion_tokens')}")
         if not getattr(ENGINE, "vision_allowed", False):      # no vision tower (or switched off): answer anyway
@@ -761,7 +814,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
 
         req = {"ids": ids, "media": media, "max_tokens": max_tokens, "sampling": sampling, "stop": stop,
-               "should_stop": should_stop, "seed": body.get("seed"), "thinking_open": bool(thinking_open)}
+               "should_stop": should_stop, "seed": body.get("seed"), "thinking_open": bool(thinking_open),
+               "fmt": fmt}
         try:
             for item in generate_stream(req):
                 if isinstance(item, dict):
@@ -781,6 +835,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:  # keep the server alive on model errors
             log(f"generation error: {e!r}")
             raise ChatError(500, str(e), "server_error")
+
+        if fmt is not None:
+            from engine import structured
+            whole = "".join(content)
+            if not structured.finished(whole, fmt[0], fmt[1]):
+                # the only way out of the grammar is running out of room: say so instead of handing back
+                # half a document that the client will try to parse
+                raise ChatError(400, f"the reply did not fit the token limit before the requested format "
+                                     f"was complete ({len(whole)} characters produced); raise max_tokens",
+                                "invalid_request_error", "format_incomplete")
 
         calls = parse_calls(parser.tool_text, tools) if parser.tool_text else []
         finish, stop_reason = finish_reason(stats, bool(calls))

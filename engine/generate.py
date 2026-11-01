@@ -37,6 +37,10 @@ class MemoryLimitError(RuntimeError):
     """Not enough free RAM to serve the request without crossing the system limit."""
 
 
+class FormatError(ValueError):
+    """The reply cannot be continued without breaking the format the request asked for."""
+
+
 # Qwen3.5 family sampling presets, used only when a bundle ships neither jang_config
 # sampling_modes nor a generation_config.json (some mlx-community conversions don't —
 # e.g. Qwen3.5-0.8B-4bit). Values are the ones the Bonsai authors wrote into their own
@@ -85,6 +89,8 @@ class Sampler:
         self.vocab = vocab
         self.seen = mx.zeros((vocab,), dtype=mx.bool_) if (presence_penalty or self.rp != 1.0) else None
         self.key = mx.random.key(seed) if seed is not None else None
+        self.allow = None         # set for constrained decoding: allow(token_id) -> bool (see structured.py)
+        self.on_pick = None       # called with the token actually chosen, so the constraint can advance
 
     @property
     def greedy(self):
@@ -131,6 +137,8 @@ class Sampler:
     def __call__(self, logits):
         """Sample from the last position of [1, L, V] logits; returns a lazy scalar."""
         row = logits[0, -1]
+        if self.allow is not None:
+            return mx.array(self._pick_allowed(row))
         if self.temp <= 0:
             tok = mx.argmax(self._penalize(row.astype(mx.float32)))
         else:
@@ -138,6 +146,51 @@ class Sampler:
             tok = idx[mx.random.categorical(vals, key=self._rand())]
         self._mark(tok)
         return tok
+
+    def _pick_allowed(self, row):
+        """The token the model ranks highest among those the constraint still permits.
+
+        Candidates are tested in the order the model prefers them and the window is widened only when a
+        whole slice is forbidden, so the usual cost is one test per token — the model's first choice is
+        normally already valid. Sampling renormalizes over the permitted candidates, which is the same
+        restriction top-k and top-p already apply.
+        """
+        r = self._penalize(row.astype(mx.float32))
+        for k in (24, 256, 4096, self.vocab):
+            k = min(k, self.vocab)
+            if k < self.vocab:
+                idx = mx.argpartition(-r, k - 1)[:k]
+                vals = r[idx]
+                order = mx.argsort(-vals)
+                idx, vals = idx[order], vals[order]
+            else:
+                idx = mx.argsort(-r)
+                vals = r[idx]
+            ids = idx.tolist()
+            if self.temp <= 0:
+                for t in ids:
+                    if self.allow(t):
+                        self._mark(t)
+                        if self.on_pick:
+                            self.on_pick(t)
+                        return t
+                continue
+            keep = [i for i, t in enumerate(ids) if self.allow(t)]
+            if not keep:
+                continue
+            sel = mx.array(keep)
+            kvals = vals[sel] / self.temp
+            if self.min_p > 0:
+                kvals = mx.where(kvals < kvals[0] + float(np.log(self.min_p)), -mx.inf, kvals)
+            if self.top_p < 1.0:
+                probs = mx.softmax(kvals)
+                kvals = mx.where(mx.cumsum(probs) - probs > self.top_p, -mx.inf, kvals)
+            tok = ids[keep[mx.random.categorical(kvals, key=self._rand()).item()]]
+            self._mark(tok)
+            if self.on_pick:
+                self.on_pick(tok)
+            return tok
+        raise FormatError("no token can continue the requested format")
 
     def verify(self, row, draft):
         """Speculative step for a deterministic draft token.
@@ -642,13 +695,51 @@ class Engine:
 
     # ───────────────────────── generate ─────────────────────────
     def generate(self, ids, media=None, max_tokens=None, sampling=None, stop=None, should_stop=None, seed=None,
-                 thinking_open=False):
-        """Yield (token_id, text) pairs; final item is a dict with stats."""
+                 thinking_open=False, fmt=None):
+        """Yield (token_id, text) pairs; final item is a dict with stats.
+
+        `fmt` turns on constrained decoding: (schema, root), where schema is a JSON Schema node or None and
+        root is "object" / "any". The sampler then only ever picks a token that keeps the answer a valid
+        JSON prefix, and generation ends the moment the document is whole — so the caller gets something
+        parseable or an error, never prose.
+        """
         self.ensure_awake()
         if len(ids) >= self.max_context:
             raise ContextError(f"prompt is {len(ids)} tokens, context limit is {self.max_context}")
         max_tokens = min(max_tokens or self.max_tokens, self.max_tokens, self.max_context - len(ids))
         sampler = Sampler(self.vocab, seed=seed, **(sampling or {}))
+        cursor, tok_text, fmt_done = None, {}, []
+        if fmt is not None:
+            from .structured import Cursor
+            schema, root = fmt
+            cursor = Cursor(schema, root)
+
+            def _text(tok):
+                # decoded token by token, so the test and the feed below always see the same string. A
+                # multi-byte character split across tokens only ever lands inside a JSON string, where any
+                # non-control character is allowed, so it cannot change whether the document is valid.
+                t = tok_text.get(tok)
+                if t is None:
+                    t = tok_text[tok] = self.tok.decode([tok])
+                return t
+
+            def _allow(tok):
+                if tok in self.eos:
+                    return cursor.complete()     # stopping early would hand back half a document
+                t = _text(tok)
+                if not t:
+                    return False     # a token that decodes to nothing passes any grammar check forever
+                return cursor.accepts(t)
+
+            def _picked(tok):
+                # the decode loop builds the graph for token t+1 while t is still running, so the sampler
+                # runs ahead of emit(); advancing here keeps the constraint in step with what was chosen,
+                # and the queue hands emit() the answer belonging to its own token.
+                if tok not in self.eos:
+                    cursor.feed(_text(tok))
+                fmt_done.append(cursor.complete())
+
+            sampler.allow, sampler.on_pick = _allow, _picked
         t0 = time.time()
         delta = 0
         if media is not None:
@@ -730,6 +821,9 @@ class Engine:
             if hit:
                 finish = "stop"
                 return True, piece
+            if cursor is not None and fmt_done and fmt_done.pop(0):
+                finish = "stop"
+                return True, piece
             if should_stop and should_stop():
                 finish = "cancelled"
                 return True, piece
@@ -781,7 +875,7 @@ class Engine:
                     return None
             return logits_
 
-        if not (self.speculative and media is None):
+        if not (self.speculative and media is None and cursor is None):
             # plain pipelined decode: graph for token t+1 is built while t runs
             y = sampler(logits)
             mx.async_eval(y)
