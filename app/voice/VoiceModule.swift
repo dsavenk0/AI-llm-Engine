@@ -980,12 +980,32 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 final class OrbClock {
     var phase = 0.0
     var last: Double?
-    func advance(to t: Double, speed: Double) -> Double {
+    // Eased alongside the phase. The state's colours, the rate the filaments move at and how many of them
+    // are lit used to change in a single frame when the state did, which reads as a jolt; the phase was the
+    // only thing that glided. These settle over about a quarter of a second instead.
+    var speed = 0.6
+    var shown = 0.55
+    var tint = [Double](repeating: 0, count: 9)          // three colours, r/g/b each
+    private var started = false
+
+    func advance(to t: Double, speed target: Double, shown shownTarget: Double, tint tintTarget: [Double]) -> Double {
         let dt = last.map { min(0.1, max(0, t - $0)) } ?? 0
         last = t
-        phase += dt * speed
+        phase += dt * speed                               // the eased rate, so the motion itself never steps
+        let k = started ? min(1, dt * 4.0) : 1            // the first frame starts at the target, not from black
+        started = true
+        speed += (target - speed) * k
+        shown += (shownTarget - shown) * k
+        for i in tint.indices { tint[i] += (tintTarget[i] - tint[i]) * k }
         return phase
     }
+}
+
+/// sRGB components of a palette colour, so the orb can cross-fade between states without a second copy of
+/// the palette living here.
+func orbRGB(_ c: Color) -> [Double] {
+    guard let n = NSColor(c).usingColorSpace(.sRGB) else { return [0, 0, 0] }
+    return [Double(n.redComponent), Double(n.greenComponent), Double(n.blueComponent)]
 }
 
 struct Orb: View {
@@ -1041,13 +1061,19 @@ struct Orb: View {
                 let lv = voice.level
                 let busy = voice.state == .thinking || voice.state == .starting
                 let idle = voice.state == .idle
-                let (fil, accent, haze) = colors
+                let (filTarget, accentTarget, hazeTarget) = colors
                 let c = CGPoint(x: size.width / 2, y: size.height / 2)
                 let R = min(size.width, size.height) * 0.38
-                let speed = busy ? 2.2 : (idle ? 0.6 : 1.0 + lv * 2.0)
-                let p = clock.advance(to: t, speed: speed)                      // continuous phase, see OrbClock
+                let speedTarget = busy ? 2.2 : (idle ? 0.6 : 1.0 + lv * 2.0)
+                let shownTarget = idle ? 0.55 : (busy ? 0.85 : 0.6 + 0.4 * lv)  // how many of them are lit
+                let p = clock.advance(to: t, speed: speedTarget, shown: shownTarget,
+                                      tint: orbRGB(filTarget) + orbRGB(accentTarget) + orbRGB(hazeTarget))
                 let count = 64                                                  // fixed: the layout never reshuffles
-                let shown = idle ? 0.55 : (busy ? 0.85 : 0.6 + 0.4 * lv)        // how many of them are lit
+                let shown = clock.shown
+                // the eased colours: a change of state glides over about a quarter of a second
+                let fil = Color(red: clock.tint[0], green: clock.tint[1], blue: clock.tint[2])
+                let accent = Color(red: clock.tint[3], green: clock.tint[4], blue: clock.tint[5])
+                let haze = Color(red: clock.tint[6], green: clock.tint[7], blue: clock.tint[8])
                 let spark = idle ? 0 : flash(at: t) * 0.45                      // subtle, infrequent
                 let steps = 12
                 let r0 = R * ((lightTheme ? 0.07 : 0.05) + 0.06 * CGFloat(lv) + (busy ? 0.015 * CGFloat(sin(t * 3)) : 0))
@@ -1263,6 +1289,24 @@ struct VoiceView: View {
                 Circle().fill(stateColor).shadow(color: stateColor.opacity(0.7), radius: 3).opacity(voice.model.running ? 1 : 0)
             }.frame(width: 8, height: 8)
             Spacer()
+            // Live conversation in the header, not buried in the menu: it is the switch that decides whether
+            // the microphone listens while the reply is read, so speaking over the reply does nothing when it
+            // is off. A setting with that much effect has to be visible.
+            Button { voice.dialogMode.toggle() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: voice.dialogMode ? "waveform.circle.fill" : "waveform.circle")
+                        .font(.system(size: 13))
+                    Text("Live").font(VHUD.mono(9, .semibold)).tracking(1.2)
+                }
+                .foregroundColor(voice.dialogMode ? VHUD.cyan : VHUD.dim)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(VHUD.cyan.opacity(voice.dialogMode ? 0.14 : 0)))
+                .overlay(Capsule().strokeBorder(VHUD.cyan.opacity(voice.dialogMode ? 0.45 : 0.18), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help(voice.dialogMode
+                  ? "Live conversation: it keeps listening after each answer, and you can talk over the reply"
+                  : "Live conversation is off: the reply is read out, but nothing listens until you press the mic")
             Menu {
                 Toggle("Read voice answers aloud", isOn: $voice.speakReplies)
                 Toggle("Dialog mode — keep listening after each answer", isOn: $voice.dialogMode)
