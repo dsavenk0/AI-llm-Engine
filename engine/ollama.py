@@ -193,6 +193,20 @@ def generate_response(model, content, finish, usage=None, timings=None):
     return out
 
 
+def embed(model, vectors, prompt_tokens=0, seconds=None):
+    """/api/embed — one row per input. Ollama returns float lists, with the same nanosecond counters."""
+    out = {"model": model, "embeddings": vectors, "prompt_eval_count": prompt_tokens}
+    if seconds is not None:
+        out["total_duration"] = int(float(seconds) * 1e9)
+        out["load_duration"] = 0
+    return out
+
+
+def embed_legacy(vector):
+    """/api/embeddings — the older single-prompt shape, kept because clients still call it."""
+    return {"embedding": vector}
+
+
 def error(message):
     """Ollama's error shape — a bare {"error": "..."} object."""
     return {"error": str(message)}

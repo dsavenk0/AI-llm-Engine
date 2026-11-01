@@ -467,8 +467,9 @@ class Engine:
         return ids, (mx.concatenate(pix), grids)
 
     # ───────────────────────── prefill ─────────────────────────
-    def _prefill(self, cache, ids, embeds=None, pos3=None, delta=0, start=0):
-        """Run ids[start:] through the model in chunks; return last-position logits.
+    def _prefill(self, cache, ids, embeds=None, pos3=None, delta=0, start=0, hidden=False):
+        """Run ids[start:] through the model in chunks; return last-position logits, or with `hidden` the
+        normed hidden state the output head reads (what `embed` turns into a vector).
 
         Near the RAM limit the chunk shrinks (1024 → 256 → 128): peak activation
         memory scales with it, so long prompts still go through instead of failing.
@@ -478,12 +479,13 @@ class Engine:
         try:
             while s < n:
                 self.progress = {"phase": "prefill", "done": s, "total": n}   # /health: a long prompt is not "hung"
-                s, logits, step = self._prefill_chunk(cache, ids, embeds, pos3, delta, s, n, step, attn, logits)
+                s, logits, step = self._prefill_chunk(cache, ids, embeds, pos3, delta, s, n, step, attn,
+                                                      logits, hidden)
         finally:
             self.progress = None
         return logits
 
-    def _prefill_chunk(self, cache, ids, embeds, pos3, delta, s, n, step, attn, logits):
+    def _prefill_chunk(self, cache, ids, embeds, pos3, delta, s, n, step, attn, logits, hidden=False):
         """One chunk of the prefill; returns (next start, logits, chunk size for the next one)."""
         e = min(n, s + step)
         if pos3 is not None:
@@ -492,9 +494,9 @@ class Engine:
         else:
             pos = Positions(delta=delta)
         if embeds is not None:
-            logits = self.model(cache=cache, pos=pos, embeds=embeds[:, s:e])
+            logits = self.model(cache=cache, pos=pos, embeds=embeds[:, s:e], hidden=hidden)
         else:
-            logits = self.model(mx.array([ids[s:e]]), cache, pos)
+            logits = self.model(mx.array([ids[s:e]]), cache, pos, hidden=hidden)
         mx.eval(logits, [a for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)])
         s = e
         if s < n:
@@ -945,6 +947,41 @@ class Engine:
                              "decode_tps": st["decode_tps"], "accept": st["draft_accept"]})
         mx.clear_cache()
         yield st
+
+    # ───────────────────────────── embeddings ─────────────────────────────
+    def embed(self, texts, normalize=True):
+        """One vector per text: the model's final hidden state at the last token, L2-normalized.
+
+        What this is, and is not. The vector is read where the output head reads — after the last layer and
+        the final norm — so it is whatever the loaded model already knows about the text. Unless the loaded
+        model was trained for retrieval (Qwen3-Embedding and friends, which pool exactly here), these vectors
+        are useful for comparing texts *this same model* embedded and should not be expected to match a
+        dedicated embedding model. The dimension is the model's hidden size, not a number this picks.
+
+        Each text is prefilled on its own cache, which is thrown away afterwards, so the conversation's
+        prefix cache and recurrent state are untouched. Texts are done one at a time: prefill is already
+        compute-bound (see tests/perf_baseline.json), so there is nothing for a batch to save here.
+        """
+        self.ensure_awake()
+        if isinstance(texts, str):
+            texts = [texts]
+        out, total = [], 0
+        for text in texts:
+            ids = self.tok.encode(text) if isinstance(text, str) else list(text)
+            if not ids:
+                raise ValueError("cannot embed an empty input")
+            if len(ids) >= self.max_context:
+                raise ContextError(f"input is {len(ids)} tokens, context limit is {self.max_context}")
+            self._reserve(len(ids))
+            h = self._prefill(self.model.make_cache(), ids, hidden=True)
+            v = h[0, -1].astype(mx.float32)
+            if normalize:
+                v = v / mx.maximum(mx.sqrt(mx.sum(v * v)), 1e-12)
+            out.append([float(x) for x in v.tolist()])
+            total += len(ids)
+        mx.clear_cache()
+        self.last_used = time.time()
+        return out, total
 
     # ───────────────────────── several requests in one pass ─────────────────────────
     def generate_batch(self, reqs, on_piece=None):

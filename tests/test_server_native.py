@@ -3,9 +3,11 @@ bundle (random weights, see tests/synth.py) — no model download needed.
 
     .venv/bin/python -m unittest tests.test_server_native -v
 """
+import base64
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -347,6 +349,66 @@ class TestNativeServer(unittest.TestCase):
         conn.close()
         code, r = self.srv.json("POST", "/v1/chat/completions", raw=b'["not", "an", "object"]')
         self.assertEqual(code, 400)
+
+    # ───────────── embeddings ─────────────
+    def test_openai_embeddings_one_string(self):
+        code, r = self.srv.json("POST", "/v1/embeddings", {"model": "synth", "input": "hello world"})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["object"], "list")
+        self.assertEqual(len(r["data"]), 1)
+        v = r["data"][0]["embedding"]
+        self.assertGreater(len(v), 8)
+        self.assertTrue(all(isinstance(x, float) for x in v))
+        self.assertAlmostEqual(sum(x * x for x in v), 1.0, places=4)      # L2-normalized
+        self.assertGreater(r["usage"]["prompt_tokens"], 0)
+
+    def test_openai_embeddings_many_strings_keep_their_order(self):
+        code, r = self.srv.json("POST", "/v1/embeddings",
+                                {"model": "synth", "input": ["first text", "second text", "first text"]})
+        self.assertEqual(code, 200, r)
+        self.assertEqual([d["index"] for d in r["data"]], [0, 1, 2])
+        a, b, c = (d["embedding"] for d in r["data"])
+        dot = lambda x, y: sum(p * q for p, q in zip(x, y))
+        self.assertAlmostEqual(dot(a, c), 1.0, places=4)                  # the same text, the same vector
+        self.assertLess(dot(a, b), 0.999)                                 # a different one is not identical
+
+    def test_openai_embeddings_base64(self):
+        body = {"model": "synth", "input": "hello world"}
+        _, plain = self.srv.json("POST", "/v1/embeddings", body)
+        _, enc = self.srv.json("POST", "/v1/embeddings", dict(body, encoding_format="base64"))
+        raw = base64.b64decode(enc["data"][0]["embedding"])
+        got = struct.unpack(f"<{len(raw) // 4}f", raw)
+        self.assertEqual(len(got), len(plain["data"][0]["embedding"]))
+        for x, y in zip(got, plain["data"][0]["embedding"]):
+            self.assertAlmostEqual(x, y, places=5)
+
+    def test_embeddings_reject_what_they_cannot_honour(self):
+        code, r = self.srv.json("POST", "/v1/embeddings", {"model": "synth"})
+        self.assertEqual(code, 400, r)
+        code, r = self.srv.json("POST", "/v1/embeddings", {"model": "synth", "input": []})
+        self.assertEqual(code, 400, r)
+        code, r = self.srv.json("POST", "/v1/embeddings", {"model": "synth", "input": "x", "dimensions": 3})
+        self.assertEqual(code, 400, r)                                    # not a Matryoshka model: say so
+        code, r = self.srv.json("POST", "/v1/embeddings",
+                                {"model": "synth", "input": "x", "encoding_format": "gzip"})
+        self.assertEqual(code, 400, r)
+
+    def test_ollama_embed_both_shapes(self):
+        code, r = self.srv.json("POST", "/api/embed", {"model": "synth", "input": ["a", "b"]})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(len(r["embeddings"]), 2)
+        self.assertGreater(r["prompt_eval_count"], 0)
+        code, old = self.srv.json("POST", "/api/embeddings", {"model": "synth", "prompt": "a"})
+        self.assertEqual(code, 200, old)
+        self.assertEqual(len(old["embedding"]), len(r["embeddings"][0]))
+
+    def test_embeddings_leave_the_conversation_cache_alone(self):
+        """A chat, then an embedding, then the same chat again: the second chat must still reuse its prefix."""
+        self.srv.chat("a question that will be asked twice")
+        self.srv.json("POST", "/v1/embeddings", {"model": "synth", "input": "something else entirely"})
+        code, r = self.srv.chat("a question that will be asked twice")
+        self.assertEqual(code, 200, r)
+        self.assertGreater(r["usage"]["prompt_tokens_details"]["cached_tokens"], 0, r)
 
     # ───────────── behaviour under load ─────────────
     def test_parallel_requests_are_serialized_not_dropped(self):

@@ -367,7 +367,7 @@ class Ops:
             return qmm(had.fwd(rms(h, nw)), w, s, b, a["vocab_size"])
 
         for name, fn in list(locals().items()):
-            if name in ("norm_had", "mlp", "gdn_pre", "gdn_post", "attn_pre", "attn_post", "head"):
+            if name in ("rms", "norm_had", "mlp", "gdn_pre", "gdn_post", "attn_pre", "attn_post", "head"):
                 setattr(self, name, mx.compile(fn))
 
 
@@ -610,7 +610,8 @@ class Model(nn.Module):
         for c in cache:
             c.commit(m)
 
-    def __call__(self, ids=None, cache=None, pos=None, embeds=None, last_only=True, verify=False, mask=None):
+    def __call__(self, ids=None, cache=None, pos=None, embeds=None, last_only=True, verify=False, mask=None,
+                 hidden=False):
         lm = self.language_model
         if verify:
             for c in cache:
@@ -627,6 +628,8 @@ class Model(nn.Module):
                 mx.eval(h, c.arrays if hasattr(c, "arrays") else c.state)
         if last_only:
             h = h[:, -1:, :]
+        if hidden:
+            return self.ops.rms(h, lm.model.norm.weight)   # the normed state the head reads: an embedding
         # tied embeddings: the quantized embedding matrix doubles as the output head
         head = lm.lm_head if "lm_head" in lm else lm.model.embed_tokens
         return self.ops.head(h, lm.model.norm.weight, *_w(head))

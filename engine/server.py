@@ -159,6 +159,16 @@ class _Row:
 BATCHER = Batcher(0)
 
 
+def _encode_vector(v, fmt):
+    """OpenAI lets a client ask for the vector as base64 of little-endian float32 instead of a JSON list;
+    the big embedding clients default to it, and it is about four times less to parse."""
+    if fmt != "base64":
+        return v
+    import base64
+    import struct
+    return base64.b64encode(struct.pack(f"<{len(v)}f", *v)).decode()
+
+
 def generate_stream(req):
     """The engine's items for one request — text pieces, then the final stats dict — taking either the
     ordinary single-request path or, when other requests overlap it, one merged batch pass."""
@@ -173,6 +183,7 @@ def generate_stream(req):
 
 ADMISSION = Admission(0)
 GEN_PATHS = ("/v1/chat/completions", "/chat/completions", "/v1/messages", "/api/chat", "/api/generate")
+EMBED_PATHS = ("/v1/embeddings", "/embeddings", "/api/embed", "/api/embeddings")
 SHUTTING_DOWN = threading.Event()        # set on SIGTERM: new generation requests are refused, in-flight drain
 
 
@@ -553,6 +564,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.generate_ollama(body)     # /api/generate
             finally:
                 ADMISSION.release()
+        if path in EMBED_PATHS:
+            if SHUTTING_DOWN.is_set():
+                return self._error(503, "the server is shutting down", "server_error", "shutting_down")
+            if not ADMISSION.acquire():
+                return self._error(503, "the server is busy — too many requests in flight; retry shortly",
+                                   "server_error", "overloaded")
+            try:
+                return self.embeddings(body, ollama_wire=path.startswith("/api/"),
+                                       legacy=path == "/api/embeddings")
+            finally:
+                ADMISSION.release()
         if path == "/api/show":
             from engine import ollama
             return self._json(200, ollama.show(self._ollama_card(), context=ENGINE.max_context,
@@ -560,6 +582,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ("/v1/images/generations", "/images/generations"):
             return self.images(body)
         self._error(404, f"unknown path {self.path}")
+
+    # ───────────────────────── embeddings ─────────────────────────
+    def embeddings(self, body, ollama_wire=False, legacy=False):
+        """OpenAI /v1/embeddings and Ollama /api/embed (plus the older /api/embeddings), from one path.
+
+        The vector is the loaded model's own final hidden state (see Engine.embed) — there is no separate
+        embedding model to load and nothing is downloaded. Backends that cannot produce one say so instead
+        of returning a plausible-looking vector.
+        """
+        from engine.generate import ContextError, MemoryLimitError
+        if not hasattr(ENGINE, "embed"):
+            return self._error(501, f"the {ARGS.backend} backend does not produce embeddings; run the native "
+                                    f"engine (--backend native) for this endpoint",
+                               "invalid_request_error", "unsupported_endpoint")
+        raw = body.get("prompt") if legacy else body.get("input")
+        if isinstance(raw, str):
+            inputs = [raw]
+        elif isinstance(raw, list) and raw and all(isinstance(x, int) for x in raw):
+            inputs = [raw]                                   # one pre-tokenized input
+        elif isinstance(raw, list):
+            inputs = list(raw)
+        else:
+            return self._error(400, f"{'prompt' if legacy else 'input'} is required: a string, a list of "
+                                    f"strings, or a list of token ids", "invalid_request_error")
+        if not inputs:
+            return self._error(400, "input is empty", "invalid_request_error")
+        for x in inputs:
+            if not isinstance(x, (str, list)):
+                return self._error(400, "every input must be a string or a list of token ids",
+                                   "invalid_request_error")
+        fmt = body.get("encoding_format") or "float"
+        if fmt not in ("float", "base64"):
+            return self._error(400, f"encoding_format {fmt!r} is not supported (float, base64)",
+                               "invalid_request_error")
+        t0 = time.time()
+        try:
+            with ENGINE.lock:
+                vectors, tokens = next(run_job(lambda: iter([ENGINE.embed(inputs)])))
+        except ContextError as e:
+            return self._error(400, str(e), code="context_length_exceeded")
+        except MemoryLimitError as e:
+            log(f"memory: {e}")
+            return self._error(503, str(e), "server_error", "insufficient_memory")
+        except ValueError as e:
+            return self._error(400, str(e), "invalid_request_error")
+        except Exception as e:
+            log(f"embedding error: {e!r}")
+            return self._error(500, str(e), "server_error")
+        dims = body.get("dimensions")
+        if dims is not None and dims != len(vectors[0]):
+            return self._error(400, f"this model's embeddings are {len(vectors[0])} numbers wide and are not "
+                                    f"trainable down to {dims}; drop the dimensions field",
+                               "invalid_request_error")
+        log(f"embeddings: {len(inputs)} input(s), {tokens} tokens, {len(vectors[0])} dims, "
+            f"{time.time() - t0:.2f}s")
+        if ollama_wire:
+            from engine import ollama
+            if legacy:
+                return self._json(200, ollama.embed_legacy(vectors[0]))
+            return self._json(200, ollama.embed(ARGS.name, vectors, tokens, time.time() - t0))
+        data = [{"object": "embedding", "index": i, "embedding": _encode_vector(v, fmt)}
+                for i, v in enumerate(vectors)]
+        self._json(200, {"object": "list", "data": data, "model": ARGS.name,
+                         "usage": {"prompt_tokens": tokens, "total_tokens": tokens}})
 
     # ───────────────────────── images (optional: mflux) ─────────────────────────
     def _images_ready(self):
