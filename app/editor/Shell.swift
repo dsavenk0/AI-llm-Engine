@@ -120,8 +120,6 @@ private struct Toolbar: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var modules: ModuleSettings
     @State private var showRemote = false
-    @State private var showMCP = false
-    @State private var showConductor = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -196,20 +194,21 @@ private struct Toolbar: View {
                 ForEach(ModuleID.allCases) { m in
                     Toggle(m.title, isOn: Binding(get: { modules.isOn(m) }, set: { _ in
                         modules.toggle(m)
-                        if m == .preview, modules.isOn(.preview) { ws.showPanel("preview") }      // switching it on shows it
+                        // switching one on shows it, so the menu item has a visible effect
+                        if m == .preview, modules.isOn(.preview) { ws.showPanel("preview") }
+                        if m == .mcp, modules.isOn(.mcp) { ws.showPanel("mcp") }
+                        if m == .conductor, modules.isOn(.conductor) { ws.showPanel("conductor") }
                     })).disabled(m == .files)
                 }
                 if modules.isOn(.mcp) {
                     Divider()
-                    Button("Assistant Tools (MCP)…") { showMCP = true }
+                    Button("Assistant Tools (MCP)") { ws.showPanel("mcp") }
                 }
                 if modules.isOn(.conductor) {
                     if !modules.isOn(.mcp) { Divider() }
-                    Button("Conductor (multi-model)…") { showConductor = true }
+                    Button("Conductor (multi-model)") { ws.showPanel("conductor") }
                 }
             } label: { Image(systemName: "square.grid.2x2") }.menuStyle(.borderlessButton).fixedSize().help("Modules")
-            .sheet(isPresented: $showMCP) { MCPSheet(ws: ws, shown: $showMCP) }
-            .sheet(isPresented: $showConductor) { ConductorSheet(ws: ws, shown: $showConductor) }
             Menu {
                 Picker("Theme", selection: Binding(get: { ThemeSettings.shared.mode }, set: { ThemeSettings.shared.mode = $0 })) {
                     ForEach(ThemeMode.allCases) { Text($0.title).tag($0) }
@@ -288,6 +287,8 @@ private struct BottomPanel: View {
                 }
                 if modules.isOn(.terminal) { tab("terminal", "Terminal", color: Palette.phosphor) }
                 if modules.isOn(.preview) { tab("preview", "Preview", color: Palette.accent) }
+                if modules.isOn(.mcp) { tab("mcp", "Assistant Tools", color: Palette.accent) }
+                if modules.isOn(.conductor) { tab("conductor", "Conductor", color: Palette.phosphor) }
                 Spacer()
                 Button { ws.bottomVisible = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
             }.padding(.horizontal, 10).padding(.vertical, 5).background(Color.primary.opacity(0.04))
@@ -296,6 +297,10 @@ private struct BottomPanel: View {
                 TerminalPanel(ws: ws)
             } else if ws.bottomTab == "preview", modules.isOn(.preview) {
                 PreviewPanel(ws: ws)
+            } else if ws.bottomTab == "mcp", modules.isOn(.mcp) {
+                ScrollView { MCPSheet(ws: ws) }
+            } else if ws.bottomTab == "conductor", modules.isOn(.conductor) {
+                ScrollView { ConductorSheet(ws: ws) }
             } else if modules.isOn(.problems) {
                 ProblemsView(ws: ws)
             } else {

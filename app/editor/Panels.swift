@@ -401,7 +401,9 @@ struct GitModuleView: View {
 
 struct MCPSheet: View {
     @ObservedObject var ws: Workspace
-    @Binding var shown: Bool
+    /// nil when the panel is mounted inside the editor instead of presented as its own window: the shell
+    /// draws the frame and the close control, so the panel must not draw a second set.
+    var shown: Binding<Bool>?
     @State private var servers: [MCPServer] = []
     @State private var presets: [String] = []
     @State private var probed: [String: MCPProbeResponse] = [:]      // name → its last "Test" result
@@ -419,7 +421,9 @@ struct MCPSheet: View {
             HStack {
                 AccentCaption(text: "Assistant Tools · MCP")
                 Spacer()
-                Button("Close") { shown = false }.keyboardShortcut(.cancelAction)
+                if let shown {
+                    Button("Close") { shown.wrappedValue = false }.keyboardShortcut(.cancelAction)
+                }
             }
             Text("Connect MCP servers so the assistant can use their tools on this project. The tools run with "
                  + "the project as their working directory, and every call asks for your approval. A server is "
@@ -445,7 +449,9 @@ struct MCPSheet: View {
             }.listStyle(.inset)
             if let b = busy { HStack { ProgressView().controlSize(.small); Text(b).font(.caption) } }
         }
-        .padding(16).frame(minWidth: 680, minHeight: 500)
+        .padding(16)
+        .frame(minWidth: shown == nil ? nil : 680, minHeight: shown == nil ? nil : 500)
+        .frame(maxWidth: shown == nil ? .infinity : nil, maxHeight: shown == nil ? .infinity : nil)
         .onAppear { Task { await reload() } }
     }
 
@@ -577,7 +583,9 @@ struct MCPSheet: View {
 
 struct ConductorSheet: View {
     @ObservedObject var ws: Workspace
-    @Binding var shown: Bool
+    /// nil when the panel is mounted inside the editor instead of presented as its own window: the shell
+    /// draws the frame and the close control, so the panel must not draw a second set.
+    var shown: Binding<Bool>?
     @State private var status: ConductorStatus?
     @State private var busy = false
     @State private var task = ""
@@ -593,7 +601,9 @@ struct ConductorSheet: View {
             HStack {
                 AccentCaption(text: "Conductor · multi-model")
                 Spacer()
-                Button("Close") { shown = false }.keyboardShortcut(.cancelAction)
+                if let shown {
+                    Button("Close") { shown.wrappedValue = false }.keyboardShortcut(.cancelAction)
+                }
             }
             Text("Optional. Split one task across models by role. A remote (API) model runs in parallel; local "
                  + "models take turns on the one engine — before a local subtask the engine switches to that "
@@ -644,7 +654,9 @@ struct ConductorSheet: View {
                 HStack { ProgressView().controlSize(.small); Text("Loading…").font(.caption) }
             }
         }
-        .padding(16).frame(minWidth: 640, minHeight: 460)
+        .padding(16)
+        .frame(minWidth: shown == nil ? nil : 640, minHeight: shown == nil ? nil : 460)
+        .frame(maxWidth: shown == nil ? .infinity : nil, maxHeight: shown == nil ? .infinity : nil)
         .onAppear { Task { await reload() } }
     }
 
