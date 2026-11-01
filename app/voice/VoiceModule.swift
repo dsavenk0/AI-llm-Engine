@@ -264,14 +264,6 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // ---- the button
 
-    /// There is something to stop — listening, thinking, or reading a reply aloud — so the button is a stop.
-    var canStop: Bool {
-        switch state {
-        case .listening, .speaking, .thinking: return true
-        default: return false
-        }
-    }
-
     func toggle() {
         switch state {
         case .listening: finishListening()
@@ -281,6 +273,23 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         case .starting: break
         default: begin()
         }
+    }
+
+    /// There is a reply on the way or being read aloud, so the send button is a stop button.
+    var replyRunning: Bool {
+        state == .speaking || state == .thinking || state == .starting
+    }
+
+    /// Stops the reply — the request and the reading of it — and stays silent. Unlike `toggle()` this does not
+    /// open the microphone: it is the button next to the field, pressed to cut a long answer short.
+    func stopReply() {
+        dialogActive = false                       // do not start listening again when the reading breaks off
+        ask?.cancel()
+        synth.stopSpeaking(at: .immediate)
+        pendingUtterances = 0
+        stopCapture()                              // a barge-in listener may be open over the reply
+        state = .idle
+        levelTarget = 0
     }
 
     /// Listening starts at once — the microphone and the recogniser do not need the model — while the model is
@@ -1336,7 +1345,6 @@ struct VoiceView: View {
 
     private var composer: some View {
         let canSend = !voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !voice.attachments.isEmpty
-        let busy = voice.state == .thinking || voice.state == .starting
         return VStack(alignment: .leading, spacing: 6) {
             if !voice.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1366,16 +1374,21 @@ struct VoiceView: View {
                     .frame(minHeight: 26)                                   // the same row height as the buttons
                     .onSubmit { voice.send() }
                 Button { voice.toggle() } label: {
-                    Image(systemName: voice.canStop ? "stop.circle.fill" : "mic.fill").font(.system(size: 16))
+                    Image(systemName: voice.state == .listening ? "stop.circle.fill" : "mic.fill").font(.system(size: 16))
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(voice.canStop ? VHUD.magenta : VHUD.cyan)
-                .help(voice.state == .speaking ? "Stop reading" : voice.state == .listening ? "Stop listening"
-                      : voice.state == .thinking ? "Stop" : "Speak")
-                Button { voice.send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).frame(width: 26, height: 26) }
-                    .buttonStyle(.plain).foregroundColor(canSend && !busy ? VHUD.cyan : VHUD.dim.opacity(0.5))
-                    .disabled(!canSend || busy).help("Send")
+                .foregroundColor(voice.state == .listening ? VHUD.magenta : VHUD.cyan)
+                .help(voice.state == .listening ? "Stop listening" : voice.replyRunning ? "Speak over the reply" : "Speak")
+                // while the reply is being written or read aloud the same button stops it, the way a chat does
+                Button { voice.replyRunning ? voice.stopReply() : voice.send() } label: {
+                    Image(systemName: voice.replyRunning ? "stop.circle.fill" : "arrow.up.circle.fill")
+                        .font(.system(size: 22)).frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(voice.replyRunning ? VHUD.magenta : (canSend ? VHUD.cyan : VHUD.dim.opacity(0.5)))
+                .disabled(!voice.replyRunning && !canSend)
+                .help(voice.state == .speaking ? "Stop reading" : voice.replyRunning ? "Stop" : "Send")
             }
         }
         .padding(10)
