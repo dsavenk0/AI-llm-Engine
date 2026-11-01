@@ -2,21 +2,46 @@
 
 ![AI-llm-Engine](docs/banner.png)
 
-A small, dependency-light MLX inference engine for **Qwen3.5-family models** on Apple Silicon. It includes the
-**JANG / Prism Hadamard-rotated ternary** bundles that otherwise only run in vMLX, plus a CLI, a menu-bar app
-and integrations for Continue, Kilo Code and opencode.
+**A language model that runs on your own Mac.** No cloud, no subscription, no account: you download a model
+once and it answers from your laptop — offline, on a plane, with nothing leaving the machine.
 
-Built and tuned for a **MacBook Air M5, 16 GB** running
-[`dealignai/Bonsai-2-27B-CRACK-Ternary-JANG`](https://huggingface.co/dealignai/Bonsai-2-27B-CRACK-Ternary-JANG)
-(27B, ~7.6 GB).
+### [⬇ Download LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg) · [Русская версия](README.ru.md)
 
-[Русская версия](README.ru.md)
+<sub>**On the first launch macOS will refuse to open it** — “Apple could not verify that this file is free of
+malware”. The app is signed, but ad hoc: Apple only vouches for apps notarized under a paid developer account.
+Press **Done**, open **System Settings ▸ Privacy & Security**, scroll down and press **Open Anyway** — or in
+Terminal: `xattr -dr com.apple.quarantine /Applications/LLMBar.app`. You do this once.</sub>
+
+Open the app, pick a model from the list, and it downloads and starts. What you get:
+
+- **A chat in the menu bar.** Click the small icon, type or speak, and hear the answer read back.
+- **A code editor with an assistant** that reads your project and proposes edits you approve or reject.
+- **Your own private API.** Continue, Kilo Code, opencode — anything that talks to OpenAI, Ollama or Claude can
+  point at `http://localhost:8080` instead of the internet.
+- **Documents, scans and recordings.** Attach a PDF, a photo of a page or a voice memo: it is read on the Mac
+  itself and handed to the model.
+
+**Why this one rather than another local runner**
+
+- **It does not freeze a 16 GB Mac.** It watches the memory of the whole machine, not only its own: before a
+  request it frees what it can, shortens the answer to what will fit and says so plainly, instead of swapping
+  to disk and locking the laptop up.
+- **It is small.** The app is 10 MB, the engine behind it about 310 MB — not a 2 GB install.
+- **It is quick on the models that fit.** On a MacBook Air M5 with 16 GB: 115 tokens a second on a small model,
+  79 on a 2B, 35 on a 4B — close to the ceiling the memory bus itself sets on this Mac.
+- **It opens models others cannot.** Ternary JANG / Prism bundles (a 27B model in 7.6 GB) run here; ordinary
+  GGUF and MLX models run too, and it tells you *before* the download whether a model will actually start.
+- **It works without the app at all.** One command-line tool does everything: `./llm run`, `./llm serve`,
+  `./llm read`.
+
+The measurements behind those numbers, with the conditions they were taken under, are in **[Why](#why)**.
 
 <p align="center">
-  <img src="docs/assets/screenshot-engine.png" width="210" alt="Menu-bar engine: status, token ledger, memory">
-  <img src="docs/assets/screenshot-editor-ide.png" width="210" alt="Code editor with the assistant">
-  <img src="docs/assets/screenshot-voice.png" width="210" alt="Voice chat">
-  <img src="docs/assets/screenshot-models.png" width="210" alt="Models: installed, hub search and download">
+  <img src="docs/assets/tile-engine.png" width="396" alt="Menu-bar engine: status, token ledger, memory">
+  <img src="docs/assets/tile-editor.png" width="396" alt="Code editor with the assistant">
+  <br>
+  <img src="docs/assets/tile-voice.png" width="396" alt="Voice chat">
+  <img src="docs/assets/tile-models.png" width="396" alt="Models: installed, hub search and download">
 </p>
 
 ## Why
@@ -49,16 +74,23 @@ embedding table is gathered, not streamed, so the true efficiency is somewhat be
 were taken with 68–70 % of system RAM already in use (the harness warns above 45 %), so they are conservative
 rather than best-case.</sub>
 
-| Also true, and easy to check | |
-|---|---|
-| `max_tokens` above the safe limit | clamped, the request succeeds (vMLX returns HTTP 413) |
-| Install size | **310 MB** venv (vMLX ships a 1.9 GB app) |
+### Against vMLX 1.6.75 — same Mac, same prompts, alternating runs
 
-<sub>An earlier run (October 2026) compared this engine with vMLX 1.6.75 on the 27B model — same Mac, same
-prompts, alternating runs — and measured decode 7.61–9.53 vs 6.80–6.94 tok/s, prefill 86.7–119.5 vs 73.5–88.1
-tok/s, cold start 4 s vs 19 s, and 0.66 vs 1.26 GB of process memory on top of the weights. Those figures are
-**not re-verified in the current numbers above**: the 27B needs ~9.8 GB peak and the measurement wants an idle
-machine. Treat them as a dated earlier measurement, not as a like-for-like comparison with the table above.</sub>
+Measured in **October 2026** on the 27B JANG bundle. That is a *different workload* from the three-model table
+above and is **not re-verified in those numbers** (the 27B needs ~9.8 GB peak and an idle machine). Read it as a
+dated head-to-head on one model, not as the same benchmark.
+
+| 27B JANG, October 2026 | vMLX 1.6.75 | **this engine** |
+|---|---|---|
+| Decode speed (256 tokens) | 6.80 – 6.94 tok/s | **7.61 – 9.53 tok/s** (+12 – 37 %) |
+| Prefill speed (2.3K-token prompt) | 73.5 – 88.1 tok/s | **86.7 – 119.5 tok/s** (+18 – 36 %) |
+| Code edits (prompt-lookup speculation) | no such feature | **27 – 35 tok/s** (×2.5 vs plain decode) |
+| Cold start to first request | 19 s | **4 s** |
+| Process memory on top of the weights | 1.26 GB | **0.66 GB** |
+| Install size | 1.9 GB app | **310 MB** venv |
+| `max_tokens` above the safe limit | HTTP 413 error | clamped, the request succeeds |
+
+The last two rows depend on neither the machine nor the date, so they still hold as written.
 
 The 413 error is what broke Kilo Code with vMLX. Kilo asks for 32,000 output tokens, and vMLX rejects anything above
 its Metal headroom estimate (~8.5K on 16 GB).
@@ -221,6 +253,12 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 ```
 
 > **Prebuilt download:** [LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg) (direct download of the latest release).
+>
+> A downloaded copy is blocked once by Gatekeeper, because the build is signed ad hoc rather than notarized:
+> allow it in **System Settings ▸ Privacy & Security**, or run `xattr -dr com.apple.quarantine
+> /Applications/LLMBar.app`. Building it yourself avoids this entirely — `build-app.sh` clears the flag. To ship
+> a DMG that opens with no warning, sign with a Developer ID (`LLMBAR_SIGN_IDENTITY`) and notarize
+> (`LLMBAR_NOTARY_PROFILE`); `build-dmg.sh` does both when those are set.
 
 LLMBar is the lightweight UI of the engine. It lives in the menu bar as a small `Ai_` icon. Click the icon to open a
 frosted-glass panel right under it; click again, press Esc or click elsewhere to hide it (the model keeps running).

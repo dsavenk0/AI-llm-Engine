@@ -78,6 +78,26 @@ hdiutil convert "$RW_DMG" -quiet -format UDZO -imagekey zlib-level=9 -o "$FINAL_
 echo "✓ Done: $FINAL_DMG ($(du -h "$FINAL_DMG" | cut -f1))"
 echo "  Open it and drag LLMBar to Applications."
 
+# Notarization (optional). Apple will not vouch for an ad-hoc signature, so a DMG downloaded from the
+# releases page is blocked on first launch ("Apple could not verify that this file is free of malware").
+# Set both of these to ship a DMG that opens with no warning at all:
+#   LLMBAR_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)"   # read by build-app.sh
+#   LLMBAR_NOTARY_PROFILE=<name>                                     # xcrun notarytool store-credentials <name>
+if [[ -n "${LLMBAR_NOTARY_PROFILE:-}" ]]; then
+  if codesign -dv "$APP" 2>&1 | grep -q "TeamIdentifier=not set"; then
+    echo "✗ Notarization needs a Developer ID signature: set LLMBAR_SIGN_IDENTITY and build again." >&2
+    exit 1
+  fi
+  echo "▸ Notarizing (this waits for Apple)…"
+  xcrun notarytool submit "$FINAL_DMG" --keychain-profile "$LLMBAR_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$FINAL_DMG"
+  echo "✓ Notarized and stapled: it opens with no warning."
+else
+  echo "  Not notarized (ad-hoc signature). Whoever downloads it sees Gatekeeper's warning once and has to"
+  echo "  allow it in System Settings ▸ Privacy & Security, or run:"
+  echo "    xattr -dr com.apple.quarantine /Applications/LLMBar.app"
+fi
+
 # A stable-named copy for the website's one-click button. GitHub serves
 # releases/latest/download/LLMBar.dmg as an attachment, so the page downloads straight away
 # instead of bouncing to the releases list — but only if the release carries this exact name.
