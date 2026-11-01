@@ -324,5 +324,6 @@
   "Audio ready. Try:  ./llm transcribe clip.m4a   ./llm say \"hello\"": "Аудио готово. Попробуйте:  ./llm transcribe clip.m4a   ./llm say \"hello\"",
   "Usage: ./llm say \"<text>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]": "Использование: ./llm say \"<текст>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]",
   "Cannot speak:": "Не удалось озвучить:",
-  "Saved {path} ({sec}s)": "Сохранено {path} ({sec}с)"
+  "Saved {path} ({sec}s)": "Сохранено {path} ({sec}с)",
+  "Cline keeps API keys in its own secrets file — paste the engine's key into Cline once.": "Cline хранит ключи API в своём файле секретов — вставьте ключ движка в Cline один раз."
 }

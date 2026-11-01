@@ -53,6 +53,13 @@ def shard(n_layers, rank, size):
     return (start, start + base + (1 if rank < extra else 0))
 
 
+def my_layers(config, group):
+    """This rank's slice, from the checkpoint's own layer count — what to pass to loader.load(layer_range=)."""
+    tc = config.get("text_config", config)
+    n = tc["num_hidden_layers"]
+    return shard(n, group.rank(), group.size()) if group else (0, n)
+
+
 def forward(model, cache, group, ids=None, embeds=None, pos=None, mask=None, last_only=True):
     """One forward pass spread across the group; every rank returns the logits.
 
@@ -60,13 +67,13 @@ def forward(model, cache, group, ids=None, embeds=None, pos=None, mask=None, las
     rank receives from the one before it (rank 0 embeds instead), runs its own layers, and either passes the
     hidden state on or — being last — applies the head and sends the logits back to rank 0.
 
-    `cache` holds only this rank's layers, in the same order as its slice.
+    `model` holds only this rank's layers, having been loaded with `layer_range=my_layers(...)`, and `cache`
+    is its own `make_cache()` — which therefore has exactly one entry per owned layer.
     """
     from .model import Positions
     rank, size = group.rank(), group.size()
     lm = model.language_model
     layers = lm.model.layers
-    lo, hi = shard(len(layers), rank, size)
     pos = pos or Positions()
 
     if rank == 0:
@@ -75,7 +82,7 @@ def forward(model, cache, group, ids=None, embeds=None, pos=None, mask=None, las
         shape = (embeds.shape if embeds is not None else (1, len(ids[0]), model.args["hidden_size"]))
         h = mx.distributed.recv(list(shape), mx.float16, rank - 1, group=group)
 
-    for layer, c in zip(layers[lo:hi], cache):
+    for layer, c in zip(layers, cache):
         h = layer(h, model.ops, c, pos, mask)
 
     if rank == size - 1:

@@ -32,13 +32,17 @@ def child():
     if group is None:
         print("RANK ERROR: no group", flush=True)
         return 1
-    rank, size = group.rank(), group.size()
-    model, _, _ = load(os.environ["BUNDLE"], vision=False, log=lambda *a: None)
-    lo, hi = cluster.shard(len(model.language_model.model.layers), rank, size)
-    cache = model.make_cache()[lo:hi]              # this rank owns the state of its own layers only
+    bundle = os.environ["BUNDLE"]
+    with open(os.path.join(bundle, "config.json")) as f:
+        config = json.load(f)
+    lo, hi = cluster.my_layers(config, group)
+    # only this rank's layers are read off disk — the memory half of the split
+    model, _, nbytes = load(bundle, vision=False, log=lambda *a: None, layer_range=(lo, hi))
+    print(f"RANKINFO rank={group.rank()} layers={lo}..{hi} loaded={nbytes}", flush=True)
+    cache = model.make_cache()                     # one entry per owned layer, by construction
     logits = cluster.forward(model, cache, group, ids=mx.array(PROMPT))
     mx.eval(logits)
-    if rank == 0:
+    if group.rank() == 0:
         out = [float(x) for x in logits[0, -1, :16].tolist()]
         print("RANK0 " + json.dumps({"shape": list(logits.shape), "head": out}), flush=True)
     return 0
@@ -77,7 +81,7 @@ def main():
     outs = [p.communicate(timeout=300)[0] for p in procs]
     for r, o in zip((1, 0), outs):
         for line in o.splitlines():
-            if line.startswith("RANK") or "Error" in line or "error" in line:
+            if line.startswith("RANKINFO") or "Error" in line or "error" in line:
                 print(f"  rank {r}: {line}")
 
     got = next((l for o in outs for l in o.splitlines() if l.startswith("RANK0 ")), None)

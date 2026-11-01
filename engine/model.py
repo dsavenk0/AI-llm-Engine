@@ -512,17 +512,23 @@ class FEmbedding(nn.Module):
 
 
 class TextModel(nn.Module):
-    def __init__(self, a, q, qe):
+    def __init__(self, a, q, qe, layer_range=None):
         super().__init__()
         self.embed_tokens = qe(a["vocab_size"], a["hidden_size"], "model.embed_tokens")
-        self.layers = [DecoderLayer(a, q, i, a.get("ba_quantized", False)) for i in range(a["num_hidden_layers"])]
+        # `layer_range` is this rank's slice of a pipeline (engine/cluster.py); without it, every layer.
+        # The *true* index is still what each layer is built with — it decides whether the layer is
+        # recurrent or attention (is_linear) and names the tensors its quantization is read from — so a
+        # slice holds exactly the layers it would hold in a whole model, not renumbered ones.
+        lo, hi = layer_range or (0, a["num_hidden_layers"])
+        self.layer_lo = lo
+        self.layers = [DecoderLayer(a, q, i, a.get("ba_quantized", False)) for i in range(lo, hi)]
         self.norm = RMSNorm(a["hidden_size"], a["rms_norm_eps"])
 
 
 class LanguageModel(nn.Module):
-    def __init__(self, a, q, qe):
+    def __init__(self, a, q, qe, layer_range=None):
         super().__init__()
-        self.model = TextModel(a, q, qe)
+        self.model = TextModel(a, q, qe, layer_range)
         if not a.get("tie_word_embeddings", False):
             self.lm_head = q(a["hidden_size"], a["vocab_size"], "lm_head")
 
@@ -530,7 +536,7 @@ class LanguageModel(nn.Module):
 class Model(nn.Module):
     """Language model (+ optional vision tower) with Hadamard-aware forward."""
 
-    def __init__(self, config, qcfg=None, vision=None, keys=()):
+    def __init__(self, config, qcfg=None, vision=None, keys=(), layer_range=None):
         super().__init__()
         self.args = a = dict(config["text_config"])
         a["ba_quantized"] = any(k.endswith("linear_attn.in_proj_b.scales") for k in keys)
@@ -579,7 +585,7 @@ class Model(nn.Module):
                 spec = (qcfg["bits"], qcfg["group_size"], hint or "affine")
             return FEmbedding(n, d) if spec is None else QEmbedding(n, d, spec[0], spec[1], spec[2])
 
-        self.language_model = LanguageModel(a, q, qe)
+        self.language_model = LanguageModel(a, q, qe, layer_range)
         if vision is not None:
             self.vision_tower = vision
         self.set_hadamard(Identity())

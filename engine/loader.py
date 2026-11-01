@@ -9,6 +9,7 @@
 import glob
 import json
 import os
+import re
 import time
 
 import mlx.core as mx
@@ -102,8 +103,32 @@ def _join_tq1(shard):
         shard[base + ".weight"] = weight
 
 
-def load(path, vision=True, log=print, ptq1=False, steer=None):
-    """`steer`: (direction file or folder, alpha or None) — an activation edit, see engine/steering.py."""
+_LAYER_INDEX = re.compile(r"(?<=\.)layers\.(\d+)\.")
+
+
+def _own(k, layer_range):
+    """None when this tensor belongs to a layer this rank does not hold, else the key renumbered into the
+    rank's own slice — `layers.14.` becomes `layers.2.` for a rank whose slice starts at 12.
+
+    Tensors that name no layer (the embedding, the final norm, the head, the Hadamard sign vectors) are
+    kept by every rank. The layers are what make a 120B checkpoint not fit; these do not, and rank 0 needs
+    the embedding while the last rank needs the head, so splitting them would buy little and cost a
+    special case in every path that touches them.
+    """
+    if layer_range is None:
+        return k
+    m = _LAYER_INDEX.search(k)
+    if not m:
+        return k
+    i, (lo, hi) = int(m.group(1)), layer_range
+    return None if not (lo <= i < hi) else k[:m.start(1)] + str(i - lo) + k[m.end(1):]
+
+
+def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None):
+    """`steer`: (direction file or folder, alpha or None) — an activation edit, see engine/steering.py.
+
+    `layer_range`: (first, last+1) to read only one rank's slice of the decoder — the memory half of
+    pipeline parallelism (engine/cluster.py). Without it the whole checkpoint is read, as always."""
     t0 = time.time()
     config = _json(os.path.join(path, "config.json"))
     jang = _json(os.path.join(path, "jang_config.json"))
@@ -134,7 +159,7 @@ def load(path, vision=True, log=print, ptq1=False, steer=None):
     if vision and config.get("vision_config") and any(k.startswith("vision_tower.") for k in keys):
         from .vision import VisionModel
         vis = VisionModel(config["vision_config"], shapes, qcfg)
-    model = Model(config, qcfg, vis, shapes)
+    model = Model(config, qcfg, vis, shapes, layer_range=layer_range)
     from mlx.utils import tree_flatten
     expected_shapes = {k: v.shape for k, v in tree_flatten(model.parameters())}
 
@@ -174,6 +199,10 @@ def load(path, vision=True, log=print, ptq1=False, steer=None):
                     signs[w] = v.astype(mx.float32)
                 elif not mx.array_equal(signs[w], v).item():
                     raise ValueError(f"{k}: sign vectors differ within width {w}; unsupported layout")
+                continue
+            k = _own(k, layer_range)       # after the signs: those are shared, every rank keeps them
+            if k is None:
+                del v
                 continue
             if k.endswith(SHIFTED_NORMS) and v.ndim == 1 and k.startswith("language_model"):
                 if not shift_decided:
