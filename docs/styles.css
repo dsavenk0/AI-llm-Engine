@@ -110,6 +110,11 @@ html {
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* mobile Safari scrolls the document at this level, not body's own box — `overflow-x: hidden` on body
+     alone does not stop it from dragging sideways onto whatever bleeds past the viewport, which is what
+     clipped the hero headline at both edges on a phone instead of wrapping it in place */
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 body.apple-experience {
@@ -476,6 +481,18 @@ body.apple-experience {
 
 body.nav-scroll-lock {
   overflow: hidden;
+}
+
+/* The open mobile menu is a sticky pill that grows into a card (see .apple-nav.nav-open below) — sticky
+   positioning means it overlaps whatever section the page happened to be scrolled to, which on its own
+   read as the menu floating over unrelated content. This dims that content on purpose instead, like any
+   other dropdown's backdrop, and a tap on it closes the menu (see the document click listener in app.js). */
+body.nav-scroll-lock::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 90;         /* above the page, below .apple-nav-header (z-index: 100) so the open card stays on top */
 }
 
 .apple-btn-secondary {

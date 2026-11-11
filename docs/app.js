@@ -468,6 +468,13 @@
   window.addEventListener('resize', () => {
     if (window.innerWidth > 1024) setNavOpen(false);
   });
+  // open, the pill grows into a card over the page (see the .nav-scroll-lock backdrop in styles.css) —
+  // tapping the dimmed page behind it closes it, same as tapping outside any other dropdown
+  document.addEventListener('click', (e) => {
+    if (navEl?.classList.contains('nav-open') && !navEl.contains(e.target)) {
+      setNavOpen(false);
+    }
+  });
 
   // ==========================================
   // 2. Tab Navigation (macOS Segmented Bar)
