@@ -124,8 +124,12 @@ def _own(k, layer_range):
     return None if not (lo <= i < hi) else k[:m.start(1)] + str(i - lo) + k[m.end(1):]
 
 
-def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None):
+def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None, weight_patch=None):
     """`steer`: (direction file or folder, alpha or None) — an activation edit, see engine/steering.py.
+
+    `weight_patch`: (candidate.patch folder, alpha or None) — one or more reversible weight edits
+    (W_effective = W_base + alpha*ΔW), see engine/weightpatch.py and model_lab/patch.py. Like `steer`, this
+    never touches the checkpoint on disk; alpha=0 is the unmodified model.
 
     `layer_range`: (first, last+1) to read only one rank's slice of the decoder — the memory half of
     pipeline parallelism (engine/cluster.py). Without it the whole checkpoint is read, as always."""
@@ -284,6 +288,13 @@ def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None)
         d = steering.load_direction(file, tc["hidden_size"])
         model.set_steer(steering.projector(d, alpha))
         log(f"activation steering on: {os.path.basename(file)}, alpha {alpha:g}")
+
+    if weight_patch:
+        from . import weightpatch
+        patch_dir, patch_alpha = weight_patch
+        patch_alpha = 1.0 if patch_alpha is None else patch_alpha
+        manifest = weightpatch.apply_patch_dir(model, "native", patch_dir, patch_alpha)
+        log(f"weight patch on: {', '.join(manifest['tensors'])}, alpha {patch_alpha:g}")
 
     model.ptq1 = is_ptq1
     model.eval()

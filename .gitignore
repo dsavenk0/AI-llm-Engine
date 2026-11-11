@@ -1,6 +1,7 @@
 # environment / runtime state
 .venv/
 .llm/
+model-lab-data/
 __pycache__/
 *.pyc
 

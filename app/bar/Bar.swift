@@ -1813,6 +1813,11 @@ struct ToolsTab: View {
                 tool("checkmark.seal", L("Tests", "Тесты"), L("Unit tests (+ integration when stopped)", "Юнит-тесты (+ интеграционные при остановке)")) { CLI.terminal("./llm test") }
                 tool("speedometer", L("Benchmarks", "Бенчмарки"), L("Compare with the baseline · stop the engine first", "Сравнение с базой · сначала остановите движок")) { CLI.terminal("./llm perf") }
                 tool("terminal", L("Terminal menu", "Меню в Терминале"), "./llm") { CLI.terminal("./llm") }
+                tool("flask", L("Model Lab", "Лаборатория модели"),
+                     L("Inspect tensors, capture activations — no weight editing yet",
+                       "Инспекция тензоров, захват активаций — редактирование весов пока нет")) {
+                    CLI.terminal("./llm lab")
+                }
             }
         }
     }

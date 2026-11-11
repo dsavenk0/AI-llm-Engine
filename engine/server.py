@@ -1218,6 +1218,10 @@ def main():
                     "(.safetensors/.npy/.bin) or a folder holding one; native route only (engine/steering.py)")
     ap.add_argument("--steer-alpha", type=float, default=None,
                     help="strength of --steer (default: the folder's adapter.json, else 1.0; 0 = off)")
+    ap.add_argument("--weight-patch", default="", help="a reversible weight edit's candidate.patch folder "
+                    "(./llm lab wsp patches create/activate — engine/weightpatch.py); native/GGUF routes only")
+    ap.add_argument("--weight-patch-alpha", type=float, default=1.0,
+                    help="scales every tensor's delta in --weight-patch uniformly (1.0 = as created, 0 = off)")
     ap.add_argument("--stats-file", default="", help="append one JSON line per request (all-time token statistics)")
     ap.add_argument("--idle-sleep", type=float, default=15, help="unload the model after N idle minutes (0 = never)")
     ap.add_argument("--max-queue", type=int, default=0,
@@ -1267,10 +1271,15 @@ def main():
     from engine.generate import Engine
     if ARGS.steer and ARGS.backend == "mlxlm":
         ap.error("--steer works on the native engine and the built-in GGUF decoder, not on the mlx-lm backend")
+    if ARGS.weight_patch and ARGS.backend == "mlxlm":
+        ap.error("--weight-patch works on the native engine and the built-in GGUF decoder, not on the mlx-lm backend")
     backend = pick_backend(ARGS.model, ARGS.backend)
     if ARGS.steer and backend == "mlxlm":
         ap.error("--steer works on the native engine and the built-in GGUF decoder, not on the mlx-lm backend "
                  "(this model runs on mlx-lm)")
+    if ARGS.weight_patch and backend == "mlxlm":
+        ap.error("--weight-patch works on the native engine and the built-in GGUF decoder, not on the mlx-lm "
+                 "backend (this model runs on mlx-lm)")
     if backend == "gguf":
         from engine.gguf_engine import GGUFEngine
         Backend = GGUFEngine
@@ -1289,6 +1298,7 @@ def main():
                            disk_cache_gb=ARGS.disk_cache_gb, disk_cache_dir=ARGS.disk_cache_dir,
                            think_frac=ARGS.think_frac, ptq1=ARGS.ptq1 == "on",
                            steer=(ARGS.steer, ARGS.steer_alpha) if ARGS.steer else None,
+                           weight_patch=(ARGS.weight_patch, ARGS.weight_patch_alpha) if ARGS.weight_patch else None,
                            log=log)
     threading.Thread(target=worker, args=(init,), daemon=True).start()
     READY.wait()

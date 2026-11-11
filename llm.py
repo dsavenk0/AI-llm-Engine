@@ -1512,6 +1512,10 @@ def engine_cmd(cfg, m):
         cmd += ["--steer", mc["steer"]]
         if mc.get("steer_alpha") is not None:
             cmd += ["--steer-alpha", str(mc["steer_alpha"])]
+    if mc.get("weight_patch") and (m.get("route", "native") == "native" or native_gguf):
+        cmd += ["--weight-patch", mc["weight_patch"]]
+        if mc.get("weight_patch_alpha") is not None:
+            cmd += ["--weight-patch-alpha", str(mc["weight_patch_alpha"])]
     if cfg.get("log_level", "info") in LOG_LEVELS and cfg.get("log_level") != "info":
         cmd += ["--log-level", cfg["log_level"]]
     if not cfg.get("fallback_model", True):
@@ -3460,6 +3464,383 @@ def conduct_cmd(cfg, args):
     return True
 
 
+def lab_cmd(cfg, args):
+    """`./llm lab inspect --model <m> [--tensor <name>] [--json]`: exact per-tensor name/shape/dtype/bytes
+    (unlike `./llm inspect`'s grouped-by-layer-pattern human overview, every tensor is addressable by its
+    exact name — what Model Lab's own tooling needs). Works on both MLX/safetensors and GGUF checkpoints,
+    header-only, no dequantization.
+
+    `./llm lab capture --model <m> --prompt <text> [--layers 0,2,5] [--json]`: activation capture —
+    pre-residual, post-attention/GatedDeltaNet, and post-MLP hidden states at each selected decoder layer
+    for one short prompt. Native-engine checkpoints only (GGUF/ptq1/mlx-lm models use a different forward
+    path this doesn't instrument). Saved under `<data dir>/model-lab-data/experiments/<id>/captures/`.
+
+    `./llm lab wsp patches create --model <m> --tensor <name> (--delta <file.safetensors> | --std <value>
+    [--seed <n>]) [--note <text>]`: a reversible weight edit, W_effective = W_base + ΔW, for one tensor —
+    on the native or GGUF route, quantized (affine) or plain. The original checkpoint file is never
+    touched. MoE experts and ternary (PTQ1/Bonsai) tensors are refused, not silently misapplied — see
+    docs/model-lab/compatibility.md.
+
+    `./llm lab wsp patches ablate --model <m> --safe <prompt> [--safe <prompt> ...] --harmful <prompt>
+    [--harmful <prompt> ...] [--layers 0,1,2] [--alpha 1.0] [--note <text>]`: a multi-layer patch computed
+    from two prompt groups — a mean-diff direction at each chosen layer's MLP output, removed from that
+    layer's `down_proj` rows (native route only). A candidate to evaluate, not a proven fix — see
+    docs/model-lab/compatibility.md's scientific-boundaries note.
+
+    `wsp patches apply --patch <id> --prompt <text>` applies a patch in memory (this process only) and
+    shows the top predicted next tokens before/after; `wsp patches rollback --patch <id>` reloads without
+    it and confirms the recorded baseline is reproduced exactly. `wsp patches list` shows what exists.
+
+    Making a patch "stick" for ordinary use (`./llm chat`/`./llm start`), two ways: `wsp patches activate
+    --model <m> --patch <id> [--alpha 1.0]` re-applies it at every load from then on (like `./llm steer`;
+    `deactivate` turns it off) — the checkpoint file is still never touched. `wsp patches export --model
+    <m> --out <folder> [--patch <id>] [--alpha 1.0]` instead bakes it into a complete, separate model
+    folder once (no patch involved afterward); omit `--patch` to export the model unpatched.
+
+    First Model Lab increment covers inspection, activation capture and this weight-patch mechanism — no
+    agent/Teacher loop, no LoRA, no Bonsai-ternary editing yet. See docs/model-lab/compatibility.md."""
+    from model_lab import capture, inspection
+    sub = args[0] if args else ""
+    if sub == "wsp":
+        return _lab_wsp(cfg, args[1:])
+    rest = args[1:]
+    opts, i = {}, 0
+    while i < len(rest):
+        if rest[i] in ("--model", "--tensor", "--prompt", "--layers") and i + 1 < len(rest):
+            opts[rest[i][2:]] = rest[i + 1]; i += 2; continue
+        if rest[i] == "--json":
+            opts["json"] = True; i += 1; continue
+        i += 1
+
+    usage = f"usage: ./llm lab {{inspect|capture|wsp}} --model <model> ..." if sub not in ("inspect", "capture") \
+        else f"usage: ./llm lab {sub} --model <model> " + (
+            "[--tensor <name>] [--json]" if sub == "inspect" else "--prompt <text> [--layers 0,2,5] [--json]")
+    if sub not in ("inspect", "capture") or not opts.get("model"):
+        print(R(usage)); return False
+
+    pick, hits = resolve_model(scan_models(cfg), opts["model"])
+    if not pick:
+        if len(hits) > 1:
+            print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
+        else:
+            print(R(T("Model not found.")))
+        return False
+
+    if sub == "inspect":
+        try:
+            tensors = inspection.inspect_tensors(pick["path"], pick.get("route", "native"))
+        except ValueError as e:
+            print(R(str(e))); return False
+        if opts.get("tensor"):
+            info = tensors.get(opts["tensor"])
+            if info is None:
+                print(R(T("No such tensor:") + " " + opts["tensor"])); return False
+            tensors = {opts["tensor"]: info}
+        if opts.get("json"):
+            print(json.dumps(tensors, ensure_ascii=False))
+        else:
+            for name, info in tensors.items():
+                print(f"{name}  shape={info['shape']}  dtype={info['dtype']}  bytes={info['nbytes']}")
+            count, total = inspection.summarize(tensors)
+            print(DIM(f"{count} tensor(s)" + (f", {total / 2**20:.1f} MB" if total is not None else "")))
+        return True
+
+    # capture
+    if pick.get("route") != "native":
+        print(R(T("lab capture only runs on the native engine route (this model routes via {r}).")
+                .format(r=pick.get("route")))); return False
+    if not opts.get("prompt"):
+        print(R(usage)); return False
+    layers = None
+    if opts.get("layers"):
+        try:
+            layers = [int(x) for x in opts["layers"].split(",") if x.strip() != ""]
+        except ValueError:
+            print(R(T("--layers expects a comma-separated list of integers"))); return False
+    import mlx.core as mx
+    from engine.loader import load
+    from engine.tokenizer import Tokenizer
+    try:
+        model, _, _ = load(pick["path"], vision=False)
+    except ValueError as e:
+        print(R(str(e))); return False
+    tok = Tokenizer(pick["path"])
+    text = tok.render([{"role": "user", "content": opts["prompt"]}])
+    ids = mx.array([tok.encode(text)])
+    try:
+        captured, final_hidden = capture.capture_activations(model, ids, layers)
+    except ValueError as e:
+        print(R(str(e))); return False
+    exp_id, out_dir = capture.save_capture(os.path.join(DATA, "model-lab-data"), pick["name"],
+                                           opts["prompt"], captured, final_hidden)
+    if opts.get("json"):
+        print(json.dumps({"experiment": exp_id, "path": out_dir, "layers": sorted(captured)}, ensure_ascii=False))
+    else:
+        print(G(T("Captured {n} layer(s) → {path}").format(n=len(captured), path=out_dir)))
+    return True
+
+
+def _lab_load_model(pick):
+    """(model, route) for either engine route `wsp` supports. Raises ValueError with a clear message for
+    anything else (mlx-lm/ptq1 models use forward paths this doesn't instrument, same restriction as
+    `lab capture`)."""
+    route = pick.get("route")
+    if route == "gguf":
+        from engine.dense import build
+        model, _, _ = build(pick["path"])
+        return model, "gguf"
+    if route == "native":
+        from engine.loader import load
+        model, _, _ = load(pick["path"], vision=False)
+        return model, "native"
+    raise ValueError(f"lab wsp only runs on the native or GGUF engine routes (this model routes via {route}).")
+
+
+def _lab_tokenize(pick, route, prompt):
+    import mlx.core as mx
+    if route == "gguf":
+        from engine.gguf import read_header_full
+        from engine.gguf_tokenizer import GGUFTokenizer
+        tok = GGUFTokenizer(pick["path"], read_header_full(pick["path"]))
+        ids = tok.apply_chat_template([{"role": "user", "content": prompt}], tokenize=True)
+    else:
+        from engine.tokenizer import Tokenizer
+        tok = Tokenizer(pick["path"])
+        ids = tok.encode(tok.render([{"role": "user", "content": prompt}]))
+    return tok, mx.array([ids])
+
+
+def _lab_top_tokens(model, tok, ids, k=5):
+    import mlx.core as mx
+    logits = model(ids, model.make_cache())
+    mx.eval(logits)
+    probs = mx.softmax(logits[0, -1].astype(mx.float32))
+    idx = mx.argsort(-probs)[:k]
+    return [{"token": tok.decode([int(i)]), "prob": round(float(probs[i]), 4)} for i in idx]
+
+
+def _lab_wsp(cfg, args):
+    """`./llm lab wsp patches create|ablate|list|apply|rollback|activate|deactivate` — see lab_cmd's
+    docstring for the full usage."""
+    import numpy as np
+    from model_lab import patch
+    root = os.path.join(DATA, "model-lab-data")
+    if not args or args[0] != "patches":
+        print(R(T("usage: ./llm lab wsp patches create|ablate|list|apply|rollback|activate|deactivate ...")))
+        return False
+    verb = args[1] if len(args) > 1 else ""
+    rest = args[2:]
+    LIST_FLAGS = ("--safe", "--harmful")
+    opts, i = {}, 0
+    while i < len(rest):
+        if rest[i] in LIST_FLAGS and i + 1 < len(rest):
+            opts.setdefault(rest[i][2:], []).append(rest[i + 1]); i += 2; continue
+        if rest[i] in ("--model", "--tensor", "--delta", "--std", "--seed", "--patch", "--prompt", "--note",
+                      "--layers", "--alpha", "--out") and i + 1 < len(rest):
+            opts[rest[i][2:]] = rest[i + 1]; i += 2; continue
+        if rest[i] == "--json":
+            opts["json"] = True; i += 1; continue
+        i += 1
+    verbs = ("create", "ablate", "list", "apply", "rollback", "activate", "deactivate", "export")
+    if verb not in verbs or not opts.get("model"):
+        print(R(T("usage: ./llm lab wsp patches {verbs} --model <model> ...").format(verbs="|".join(verbs))))
+        return False
+
+    pick, hits = resolve_model(scan_models(cfg), opts["model"])
+    if not pick:
+        if len(hits) > 1:
+            print(Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
+        else:
+            print(R(T("Model not found.")))
+        return False
+
+    if verb == "list":
+        patches = patch.list_patches(root, pick["name"])
+        if opts.get("json"):
+            print(json.dumps(patches, ensure_ascii=False))
+        else:
+            active = mcfg(cfg, pick["path"]).get("weight_patch")
+            for m in patches:
+                mark = "*" if active and os.path.basename(os.path.dirname(active)) == m["created"] else " "
+                print(f"{mark} {m['created']}  {', '.join(m['tensors'])}" +
+                     (f"  — {m['note']}" if m.get("note") else ""))
+            print(DIM(f"{len(patches)} patch(es)" + ("  (* = active at engine startup)" if patches else "")))
+        return True
+
+    if verb == "create":
+        if not opts.get("tensor"):
+            print(R(T("usage: ./llm lab wsp patches create --model <model> --tensor <name> "
+                      "(--delta <file.safetensors> | --std <value>) [--seed <n>] [--note <text>]")))
+            return False
+        try:
+            model, route = _lab_load_model(pick)
+            leaf = patch.locate(model, route, opts["tensor"])
+            base_array, _spec = patch.read_logical(leaf)
+        except (ValueError, patch.PatchError) as e:
+            print(R(str(e))); return False
+        base_shape = base_array.shape
+        if opts.get("delta"):
+            import mlx.core as mx
+            loaded = mx.load(opts["delta"])
+            arr = loaded.get("delta") if "delta" in loaded else next(iter(loaded.values())) if len(loaded) == 1 else None
+            if arr is None:
+                print(R(T("{path}: save the delta under the key \"delta\", or as the file's only tensor.")
+                        .format(path=opts["delta"])))
+                return False
+            delta = np.asarray(arr.astype(mx.float32))
+        elif opts.get("std"):
+            try:
+                std = float(opts["std"])
+            except ValueError:
+                print(R(T("--std expects a number"))); return False
+            seed = int(opts["seed"]) if opts.get("seed") else 0
+            delta = np.random.default_rng(seed).standard_normal(base_shape).astype(np.float32) * std
+        else:
+            print(R(T("give either --delta <file.safetensors> or --std <value>"))); return False
+        if delta.shape != base_shape:
+            print(R(T("delta shape {d} does not match {t}'s logical shape {s}")
+                    .format(d=delta.shape, t=opts["tensor"], s=base_shape))); return False
+        exp_id, out_dir = patch.create_patch(root, pick["name"], route, {opts["tensor"]: delta},
+                                             opts.get("note", ""))
+        if opts.get("json"):
+            print(json.dumps({"experiment": exp_id, "path": out_dir}, ensure_ascii=False))
+        else:
+            print(G(T("Patch created: {id} → {path}").format(id=exp_id, path=out_dir)))
+        return True
+
+    if verb == "ablate":
+        if pick.get("route") != "native":
+            print(R(T("lab wsp ablate only runs on the native engine route (this model routes via {r}).")
+                    .format(r=pick.get("route")))); return False
+        if not opts.get("safe") or not opts.get("harmful"):
+            print(R(T("usage: ./llm lab wsp patches ablate --model <model> --safe <prompt> [--safe <prompt> "
+                      "...] --harmful <prompt> [--harmful <prompt> ...] [--layers 0,1,2] [--alpha 1.0] "
+                      "[--note <text>]")))
+            return False
+        from model_lab import ablation
+        try:
+            model, route = _lab_load_model(pick)
+            tok, _ = _lab_tokenize(pick, route, "warmup")      # just to confirm tokenization works first
+            safe_ids = [_lab_tokenize(pick, route, p)[1] for p in opts["safe"]]
+            harmful_ids = [_lab_tokenize(pick, route, p)[1] for p in opts["harmful"]]
+            n_layers = len(model.layers)
+            layers = [int(x) for x in opts["layers"].split(",")] if opts.get("layers") else list(range(n_layers))
+            alpha = float(opts["alpha"]) if opts.get("alpha") else 1.0
+            deltas = ablation.ablation_deltas(model, safe_ids, harmful_ids, layers, alpha)
+        except (ValueError, patch.PatchError) as e:
+            print(R(str(e))); return False
+        note = opts.get("note") or f"ablation: {len(opts['safe'])} safe vs {len(opts['harmful'])} harmful prompts"
+        exp_id, out_dir = patch.create_patch(root, pick["name"], route, deltas, note)
+        if opts.get("json"):
+            print(json.dumps({"experiment": exp_id, "path": out_dir, "layers": layers}, ensure_ascii=False))
+        else:
+            print(G(T("Ablation patch created: {id} → {path} ({n} layer(s))")
+                   .format(id=exp_id, path=out_dir, n=len(layers))))
+        return True
+
+    if verb in ("activate", "deactivate"):
+        # per-model, like `./llm steer` — cfg["models"][path], not set_mcfg's "currently selected model"
+        # shortcut, since --model here may name a model that isn't the one currently selected
+        if verb == "deactivate":
+            cfg["models"].setdefault(pick["path"], {})["weight_patch"] = None
+            save_cfg(cfg)
+            print(G(T("Weight patch deactivated for {name}.").format(name=pick["name"])))
+            return restart(cfg, False) if read_pid(ENGINE_PID) and pick["path"] == cfg.get("model") else True
+        if not opts.get("patch"):
+            print(R(T("usage: ./llm lab wsp patches activate --model <model> --patch <id> [--alpha 1.0]")))
+            return False
+        try:
+            _manifest, _deltas, patch_dir = patch.load_patch(root, opts["patch"])
+        except OSError:
+            print(R(T("No such patch:") + " " + opts["patch"])); return False
+        cfg["models"].setdefault(pick["path"], {})
+        cfg["models"][pick["path"]]["weight_patch"] = patch_dir
+        cfg["models"][pick["path"]]["weight_patch_alpha"] = float(opts["alpha"]) if opts.get("alpha") else None
+        save_cfg(cfg)
+        print(G(T("Weight patch {id} will be applied every time {name} starts.")
+               .format(id=opts["patch"], name=pick["name"])))
+        return restart(cfg, False) if read_pid(ENGINE_PID) and pick["path"] == cfg.get("model") else True
+
+    if verb == "export":
+        if not opts.get("out"):
+            print(R(T("usage: ./llm lab wsp patches export --model <model> --out <folder> [--patch <id>] "
+                      "[--alpha 1.0]")))
+            return False
+        if pick.get("route") != "native":
+            print(R(T("lab wsp export only runs on the native engine route (this model routes via {r}).")
+                    .format(r=pick.get("route")))); return False
+        from model_lab import export as export_mod
+        try:
+            model, route = _lab_load_model(pick)
+            if opts.get("patch"):
+                _manifest, deltas, _patch_dir = patch.load_patch(root, opts["patch"])
+                alpha = float(opts["alpha"]) if opts.get("alpha") else 1.0
+                for name, delta in deltas.items():
+                    patch.apply_delta(model, route, name, delta, alpha)
+            out_dir = export_mod.export_model(model, pick["path"], opts["out"])
+        except (ValueError, patch.PatchError, OSError) as e:
+            print(R(str(e))); return False
+        if opts.get("json"):
+            print(json.dumps({"path": out_dir}, ensure_ascii=False))
+        else:
+            print(G(T("Exported to {path} — the original model was not touched.").format(path=out_dir)))
+        return True
+
+    # apply / rollback
+    if not opts.get("patch"):
+        print(R(T("usage: ./llm lab wsp patches {verb} --model <model> --patch <id> [--prompt <text>]")
+                .format(verb=verb)))
+        return False
+    try:
+        manifest, deltas, patch_dir = patch.load_patch(root, opts["patch"])
+    except OSError:
+        print(R(T("No such patch:") + " " + opts["patch"])); return False
+    if manifest.get("model") != pick["name"]:
+        print(R(T("This patch was created for {m}, not {n}.").format(m=manifest["model"], n=pick["name"])))
+        return False
+    # rollback's default prompt must match what `apply` actually ran — not the patch's free-text --note —
+    # or an honest "unpatched ≠ baseline" check would fire on nothing more than a prompt mismatch
+    saved_eval = patch.load_evaluation(root, opts["patch"])
+    prompt = opts.get("prompt") or (saved_eval or {}).get("prompt") or "Hello."
+    try:
+        model, route = _lab_load_model(pick)
+        tok, ids = _lab_tokenize(pick, route, prompt)
+        baseline = _lab_top_tokens(model, tok, ids)
+        if verb == "apply":
+            for name, delta in deltas.items():
+                patch.apply_delta(model, route, name, delta)
+            patched = _lab_top_tokens(model, tok, ids)
+            patch.save_evaluation(root, opts["patch"], {"prompt": prompt, "baseline": baseline, "patched": patched})
+        else:
+            saved = saved_eval
+            matches = saved is not None and saved.get("baseline") == baseline
+            result = {"prompt": prompt, "unpatched": baseline,
+                      "rollback_verified": matches if saved is not None else None}
+    except (ValueError, patch.PatchError) as e:
+        print(R(str(e))); return False
+    if verb == "apply":
+        if opts.get("json"):
+            print(json.dumps({"experiment": opts["patch"], "prompt": prompt, "baseline": baseline,
+                              "patched": patched}, ensure_ascii=False))
+        else:
+            print(T("Baseline (unpatched):") + " " + ", ".join(f"{t['token']!r} {t['prob']}" for t in baseline))
+            print(T("Patched:") + "             " + ", ".join(f"{t['token']!r} {t['prob']}" for t in patched))
+        return True
+    if opts.get("json"):
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(T("Unpatched (always — the checkpoint file was never touched):") + " " +
+              ", ".join(f"{t['token']!r} {t['prob']}" for t in baseline))
+        if saved is None:
+            print(Y(T("No stored baseline to compare — run 'apply' first for a check.")))
+        elif matches:
+            print(G(T("Rollback verified: identical to the recorded baseline.")))
+        else:
+            print(R(T("Mismatch from the recorded baseline — this should never happen since the checkpoint "
+                      "file is never touched; please report it.")))
+    return True
+
+
 def convert_cmd(cfg, args):
     """`./llm convert <model.gguf> [out_dir]` — export a GGUF as an MLX folder (config.json, f16 safetensors,
     tokenizer.json), so a converted model opens with mlx-lm without the GGUF around."""
@@ -3515,6 +3896,7 @@ def main():
         "calibrate": lambda: run_calibrate(sys.argv[2:]),
         "agent": lambda: __import__("agent").main(sys.argv[2:]),
         "conduct": lambda: conduct_cmd(cfg, sys.argv[2:]),
+        "lab": lambda: lab_cmd(cfg, sys.argv[2:]),
         "convert": lambda: convert_cmd(cfg, sys.argv[2:]),
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,

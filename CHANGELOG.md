@@ -24,6 +24,16 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   token groups automatically, rather than refused.
 - **`./llm perf --long-context`**: also measures prefill throughput at 64K/128K tokens (off by default — a
   size that does not fit on the machine is reported as skipped, not crashed).
+- **Model Lab** (see [docs/model-lab/compatibility.md](docs/model-lab/compatibility.md)): `./llm lab
+  inspect` lists every tensor's exact name, shape and dtype on a model (MLX or GGUF), addressable
+  individually, not grouped for reading like `./llm inspect`; `./llm lab capture` records pre-residual,
+  post-attention/GatedDeltaNet and post-MLP hidden states at chosen decoder layers for one prompt, on the
+  native engine route. `./llm lab wsp patches create/apply/rollback` is a direct, reversible weight edit
+  (`W_effective = W_base + ΔW`) on one tensor, native or GGUF, quantized or plain — the checkpoint file is
+  never touched. `./llm lab wsp patches ablate` computes a multi-layer edit from two prompt groups'
+  activations (native only). A patch is made to stick for ordinary use two ways: `wsp patches
+  activate`/`deactivate` re-applies it at every engine start (like `--steer`), or `wsp patches export`
+  bakes it into a complete, separate model folder once. Also in LLMBar's Tools tab, under Diagnostics.
 - **`./llm conduct board`**: the Conductor's subtask routing (who delegated what to which model, and whether
   it worked) is now written to an append-only log as a run goes, not only printed to the terminal and lost —
   inspectable during a run or after it finishes.

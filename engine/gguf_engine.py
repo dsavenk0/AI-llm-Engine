@@ -20,8 +20,9 @@ class GGUFEngine(CompatEngine):
     backend = "gguf-mlx"
     REQUIRES_MLX_LM = False
 
-    def __init__(self, path, steer=None, speculative=True, draft_max=15, ngram_min=2, **kw):
+    def __init__(self, path, steer=None, weight_patch=None, speculative=True, draft_max=15, ngram_min=2, **kw):
         self.steer = steer              # (direction file or folder, alpha or None), see engine/steering.py
+        self.weight_patch = weight_patch  # (candidate.patch folder, alpha or None), see engine/weightpatch.py
         super().__init__(path, **kw)
         # prompt-lookup speculation: the key/value cache can be trimmed, so rejected drafts are simply forgotten
         self.speculative = bool(speculative)
@@ -57,6 +58,12 @@ class GGUFEngine(CompatEngine):
             d = steering.load_direction(file, cfg.n_embd)
             model.steer = steering.projector(d, alpha)
             self.log(f"activation steering on: {file.rsplit('/', 1)[-1]}, alpha {alpha:g}")
+        if self.weight_patch:
+            from . import weightpatch
+            patch_dir, patch_alpha = self.weight_patch
+            patch_alpha = 1.0 if patch_alpha is None else patch_alpha
+            manifest = weightpatch.apply_patch_dir(model, "gguf", patch_dir, patch_alpha)
+            self.log(f"weight patch on: {', '.join(manifest['tensors'])}, alpha {patch_alpha:g}")
         self.model = model
         self.model_bytes = model.nbytes
         self.decoder = _Decoder(self.tok)

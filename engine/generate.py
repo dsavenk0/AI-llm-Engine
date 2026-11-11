@@ -313,7 +313,7 @@ class Engine:
                  max_pixels=1024 * 1024, thinking=None, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
                  disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6, ptq1=False, prefill_guard=True, log=print,
-                 steer=None):
+                 steer=None, weight_patch=None):
         self.path, self.log = path, log
         self.prefill_guard = prefill_guard   # refuse a prompt that would not fit in free memory
         self.max_context, self.max_tokens, self.prefill_step = max_context, max_tokens, prefill_step  # 0 = auto
@@ -323,6 +323,7 @@ class Engine:
         self.think_frac = think_frac  # share of a reply's token budget reasoning may use before forced to close
         self.ptq1_enabled = ptq1      # experimental: PTQ1_0 (1.75-bit) bundles
         self.steer = steer            # (direction file or folder, alpha or None): an activation edit, see steering.py
+        self.weight_patch = weight_patch  # (candidate.patch folder, alpha or None): see engine/weightpatch.py
         self.mem_limit = mem_limit  # max fraction of system RAM in use (whole machine)
 
         self.progress = None           # {"phase", "done", "total"} while a long prompt is being prefilled
@@ -410,7 +411,8 @@ class Engine:
     def _load_weights(self):
         # vision tower is loaded on the first image request (saves ~0.5 GB for text/code work)
         self.model, self.config, self.model_bytes = load(self.path, vision=False, log=self.log,
-                                                         ptq1=self.ptq1_enabled, steer=self.steer)
+                                                         ptq1=self.ptq1_enabled, steer=self.steer,
+                                                         weight_patch=self.weight_patch)
         if getattr(self.model, "ptq1", False) and self.speculative and os.environ.get("LLM_PTQ1_SPECULATIVE") != "1":
             # a verification pass of 2-16 rows is still several one-row steps of work on a ternary model
             # (the fused kernel is compute-bound: ~6 steps for 16 rows); LLM_PTQ1_SPECULATIVE=1 to measure
