@@ -448,6 +448,54 @@ class TestLifecycle(Base):
         self.assertIn("stop the engine instead", s["engine"]["error"])
 
 
+class TestNoGrowth(Base):
+    """A service that stays up for weeks must not keep anything per request. Python objects are counted after
+    a warm-up, over requests that include tabs closed mid-answer and event streams dropped by the client."""
+    words = tuple(f" w{i}" for i in range(12))
+    delay = 0.0
+
+    def hang_up(self, conn_sock):
+        import socket
+        for f in (lambda: conn_sock.shutdown(socket.SHUT_RDWR), conn_sock.close):
+            try:
+                f()
+            except OSError:
+                pass
+
+    def one(self, i):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.connect()
+        sock = conn.sock
+        conn.request("POST", "/v1/assistant/chat", body=json.dumps(self.ask(session=f"t{i % 4}")).encode(),
+                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {TOKEN}", "Origin": EXT})
+        r = conn.getresponse()
+        if i % 3 == 0:
+            r.read(60)
+            self.hang_up(sock)                              # the tab was closed mid-answer
+        else:
+            r.read()
+            conn.close()
+        self.engine.requests.clear()                        # the fake engine's own log is not the service's
+
+    def settle(self):
+        import gc
+        self.wait(lambda: not self.assistant.gens and self.engine.inflight == 0)
+        time.sleep(0.3)
+        gc.collect()
+        return len(gc.get_objects())
+
+    def test_requests_leave_nothing_behind(self):
+        for i in range(30):
+            self.one(i)
+        before = self.settle()
+        for i in range(30, 230):
+            self.one(i)
+        after = self.settle()
+        self.assertEqual(self.assistant.gens, {})
+        self.assertLessEqual(after - before, 25, f"{after - before} objects kept over 200 requests")   # not 6 per request
+        self.assertEqual(self.engine.inflight, 0)
+
+
 class TestExtensionFiles(unittest.TestCase):
     """The browser is pointed at a copy of the extension outside the app, and an app update refreshes it."""
 
