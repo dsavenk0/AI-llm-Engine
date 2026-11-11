@@ -139,7 +139,10 @@ class PrefixStore:
         cache, snaps = model.make_cache(), []
         for i, c in enumerate(cache):
             if isinstance(c, KVCache):
-                c.keys, c.values, c.offset = arrays[f"{i}.k"], arrays[f"{i}.v"], n
+                # entries written before the cache was float16 throughout hold float32 values: reading
+                # them back as they are would bring the per-step conversion of the whole cache with them
+                c.keys, c.values, c.offset = (arrays[f"{i}.k"].astype(mx.float16),
+                                              arrays[f"{i}.v"].astype(mx.float16), n)
                 snaps.append(None)
             else:
                 c.conv, c.state, c.offset = arrays[f"{i}.conv"], arrays[f"{i}.state"], n

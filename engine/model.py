@@ -355,7 +355,10 @@ class Ops:
             gate = q[..., hd:].reshape(B, L, -1)
             q = rms(q[..., :hd], qnw).transpose(0, 2, 1, 3)
             k = rms(qkv[..., qd:qd + kvd].reshape(B, L, nkv, hd), knw).transpose(0, 2, 1, 3)
-            v = qkv[..., qd + kvd:].reshape(B, L, nkv, hd).transpose(0, 2, 1, 3)
+            # float16 like q and k: a checkpoint whose scales are bfloat16 makes the quantized matmul
+            # return float32, and a float32 V doubles that half of the KV cache and makes attention
+            # convert the cache on every step (measured: 3.1 -> 0.6 ms per layer at a 32K context)
+            v = qkv[..., qd + kvd:].reshape(B, L, nkv, hd).transpose(0, 2, 1, 3).astype(F16)
             return q, k, v, gate
 
         def attn_post(o, gate, x, w, s, b):

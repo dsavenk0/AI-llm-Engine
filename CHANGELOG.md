@@ -73,6 +73,11 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   never actually stuck — the read size is now much smaller, so progress moves far more often. And when a
   repo's listing didn't report a file's size, LLMBar silently dropped every progress line for it instead of
   at least recognizing the transfer was still alive, which could make a healthy download look stalled.
+- **Long conversations slowed down far more than they should on mlx-community checkpoints.** These store
+  their quantization scales as bfloat16, which made half of the KV cache float32 — twice the size, and
+  converted on every token. It is float16 throughout now: on Qwen3.5-0.8B-4bit decoding is about 1.3× faster
+  at a short context and 2 – 3× faster at 8K – 32K, the cache takes a third less memory, and the answers are
+  the same. JANG / Prism bundles were never affected.
 - **A weight patch on a quantized model did not do what it said.** Writing the patched tensor back
   re-quantized all of it, which moved weights nobody asked to move (15 % of a 4-bit tensor's words for a
   delta of zero) and realized only part of a fine-grained edit such as an ablation. A patch now changes only

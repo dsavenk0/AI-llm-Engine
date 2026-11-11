@@ -915,6 +915,42 @@ class TestEveryMlxQuantization(unittest.TestCase):
                 self.assertLess(float(np.abs(lq - lf).max()) / scale, 0.02, name)
                 self.assertEqual(int(lq.argmax()), int(lf.argmax()), name)
 
+    def test_bfloat16_scales_do_not_leak_float32_into_the_cache(self):
+        # mlx-community conversions store scales / biases / norm weights as bfloat16. A float16 input
+        # times a bfloat16 scale is float32 in MLX: V then went into the KV cache at twice the size and
+        # attention converted the whole cache on every step (25 ms -> 9 ms per token at a 32K context
+        # once fixed). The cache is float16 whatever the checkpoint's dtype, and the answer is the same.
+        import os
+        import tempfile
+        from engine.generate import Engine
+        from engine.model import KVCache
+        from tests.synth import make_bundle
+        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_bundle(a, seed=21)
+        make_bundle(b, seed=21)
+        # the same values in both: rounded to bfloat16's 8 bits, stored as bfloat16 in `b` and in the
+        # dtype the bundle already used in `a`
+        for path, keep in ((a, False), (b, True)):
+            file = os.path.join(path, "model.safetensors")
+            t = {}
+            for k, v in mx.load(file).items():
+                if k.endswith((".scales", ".biases")) or v.ndim == 1:
+                    r = v.astype(mx.bfloat16)
+                    v = r if keep else r.astype(v.dtype)
+                t[k] = v
+            mx.save_safetensors(file, t)
+        eng = Engine(b, vision=False, max_context=256, max_tokens=8, disk_cache_gb=0, log=lambda *_: None)
+        cache = eng.model.make_cache()
+        out = eng.model(mx.array([[3, 4, 5, 6]]), cache)
+        mx.eval(out)
+        kv = [c for c in cache if isinstance(c, KVCache)]
+        self.assertTrue(kv)
+        for c in kv:
+            self.assertEqual(c.keys.dtype, mx.float16)
+            self.assertEqual(c.values.dtype, mx.float16)
+        self.assertEqual(out.dtype, mx.float16)
+        np.testing.assert_allclose(self.logits(b), self.logits(a), rtol=2e-3, atol=2e-3)
+
     def test_text_only_exports_without_the_language_model_prefix(self):
         # mlx-lm style exports name tensors model.* / lm_head.*; the loader maps them across
         import tempfile

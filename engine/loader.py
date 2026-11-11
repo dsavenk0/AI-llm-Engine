@@ -219,6 +219,17 @@ def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None,
                     and k.startswith("language_model.") and f"{k[:-7]}.scales" not in keys
                     and not k.endswith(("in_proj_a.weight", "in_proj_b.weight"))):
                 v = v.astype(mx.float16)  # an unquantized linear / embedding: keep the pipeline fp16
+            # mlx-community conversions store scales, biases and norm weights as bfloat16. Fed a float16
+            # input, MLX then promotes every quantized matmul and every norm to float32, and the casts back
+            # are a pass over each activation (measured on Qwen3.5-0.8B: 6.4 -> 5.5 ms per decode step, same
+            # greedy text). The conversion cannot overflow at these magnitudes and is exact down to 6e-5;
+            # below that the error is at most 3e-8. The a/b gate projections stay as stored: the decay they
+            # feed is computed in float32 on purpose.
+            if (v.dtype == mx.bfloat16 and k.startswith("language_model.")
+                    and "in_proj_a." not in k and "in_proj_b." not in k
+                    and (k.endswith((".scales", ".biases", "conv1d.weight"))
+                         or (k.endswith(".weight") and v.ndim == 1))):
+                v = v.astype(mx.float16)
             if k.endswith("conv1d.weight") and v.ndim == 3 and v.shape[-1] != 1:
                 v = v.moveaxis(2, 1)
             if k.endswith("patch_embed.proj.weight") and v.ndim == 5 and v.shape[-1] != 3:
