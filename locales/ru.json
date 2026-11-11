@@ -325,5 +325,8 @@
   "Usage: ./llm say \"<text>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]": "Использование: ./llm say \"<текст>\" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]",
   "Cannot speak:": "Не удалось озвучить:",
   "Saved {path} ({sec}s)": "Сохранено {path} ({sec}с)",
-  "Cline keeps API keys in its own secrets file — paste the engine's key into Cline once.": "Cline хранит ключи API в своём файле секретов — вставьте ключ движка в Cline один раз."
+  "Cline keeps API keys in its own secrets file — paste the engine's key into Cline once.": "Cline хранит ключи API в своём файле секретов — вставьте ключ движка в Cline один раз.",
+  "Not an unfinished download: {repo}": "Это не недокачанная загрузка: {repo}",
+  "Delete the unfinished download of {repo}?": "Удалить недокачанную загрузку {repo}?",
+  "Removed: {repo}": "Удалено: {repo}"
 }

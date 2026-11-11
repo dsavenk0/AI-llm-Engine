@@ -1491,6 +1491,13 @@ struct DownloadRow: View {
     }
 }
 
+/// One leftover download found on disk — independent of the search box, so it stays listed whether or not
+/// the person happens to search for that name again (`./llm models --partial`).
+struct PartialDownload: Identifiable, Equatable {
+    let id: String          // repo, "org/name"
+    let gb: Double          // already on disk
+}
+
 struct ModelsTab: View {
     @ObservedObject var e: EngineState
     @ObservedObject private var dl = Downloader.shared
@@ -1501,6 +1508,27 @@ struct ModelsTab: View {
     @State private var editing: String? = nil
     @State private var hoverRow: String? = nil
     @State private var hubSource = "hf"            // hf | modelscope
+    @State private var partials: [PartialDownload] = []
+
+    func refreshPartials() {
+        CLI.run(["models", "--partial"]) { code, out in
+            guard code == 0, let d = out.data(using: .utf8),
+                  let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { return }
+            partials = arr.map { PartialDownload(id: $0["id"] as? String ?? "?", gb: $0["gb"] as? Double ?? 0) }
+        }
+    }
+
+    func forgetPartial(_ id: String) {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = L("Delete the unfinished download of \(id)?", "Удалить недокачанную загрузку \(id)?")
+        a.informativeText = L("The partial files on disk are removed; nothing else is touched.",
+                              "Будут удалены только частично скачанные файлы этой загрузки.")
+        a.addButton(withTitle: L("Delete", "Удалить"))
+        a.addButton(withTitle: L("Cancel", "Отмена"))
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        CLI.run(["models", "--forget", id, "--yes"]) { _, _ in refreshPartials() }
+    }
 
     /// what the row says besides size and format: why it cannot run, or which route it takes
     func note(_ m: ModelInfo) -> String {
@@ -1606,6 +1634,32 @@ struct ModelsTab: View {
                     .onHover { inside in hoverRow = inside ? m.path : (hoverRow == m.path ? nil : hoverRow) }
                 }
             }
+            // Leftover downloads from disk, not from the search box — stays listed across searches and
+            // app restarts until resumed to completion or removed, so an interrupted download is never lost.
+            let shown = partials.filter { dl.job($0.id) == nil }     // a job already in the list above shows there instead
+            if !shown.isEmpty {
+                Card(glow: HUD.amber) {
+                    Caption(text: L("Incomplete downloads", "Недокачанные загрузки"), color: HUD.amber)
+                    ForEach(shown) { p in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                MarqueeText(text: p.id, font: .system(size: 11, weight: .medium), color: HUD.text, active: hoverRow == p.id)
+                                Text(String(format: L("%.1f GB downloaded so far", "скачано %.1f ГБ"), p.gb))
+                                    .font(HUD.mono(9)).foregroundColor(HUD.dim)
+                            }
+                            Spacer()
+                            Button(action: { dl.start(p.id) { e.loadModels(); refreshPartials() } }) {
+                                Image(systemName: "play.fill")
+                            }.buttonStyle(.plain).foregroundColor(HUD.phosphor).help(L("Resume", "Продолжить"))
+                            Button(action: { forgetPartial(p.id) }) { Image(systemName: "trash") }
+                                .buttonStyle(.plain).foregroundColor(HUD.dim)
+                                .help(L("Delete the partial files (keeps nothing to resume)", "Удалить частично скачанное (докачать будет нечего)"))
+                        }.padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                        .onHover { inside in hoverRow = inside ? p.id : (hoverRow == p.id ? nil : hoverRow) }
+                    }
+                }
+            }
             Card(glow: HUD.phosphor) {
                 HStack {
                     Caption(text: hubSource == "hf" ? L("Hugging Face hub", "Hugging Face") : "ModelScope", color: HUD.phosphor)
@@ -1663,7 +1717,7 @@ struct ModelsTab: View {
                     .onHover { inside in hoverRow = inside ? r.id : (hoverRow == r.id ? nil : hoverRow) }
                 }
             }
-        }.onAppear { if results.isEmpty { search() } }
+        }.onAppear { if results.isEmpty { search() }; refreshPartials() }
     }
 
     func badge(_ t: String, _ c: Color) -> some View {

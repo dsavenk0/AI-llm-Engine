@@ -791,5 +791,63 @@ class TestHub(State):
         self.assertGreater(len(ticks), 1)
         self.assertEqual(sum(ticks), len(big))
 
+
+class TestPartialDownloads(State):
+    """scan_partial_downloads/forget_partial: the Models panel's "always shown until resumed or removed"
+    section, independent of any search query — and independent of install_state's network-informed
+    heuristic, which this deliberately does not reuse (see the functions' own docstrings for why)."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "home")
+        p = mock.patch.object(llm, "HOME", self.home)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _touch(self, repo, *rel_paths):
+        dest = llm._pull_dest(repo)
+        for rel in rel_paths:
+            full = os.path.join(dest, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write(b"x" * 10)
+
+    def test_only_a_leftover_part_file_counts_as_unfinished(self):
+        self._touch("org/unfinished", "model-00001-of-00002.safetensors.part")
+        self._touch("org/finished", "config.json", "model.safetensors")
+        self.assertEqual([p["id"] for p in llm.scan_partial_downloads()], ["org/unfinished"])
+
+    def test_a_complete_gguf_repo_is_not_mistaken_for_partial(self):
+        # install_state's generic branch (no siblings) wants config.json + .safetensors; a GGUF-only repo
+        # must not be flagged just because it does not look like that unrelated shape
+        self._touch("org/gguf-model", "model.Q4_K_M.gguf")
+        self.assertEqual(llm.scan_partial_downloads(), [])
+
+    def test_the_standard_huggingface_hub_cache_layout_is_left_alone(self):
+        # models--org--name/{blobs,refs,snapshots} is another tool's cache, not this project's
+        blobs = os.path.join(llm.HOME, ".cache", "huggingface", "hub", "models--acme--demo", "blobs")
+        os.makedirs(blobs)
+        with open(os.path.join(blobs, "xyz.part"), "wb") as f:
+            f.write(b"x")
+        self.assertEqual(llm.scan_partial_downloads(), [])
+
+    def test_forget_partial_refuses_a_complete_folder(self):
+        self._touch("org/finished", "config.json", "model.safetensors")
+        self.assertFalse(llm.forget_partial("org/finished", assume_yes=True))
+        self.assertTrue(os.path.isdir(llm._pull_dest("org/finished")))
+
+    def test_forget_partial_removes_an_unfinished_folder_when_confirmed(self):
+        self._touch("org/unfinished", "model.safetensors.part")
+        self.assertTrue(llm.forget_partial("org/unfinished", assume_yes=True))
+        self.assertFalse(os.path.isdir(llm._pull_dest("org/unfinished")))
+
+    def test_forget_partial_asks_unless_assume_yes(self):
+        self._touch("org/unfinished", "model.safetensors.part")
+        with mock.patch("builtins.input", return_value="n"):
+            ok, _ = quiet(llm.forget_partial, "org/unfinished")
+        self.assertFalse(ok)
+        self.assertTrue(os.path.isdir(llm._pull_dest("org/unfinished")))
+
+
 if __name__ == "__main__":
     unittest.main()

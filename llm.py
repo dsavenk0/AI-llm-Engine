@@ -2366,6 +2366,48 @@ def install_state(repo, siblings=None):
     return "complete" if has and not parts else "partial"
 
 
+def scan_partial_downloads():
+    """Every model folder under the hub cache that still has a leftover .part file — the plain,
+    unambiguous sign that a download started and did not finish (unlike `install_state`'s heuristic, which
+    needs the hub's file listing to tell a complete GGUF repo from an incomplete safetensors one, and would
+    misjudge the kind it wasn't told about). Independent of any search query, so a panel can list these
+    always, not only when the user happens to search for that name again. Plain "org/name" repo ids with
+    how much is already on disk. `models--org--name/` folders are the plain `huggingface_hub` library's own
+    cache layout — another tool's downloads, not this project's — and are left alone."""
+    root = os.path.join(HOME, ".cache", "huggingface", "hub")
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for org in sorted(os.listdir(root)):
+        org_dir = os.path.join(root, org)
+        if org.startswith(".") or org.startswith("models--") or not os.path.isdir(org_dir):
+            continue
+        for name in sorted(os.listdir(org_dir)):
+            repo_dir = os.path.join(org_dir, name)
+            if not os.path.isdir(repo_dir):
+                continue
+            sizes = [os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(repo_dir) for f in fs
+                     if os.path.isfile(os.path.join(d, f))]
+            has_part = any(f.endswith(".part") for _, _, fs in os.walk(repo_dir) for f in fs)
+            if has_part:
+                out.append({"id": f"{org}/{name}", "gb": round(sum(sizes) / 2**30, 2)})
+    return out
+
+
+def forget_partial(repo, assume_yes=False):
+    """Delete an unfinished download's folder from the hub cache. Refuses anything that is not literally
+    sitting on a .part file, so this can never remove a complete model regardless of its format."""
+    dest = _pull_dest(repo)
+    if not os.path.isdir(dest) or not any(n.endswith(".part") for _, _, fs in os.walk(dest) for n in fs):
+        print(R(T("Not an unfinished download: {repo}").format(repo=repo)))
+        return False
+    if not assume_yes and not ask_yn(R(T("Delete the unfinished download of {repo}?").format(repo=repo)), False):
+        return False
+    shutil.rmtree(dest, ignore_errors=True)
+    print(G(T("Removed: {repo}").format(repo=repo)))
+    return True
+
+
 def hf_search(query, limit=20, source="hf", fmt="mlx"):
     """MLX (or, with fmt="gguf", GGUF) models on the hub, most downloaded first, with size and engine
     compatibility. source="modelscope" searches ModelScope instead (ids come back with the "ms:" prefix)."""
@@ -3254,8 +3296,11 @@ def main():
         "image": lambda: image_cmd(cfg, sys.argv[2:]),
         "start": lambda: start(cfg, tty), "stop": lambda: stop(cfg),
         "restart": lambda: restart(cfg, tty), "status": lambda: status(cfg),
-        "models": lambda: print(json.dumps(scan_models(cfg), ensure_ascii=False)) if arg == "--json"
-        else list_models(cfg, scan_models(cfg)), "use": lambda: choose_model(cfg, arg or None),
+        "models": lambda: (print(json.dumps(scan_models(cfg), ensure_ascii=False)) if arg == "--json"
+                          else print("\n".join(m["name"] for m in scan_models(cfg))) if arg == "--names"
+                          else print(json.dumps(scan_partial_downloads(), ensure_ascii=False)) if arg == "--partial"
+                          else forget_partial(sys.argv[3], assume_yes="--yes" in sys.argv) if arg == "--forget" and len(sys.argv) > 3
+                          else list_models(cfg, scan_models(cfg))), "use": lambda: choose_model(cfg, arg or None),
         "run": lambda: run_cmd(cfg, sys.argv[2:]),
         "show": lambda: show_cmd(cfg, sys.argv[2:]),
         "ps": lambda: ps_cmd(cfg, sys.argv[2:]),

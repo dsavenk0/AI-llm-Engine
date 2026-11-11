@@ -5,6 +5,9 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **Interrupted downloads stay visible in the Models panel**, independent of the current search box, until
+  resumed to completion or removed — including one left over from a previous session, not only the current
+  app launch.
 - **Merged-pass batching in the server** (`--batch-window <ms>`, `--batch-max`): requests that arrive within the
   window are generated in one forward pass, so the weights are read once for the batch instead of once per
   request. Measured 1.70x at two requests, 2.51x at four, 2.48x at eight (`tests/bench_batch.py`); off by
