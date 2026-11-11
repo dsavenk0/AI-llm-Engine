@@ -664,6 +664,11 @@ What each route can do (also printed under every model by `./llm models` and in 
 | GGUF, llama.cpp | ✓ (with a projector) | ✓ | ✓ | — | its own `ngram-mod` | — |
 | mlx-lm | — | ✓ | when the template speaks tools | — | — | — |
 
+A Mixture-of-Experts GGUF file on the engine's own decoder streams its experts from disk instead of decoding
+every one at load time (`stream_experts`, on by default — `LLM_GGUF_STREAM_EXPERTS=0` turns it off) — a small
+cache holds only the experts a token actually routes to, useful when the full set of experts would not
+otherwise fit comfortably in memory.
+
 Not supported: non-MLX, non-GGUF weights, 1-bit affine JANG. Speculative decoding with a trained drafter (DFlash,
 DSpark) is not implemented: measured, the vendor's own numbers say it does not pay on Apple Silicon (≈1.2× at best on
 an M5 Max, slower for the 1-bit model), and the published Q4_1 drafter needs the vendor's fork to load; the engine

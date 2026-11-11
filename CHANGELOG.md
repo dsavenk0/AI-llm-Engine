@@ -17,6 +17,11 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 - **Interrupted downloads stay visible in the Models panel**, independent of the current search box, until
   resumed to completion or removed — including one left over from a previous session, not only the current
   app launch.
+- **A GGUF Mixture-of-Experts model's experts can be streamed from disk instead of decoded all at once**
+  (`stream_experts`, on by default — `LLM_GGUF_STREAM_EXPERTS=0` turns it off): only the experts a token
+  actually routes to are decoded, into a small LRU-cached pool, instead of every expert at load time. A
+  prompt that would route to more distinct experts at once than the cache holds is processed in smaller
+  token groups automatically, rather than refused.
 - **`./llm conduct board`**: the Conductor's subtask routing (who delegated what to which model, and whether
   it worked) is now written to an append-only log as a run goes, not only printed to the terminal and lost —
   inspectable during a run or after it finishes.

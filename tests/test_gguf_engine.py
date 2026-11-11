@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -326,6 +327,102 @@ class TestMixtureOfExperts(Base):
 
     def test_experts_stay_quantized_and_match(self):
         self.check("llama", "Q8_0")
+
+    def test_streamed_experts_match_eager_and_the_reference_with_real_eviction(self):
+        """`stream_experts=True` decodes experts on demand into a small LRU cache instead of all at once —
+        correctness must not depend on which experts happen to be resident. Stepping one token at a time
+        (each step needs only N_USED=2 distinct experts, which the cache always holds at once) while the
+        cache is smaller than N_EXPERT forces real cross-step eviction, not a lazy-load-once no-op — a whole
+        prompt prefilled in one pass can need more distinct experts *at once* than a small cache holds; see
+        `test_a_single_pass_needing_more_distinct_experts_than_the_cache_is_refused_clearly` for that case."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "llama-Q8_0-1.gguf")
+        values = S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        want = S.reference_logits(values, self.IDS, arch="llama", moe=True)
+
+        model, _, _ = dense.build(path, stream_experts=False)               # eager, explicitly, for comparison
+        eager = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+
+        cache_size = S.N_USED                                              # the least any single step can need
+        model2, _, _ = dense.build(path, stream_experts=True, expert_cache=cache_size)
+        cache2 = model2.make_cache()
+        streamed = np.concatenate([np.asarray(model2(mx.array([[t]]), cache2)[0].astype(mx.float32))
+                                   for t in self.IDS])
+
+        np.testing.assert_allclose(streamed, want, atol=0.1, rtol=0)
+        # token-by-token vs one-shot differ a little in accumulation order regardless of streaming (the
+        # existing test_the_prefill_sorting_path_equals_token_by_token uses the same 0.05 tolerance for it)
+        np.testing.assert_allclose(streamed, eager, atol=0.05, rtol=0)
+
+        streamed_layer = next(L for L in model2.layers if L.router is not None)
+        eager_layer = next(L for L in model.layers if L.router is not None)
+        self.assertEqual(streamed_layer.gate_e.cache_size, cache_size)
+        self.assertGreater(streamed_layer.gate_e.misses, cache_size)       # more distinct experts fetched than slots
+        self.assertGreater(streamed_layer.gate_e.hits, 0)                  # a later token reused a cached expert
+        # half the experts resident (cache_size=2 of N_EXPERT=4): the streamed cache holds markedly less
+        self.assertLess(streamed_layer.gate_e.nbytes, eager_layer.gate_e.nbytes)
+
+    def test_a_single_token_needing_more_distinct_experts_than_the_cache_is_refused_clearly(self):
+        """A single token's own top-k routes to more distinct experts than the cache holds — no grouping can
+        help that (`gather_qmm` needs them all resident at once for even one token), so it is refused with a
+        clear, actionable message, never silently served with the wrong expert for whichever one did not fit."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "llama-Q8_0-1.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        model, _, _ = dense.build(path, stream_experts=True, expert_cache=1)   # < N_USED=2 needed per token
+        with self.assertRaises(ValueError) as cm:
+            model(mx.array([self.IDS]), model.make_cache())
+        self.assertIn("LLM_GGUF_EXPERT_CACHE", str(cm.exception))
+
+    def test_a_whole_prompt_needing_more_distinct_experts_than_the_cache_is_chunked_not_refused(self):
+        """A long-prompt prefill that, taken as one pass, would need every expert (N_EXPERT=4) at once — but
+        the cache only holds 2 (>= N_USED=2, so any *single* token is always servable) — now succeeds by
+        splitting the sequence into token groups that each fit, instead of the hard failure the previous
+        test exercises for an unsplittable cache. This is the one-big-prefill-call case
+        `test_streamed_experts_match_eager_and_the_reference_with_real_eviction` deliberately avoided by
+        stepping token-by-token; here the model is asked to do it itself, in one call, the way real prefill
+        actually arrives."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "llama-Q8_0-1.gguf")
+        values = S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        want = S.reference_logits(values, self.IDS, arch="llama", moe=True)
+        model, _, _ = dense.build(path, stream_experts=True, expert_cache=S.N_USED)   # < N_EXPERT, >= N_USED
+        got = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0)
+        moe_layer = next(L for L in model.layers if L.router is not None)
+        self.assertGreater(moe_layer.gate_e.misses, S.N_USED)        # more experts were fetched than one group holds
+
+    def test_streamed_expert_cache_at_least_the_full_count_never_evicts_and_still_matches(self):
+        """cache_size >= n_expert degenerates to "resident after first touch, nothing ever evicted" — the
+        same safe edge case a tiny real checkpoint would hit, and it must still match exactly."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "llama-Q8_0-1.gguf")
+        values = S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        want = S.reference_logits(values, self.IDS, arch="llama", moe=True)
+        model, _, _ = dense.build(path, stream_experts=True, expert_cache=999)
+        got = np.asarray(model(mx.array([self.IDS]), model.make_cache())[0].astype(mx.float32))
+        np.testing.assert_allclose(got, want, atol=0.1, rtol=0)
+        moe_layer = next(L for L in model.layers if L.router is not None)
+        self.assertEqual(moe_layer.gate_e.cache_size, S.N_EXPERT)          # clamped down to what actually exists
+
+    def test_expert_cache_env_var_is_the_only_way_a_caller_that_omits_the_kwarg_can_raise_it(self):
+        """engine/gguf_engine.py calls dense.build(self.path) with no expert_cache override, so the error
+        message's own advice ("set LLM_GGUF_EXPERT_CACHE") must actually reach that code path — not just
+        the explicit-kwarg one the other tests above exercise."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "llama-Q8_0-1.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        with mock.patch.dict(os.environ, {"LLM_GGUF_EXPERT_CACHE": "1"}):
+            model, _, _ = dense.build(path, stream_experts=True)   # expert_cache omitted, like gguf_engine.py
+        moe_layer = next(L for L in model.layers if L.router is not None)
+        self.assertEqual(moe_layer.gate_e.cache_size, 1)
+        with self.assertRaises(ValueError):
+            model(mx.array([self.IDS]), model.make_cache())        # 1 < N_USED=2 needed per token
 
     def test_qwen3_moe_with_qk_norm(self):
         self.check("qwen3moe", "F16")

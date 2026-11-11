@@ -112,12 +112,140 @@ class Experts:
         return self.w.nbytes + (self.scales.nbytes + self.biases.nbytes if self.bits else 0)
 
 
+class StreamedExperts:
+    """Like `Experts`, but the stacked tensor is never decoded in full. One quantized projection
+    (gate/up/down) of one MoE layer, backed by the memory-mapped GGUF file: only the experts actually routed
+    to are decoded, into a small, fixed-size LRU-cached pool — a global expert id always decodes to the same
+    bytes, it is simply fetched on demand instead of kept resident from model load onward. This is the
+    Colibri/kimi-k3-in-c idea (stream the part of a huge MoE model that is actually used, cache it, evict the
+    coldest entry when the budget is full) adapted to this engine's existing GGUF reader: `gguf_tensors.py`
+    already memory-maps the file and knows every tensor's exact byte offset (`TensorInfo.offset`), and experts
+    are stored contiguously (`rows` quant-block rows per expert, in expert order) — so one expert's bytes are
+    just an offset computation away, decoded with the very same `load_matrix` chunked-dequant code the eager
+    path already uses, not a new quantization format.
+
+    `sorted_indices` is only a performance hint to `gather_qmm` (confirmed from its own docstring: "may allow
+    a faster implementation," not a correctness requirement), so remapping a global expert id to its cache
+    slot after `_gather_sort` has already grouped by the *global* id costs a little of that grouping benefit
+    when the remap reorders them — never correctness; `sorted_indices=False` is passed here unconditionally,
+    honestly, rather than claim an ordering that no longer holds.
+
+    One real constraint, stated plainly rather than hidden: `gather_qmm` needs every expert a *single* call
+    routes to resident at once, so `expert_cache` must be at least as large as the most distinct experts any
+    one forward pass can touch — for one decode step that is `n_expert_used` (small, always satisfiable); for
+    a whole prompt prefilled in one pass it can be up to `min(tokens * n_expert_used, n_expert)`, which a
+    small cache may not cover. A pass that needs more than the cache holds raises a clear `ValueError` naming
+    how much to raise `expert_cache` by — never silently drops one and returns a wrong answer. Streaming earns
+    its keep on a model with many more experts than any one chunk realistically touches at once (the
+    kimi-k3-in-c case: 896 experts, 16 used per token); it does little for a small MoE model where most
+    experts get touched by any prompt of ordinary length anyway.
+
+    Each projection (gate/up/down) of a layer keeps its own independent slot assignment for the same global
+    expert id — fine, because `rhs_indices` only has to be internally consistent with that projection's own
+    `w`/`scales`/`biases`, never compared across projections."""
+
+    def __init__(self, gf, flat_info, n_exp, rows, cache_size):
+        from . import gguf_tensors as T
+        self.gf, self.info, self.n_exp, self.rows = gf, flat_info, n_exp, rows
+        self.cache_size = max(1, min(cache_size, n_exp))
+        self.resident = {}      # global expert id -> slot
+        self.lru = []           # slot ids, oldest (next to evict) first
+        self.free = list(range(1, self.cache_size))
+        self.hits = self.misses = 0
+        w0, s0, b0, self.bits = self._decode(T, 0)
+        self.w = mx.array(np.stack([w0] * self.cache_size))
+        self.scales = mx.array(np.stack([s0] * self.cache_size))
+        self.biases = mx.array(np.stack([b0] * self.cache_size))
+        self.resident[0], self.lru = 0, [0]
+
+    def _decode(self, T, e):
+        """(w, scales, biases, bits) for expert `e` alone — `load_matrix` unchanged, pointed at just that
+        expert's row range via a `TensorInfo` whose offset is computed, not a new tensor read from disk."""
+        cols = self.info.shape[1]
+        _, block, size = T.TYPES[self.info.type]
+        per_row = cols // block
+        sub = T.TensorInfo(self.info.name, (cols, self.rows), self.info.type,
+                           self.info.offset + e * self.rows * per_row * size)
+        return T.load_matrix(self.gf, sub)
+
+    def _ensure(self, ids):
+        """Make every expert id this one call needs resident, all at once — `gather_qmm` indexes them in a
+        single pass, so none may be evicted to make room for another one the *same* call also needs. A call
+        that needs more distinct experts than the cache holds is refused clearly (raise `expert_cache`),
+        never served wrong by silently dropping one mid-fill."""
+        from . import gguf_tensors as T
+        needed = sorted(set(int(i) for i in np.asarray(ids).reshape(-1)))
+        if len(needed) > self.cache_size:
+            raise ValueError(f"{len(needed)} distinct experts are routed to in one pass, more than the "
+                             f"expert cache holds ({self.cache_size}); set LLM_GGUF_EXPERT_CACHE to at "
+                             f"least {len(needed)} (or LLM_GGUF_STREAM_EXPERTS=0 to disable streaming "
+                             f"for this model).")
+        protected = {self.resident[e] for e in needed if e in self.resident}
+        for e in needed:
+            if e in self.resident:
+                self.hits += 1
+                slot = self.resident[e]
+            else:
+                self.misses += 1
+                if self.free:
+                    slot = self.free.pop()
+                else:
+                    victim_pos = next(i for i, s in enumerate(self.lru) if s not in protected)
+                    slot = self.lru.pop(victim_pos)
+                    old = next(g for g, s in self.resident.items() if s == slot)
+                    del self.resident[old]
+                w, s_, b, _ = self._decode(T, e)
+                self.w[slot], self.scales[slot], self.biases[slot] = mx.array(w), mx.array(s_), mx.array(b)
+                self.resident[e] = slot
+                protected.add(slot)
+            if slot in self.lru:
+                self.lru.remove(slot)
+            self.lru.append(slot)
+
+    def __call__(self, x, idx, sorted_idx):
+        self._ensure(idx)
+        remap = np.vectorize(lambda g: self.resident[int(g)])(np.asarray(idx)).astype(np.int32)
+        local = mx.array(remap)
+        if self.bits:
+            return mx.gather_qmm(x, self.w, self.scales, self.biases, rhs_indices=local, transpose=True,
+                                 group_size=32, bits=self.bits, sorted_indices=False)
+        return mx.gather_mm(x, self.w.swapaxes(-1, -2), rhs_indices=local, sorted_indices=False)
+
+    @property
+    def nbytes(self):
+        """What is actually resident (the cache), not the full stacked tensor on disk."""
+        return self.w.nbytes + self.scales.nbytes + self.biases.nbytes
+
+
 def _gather_sort(x, indices):
     """Order the (token, expert) pairs by expert so each expert's weights are read once per pass."""
     *_, m = indices.shape
     flat = indices.flatten()
     order = mx.argsort(flat)
     return x.flatten(0, -3)[order // m], flat[order], mx.argsort(order)
+
+
+def _expert_safe_groups(layer, idx):
+    """Split the token axis into the fewest contiguous groups whose own distinct expert ids fit every
+    streamed projection's cache at once (`gather_qmm` needs a group's whole working set resident
+    simultaneously — see `StreamedExperts`). Greedy, not optimal, but simple, cheap (one pass over the
+    token axis, done once per MoE layer) and correct. If even one token's own k picks cannot fit,
+    `StreamedExperts._ensure` still raises its own clear error — grouping only ever helps, it never
+    hides a cache that is genuinely too small for `n_expert_used` alone."""
+    cache_size = min(layer.gate_e.cache_size, layer.up_e.cache_size, layer.down_e.cache_size)
+    idx_np = np.asarray(idx)                                        # [B, L, k]
+    length = idx_np.shape[1]
+    groups, start, seen = [], 0, set()
+    for t in range(length):
+        ids_t = set(int(i) for i in idx_np[:, t].reshape(-1))
+        merged = seen | ids_t
+        if len(merged) > cache_size and t > start:
+            groups.append((start, t))
+            start, seen = t, set(ids_t)
+        else:
+            seen = merged
+    groups.append((start, length))
+    return groups
 
 
 class KVCache:
@@ -195,6 +323,7 @@ class Layer:
         if self.router is not None:                          # a mixture-of-experts layer
             self.gate_e, self.up_e, self.down_e = (t(f"ffn_{n}_exps.weight") for n in ("gate", "up", "down"))
             self.gate = self.up = self.down = None
+            self.streamed = isinstance(self.gate_e, StreamedExperts)
         else:
             self.gate, self.up, self.down = t("ffn_gate.weight"), t("ffn_up.weight"), t("ffn_down.weight")
         self.post_attn_norm = tensors.get(f"blk.{i}.post_attention_norm.weight")
@@ -244,7 +373,10 @@ class DenseModel:
 
     def _moe(self, layer, h):
         """Route each token to its top-k experts (softmax over all, optionally renormalised over the chosen),
-        run only those, and add their outputs weighted."""
+        run only those, and add their outputs weighted. When the experts are streamed (`StreamedExperts`),
+        a sequence that would route to more distinct experts than the cache holds is split into the fewest
+        token groups that each fit, instead of failing — the same "shrink under a budget" idea
+        `engine/generate.py`'s chunked prefill already uses for memory, scoped here to expert residency."""
         c = self.cfg
         M = self.act
         R = mx.float32 if self.wide else mx.float16
@@ -255,6 +387,19 @@ class DenseModel:
         w = mx.take_along_axis(probs, idx, axis=-1)
         if c.expert_norm:
             w = w / w.sum(-1, keepdims=True)
+        if layer.streamed and idx.shape[1] > 1:
+            groups = _expert_safe_groups(layer, idx)
+        else:
+            groups = [(0, idx.shape[1])]
+        if len(groups) == 1:
+            lo, hi = groups[0]
+            return self._moe_pass(layer, h[:, lo:hi], idx[:, lo:hi], w[:, lo:hi], c, M, R)
+        return mx.concatenate([self._moe_pass(layer, h[:, lo:hi], idx[:, lo:hi], w[:, lo:hi], c, M, R)
+                               for lo, hi in groups], axis=1)
+
+    def _moe_pass(self, layer, h, idx, w, c, M, R):
+        """One group's worth of tokens through the routed feed-forward — exactly today's single-pass code,
+        just callable per token group so `_moe` can split a sequence when the experts are streamed."""
         x = mx.expand_dims(h, (-2, -3))                                    # [B, L, 1, 1, D]
         order = None
         do_sort = idx.size >= 64                                           # prefill: group tokens by expert
@@ -372,22 +517,48 @@ def _linear(gf, info, T, bias_info=None):
     return QLinear(mx.array(w), mx.array(s), mx.array(b), bits, bias)
 
 
-def _experts(gf, info, T):
-    """A stacked 3-D expert tensor [E, rows, cols] in MLX's quantized form, same layout per expert."""
+def _experts(gf, info, T, stream=False, cache_size=64):
+    """A stacked 3-D expert tensor [E, rows, cols] in MLX's quantized form, same layout per expert. `stream`
+    (off by default — see `build(..., stream_experts=...)`) decodes experts on demand into a bounded LRU
+    cache (`StreamedExperts`) instead of decoding the whole stack up front; a non-quantized (F32/F16/BF16)
+    expert tensor is always loaded eagerly, same as today — streaming only applies to the quantized case,
+    which is the realistic one for a MoE checkpoint too large to hold resident."""
     n_exp, rows, cols = info.shape
     name = info.type_name
     if name in ("F32", "F16", "BF16"):
         return Experts(mx.array(T.load_dense(gf, info)).astype(mx.float16))
     # the loader works row by row: the stack is E*rows rows of `cols` (the bytes are contiguous in that order)
     flat = T.TensorInfo(info.name, (cols, n_exp * rows), info.type, info.offset)
+    if stream:
+        return StreamedExperts(gf, flat, n_exp, rows, cache_size)
     w, s, b, bits = T.load_matrix(gf, flat)
     shape = lambda a: (n_exp, rows) + a.shape[1:]
     return Experts(mx.array(w).reshape(shape(w)), mx.array(s).reshape(shape(s)), mx.array(b).reshape(shape(b)), bits)
 
 
-def build(path, log=print):
+def build(path, log=print, stream_experts=None, expert_cache=None):
     """(DenseModel, Config, GGUFFile). Raises Unsupported for anything this decoder does not do — the caller
-    then runs the file on llama.cpp instead."""
+    then runs the file on llama.cpp instead.
+
+    `stream_experts`: for a MoE checkpoint, decode each expert from the memory-mapped GGUF file only when a
+    token is actually routed to it, keeping at most `expert_cache` decoded experts per projection resident at
+    once (LRU-evicted, automatically split into smaller token groups when one pass needs more than that —
+    see `StreamedExperts`/`_expert_safe_groups`) instead of decoding the whole stack of experts for every
+    layer at load time. Output is unaffected — it is the same weights, fetched lazily. On by default
+    (`LLM_GGUF_STREAM_EXPERTS=0` turns it off, the same escape hatch `LLM_GGUF_ACT` already gives the
+    activation-dtype choice above): streaming never produces a different answer, and the realistic MoE
+    checkpoints this decoder loads rarely hold so few experts that eager loading would clearly beat it, so
+    the safer default is the one that cannot blow the memory budget a huge expert stack would. Pass `False`
+    explicitly to force eager loading for a comparison or a benchmark.
+
+    `expert_cache`: how many decoded experts per projection `StreamedExperts` keeps resident at once.
+    `StreamedExperts._ensure`'s own error message tells the caller to "raise expert_cache" when a single pass
+    routes to more distinct experts than the cache holds — `LLM_GGUF_EXPERT_CACHE` is how a caller that only
+    sees that message (not this function's kwarg) actually follows that advice."""
+    if stream_experts is None:
+        stream_experts = os.environ.get("LLM_GGUF_STREAM_EXPERTS", "1") != "0"
+    if expert_cache is None:
+        expert_cache = int(os.environ.get("LLM_GGUF_EXPERT_CACHE", "64"))
     from . import gguf_tensors as T
     gf = T.GGUFFile(path)
     m = gf.meta
@@ -495,7 +666,8 @@ def build(path, log=print):
             tensors[f"blk.{i}.ffn_gate_inp.weight"] = QLinear(
                 mx.array(T.load_dense(gf, names[f"blk.{i}.ffn_gate_inp.weight"])).astype(mx.float32))
             for n in ("gate", "up", "down"):
-                tensors[f"blk.{i}.ffn_{n}_exps.weight"] = _experts(gf, names[f"blk.{i}.ffn_{n}_exps.weight"], T)
+                tensors[f"blk.{i}.ffn_{n}_exps.weight"] = _experts(
+                    gf, names[f"blk.{i}.ffn_{n}_exps.weight"], T, stream=stream_experts, cache_size=expert_cache)
         if (i + 1) % 8 == 0:
             mx.eval([a for v in tensors.values() for a in (v if isinstance(v, list) else [v])
                      if isinstance(a, mx.array)])
