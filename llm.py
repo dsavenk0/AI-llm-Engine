@@ -1567,6 +1567,134 @@ def service_plist():
     })
 
 
+ASSISTANT_LABEL = "com.ai-llm-engine.assistant"
+ASSISTANT_AGENT = os.path.join(HOME, "Library", "LaunchAgents", ASSISTANT_LABEL + ".plist")
+ASSISTANT_EXT = os.path.join(BASE, "browser-assistant", "dist", "safari")
+
+
+def assistant_plist():
+    """The LaunchAgent of the browser assistant's service: small, stdlib-only, up after login, so the Safari
+    extension can start and switch the engine with neither LLMBar nor a terminal open."""
+    import plistlib
+    return plistlib.dumps({
+        "Label": ASSISTANT_LABEL,
+        "ProgramArguments": [os.path.join(BASE, "llm"), "assistant", "serve"],
+        "EnvironmentVariables": {"LLM_HOME": DATA,
+                                 "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+        "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10, "WorkingDirectory": BASE,
+        "StandardOutPath": os.path.join(STATE, "assistant.log"),
+        "StandardErrorPath": os.path.join(STATE, "assistant.log"),
+    })
+
+
+def assistant_cmd(cfg, args):
+    """`./llm assistant serve | install | uninstall | status | token` — the local service the browser
+    extension talks to (assistant/service.py, docs/safari-assistant/). `install` keeps it running from
+    launchd; `token` prints the pairing token and copies it to the clipboard for the extension's settings."""
+    from assistant import service
+    action = (args[0].lower() if args else "status")
+    uid = os.getuid()
+    if action == "serve":
+        service.serve()
+        return True
+    if action == "token":
+        tok = service.load_or_create_token()
+        print(tok)
+        try:
+            subprocess.run(["pbcopy"], input=tok.encode(), check=True, timeout=5)
+            print(DIM(T("Copied to the clipboard — paste it into the extension's settings.")), file=sys.stderr)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return True
+    if action == "setup":
+        return assistant_setup(service, reveal="--reveal" in args)
+    if action == "install":
+        service.load_or_create_token()
+        os.makedirs(os.path.dirname(ASSISTANT_AGENT), exist_ok=True)
+        os.makedirs(STATE, exist_ok=True)
+        with open(ASSISTANT_AGENT, "wb") as f:
+            f.write(assistant_plist())
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{ASSISTANT_LABEL}"], capture_output=True)
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", ASSISTANT_AGENT], capture_output=True, text=True)
+        if r.returncode != 0:
+            r = subprocess.run(["launchctl", "load", "-w", ASSISTANT_AGENT], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(R(T("Could not start the service:") + " " + (r.stderr or r.stdout).strip())); return False
+        print(G(T("Browser assistant service installed — it starts at login.")))
+        return True
+    if action == "uninstall":
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{ASSISTANT_LABEL}"], capture_output=True)
+        subprocess.run(["launchctl", "unload", ASSISTANT_AGENT], capture_output=True)
+        try:
+            os.remove(ASSISTANT_AGENT)
+        except OSError:
+            pass
+        print(G(T("Browser assistant service removed."))); return True
+    if action != "status":
+        print(T("Usage: ./llm assistant setup|serve|install|uninstall|status|token")); return False
+    as_json = "--json" in args
+    try:
+        hello = http_json(f"http://127.0.0.1:{service.PORT}/v1/assistant/hello", timeout=1)
+    except Exception:
+        hello = None
+    st = {"service_installed": os.path.exists(ASSISTANT_AGENT), "service_running": bool(hello),
+          "port": service.PORT, "token_file": os.path.exists(service.TOKEN_FILE),
+          "extension_folder": (os.path.join(service.EXT_HOME, "safari")
+                               if os.path.exists(os.path.join(service.EXT_HOME, "safari", "manifest.json")) else None),
+          "extension_version": service._manifest_version(os.path.join(service.EXT_HOME, "safari")) or None,
+          "engine_running": bool(health(cfg, 1))}
+    if as_json:
+        print(json.dumps(st)); return True
+    ok, no = G("✓"), Y("–")
+    print(f"{ok if st['service_installed'] else no} " + T("Service installed (starts at login)"))
+    print(f"{ok if st['service_running'] else no} " + T("Service answering on 127.0.0.1:{port}").format(port=service.PORT))
+    print(f"{ok if st['engine_running'] else no} " + T("Engine running"))
+    if st["extension_folder"]:
+        print(f"{ok} " + T("Extension files:") + f" {st['extension_folder']} (v{st['extension_version']})")
+    else:
+        print(f"{no} " + T("Extension files are not installed"))
+    if not (st["service_installed"] and st["extension_folder"]):
+        print(DIM(T("Set everything up with: ./llm assistant setup")))
+    return True
+
+
+def assistant_setup(service, reveal=False):
+    """Everything that can be done for the user, then the steps only they can take. Idempotent: run again
+    after an update and it brings the extension's files up to date."""
+    if not os.path.isfile(os.path.join(ASSISTANT_EXT, "manifest.json")):
+        # a source checkout: build it if the tools are here (an app bundle ships it built)
+        src = os.path.join(BASE, "browser-assistant")
+        if os.path.isfile(os.path.join(src, "package.json")) and shutil.which("npm"):
+            print(T("Building the extension…"))
+            for step in (["npm", "install", "--no-audit", "--no-fund"], ["npm", "run", "-s", "build"]):
+                if subprocess.run(step, cwd=src).returncode != 0:
+                    print(R(T("The extension could not be built."))); return False
+    versions = service.sync_extension()
+    if "safari" not in versions:
+        print(R(T("The extension is not built and Node.js is not installed — install Node.js (brew install node) "
+                  "and run this again."))); return False
+    folder = os.path.join(service.EXT_HOME, "safari")
+    print(G("✓ ") + T("Extension files:") + f" {folder} (v{versions['safari']})")
+    if not assistant_cmd(None, ["install"]):
+        return False
+    tok = service.load_or_create_token()
+    try:
+        subprocess.run(["pbcopy"], input=tok.encode(), check=True, timeout=5)
+        print(G("✓ ") + T("Pairing token copied to the clipboard."))
+    except (OSError, subprocess.SubprocessError):
+        print(T("Pairing token:") + f" {tok}")
+    print()
+    print(B(T("Three steps in Safari — only you can take them:")))
+    print(T("  1. Safari ▸ Settings ▸ Advanced: turn on “Show features for web developers”."))
+    print(T("  2. Safari ▸ Settings ▸ Developer: “Add Temporary Extension…” and choose the folder above."))
+    print(T("  3. The extension's settings open: paste the token (already on the clipboard) and press Connect."))
+    print(DIM(T("Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. "
+                "A permanent install needs a signed app; see docs/safari-assistant/README.md.")))
+    if reveal:
+        subprocess.run(["open", "-R", os.path.join(folder, "manifest.json")], capture_output=True)
+    return True
+
+
 def service_cmd(cfg, args):
     """`./llm service install | uninstall | status` — an optional background service (off by default). It is
     independent of the menu-bar app, so the local API is up for coding agents even with the app closed."""
@@ -3957,6 +4085,9 @@ COMMANDS = [
     Command("free", "Engine & service", "Quit vMLX / oMLX / Ollama to free memory.", "./llm free", ()),
     Command("service", "Engine & service", "Optional background service (launchd): up after login, restarts "
             "on a crash.", "./llm service install|uninstall|status", ()),
+    Command("assistant", "Engine & service", "The browser assistant's local service: the Safari extension's "
+            "link to the engine (models, start/stop, page Q&A).", "./llm assistant setup|serve|install|uninstall|status|token",
+            ("--json", "--reveal")),
 
     Command("setup", "Setup & maintenance", "Install the engine's environment, or an optional module.",
             "./llm setup [--compat|--ocr|--audio|--gguf|--images]",
@@ -4161,6 +4292,7 @@ def main():
         "ui": lambda: run_ui(sys.argv[2:]),
         "up": lambda: up(cfg), "open": open_window,
         "serve": lambda: serve_cmd(cfg), "service": lambda: service_cmd(cfg, sys.argv[2:]),
+        "assistant": lambda: assistant_cmd(cfg, sys.argv[2:]),
         "update": lambda: update_cmd(cfg, sys.argv[2:]),
         "read": lambda: read_doc_cmd(cfg, sys.argv[2:]),
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),

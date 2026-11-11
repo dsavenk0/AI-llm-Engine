@@ -534,6 +534,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
 
+    def _sleep_or_wake(self, wake, force):
+        """POST /v1/engine/sleep frees the weights and keeps the server up (the next request, or /wake, loads
+        them again); POST /v1/engine/wake loads them now. Sleeping while other requests are in flight would
+        make them wait for a reload, so it is refused with 409 unless `force` — and even then it waits for
+        the running request to finish rather than cutting it off."""
+        if wake:
+            with ENGINE.lock:
+                next(run_job(lambda: iter([ENGINE.ensure_awake()])))
+            return self._json(200, {"state": "awake"})
+        if ADMISSION.inflight and not force:
+            return self._json(409, {"error": {"message": f"{ADMISSION.inflight} request(s) are using the model",
+                                              "type": "conflict", "code": "model_in_use"},
+                                    "inflight": ADMISSION.inflight})
+        with ENGINE.lock:
+            if not ENGINE.sleeping:
+                next(run_job(lambda: iter([ENGINE.sleep()])))
+        return self._json(200, {"state": "sleeping"})
+
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/")
         if path in ("/health", ""):
@@ -606,6 +624,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("the body must be a JSON object")
         except ValueError:
             return self._error(400, "invalid JSON body")
+        if path in ("/v1/engine/sleep", "/v1/engine/wake"):
+            return self._sleep_or_wake(path.endswith("wake"), bool(body.get("force")))
         if path in GEN_PATHS:
             if SHUTTING_DOWN.is_set():
                 return self._error(503, "the server is shutting down", "server_error", "shutting_down")
