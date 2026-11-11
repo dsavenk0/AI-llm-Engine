@@ -273,6 +273,52 @@ class TestEditsAndCommands(Base):
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.root), "escape.txt")))
 
 
+class TestPlanMode(Base):
+    """Plan mode's final text is itself an approval (kind "plan"); approving it continues the *same* run
+    with edits auto-applied (Edit-automatically semantics) instead of making the user switch modes by hand."""
+
+    def test_an_approved_plan_continues_in_the_same_run_with_edits_auto_applied(self):
+        ScriptedEngine.script = [[text("1. Change return 1 to return 2.")],
+                                 [call(1, "edit_file", {"path": "src/app.py", "old": "return 1", "new": "return 2"})],
+                                 [text("Done.")]]
+        plans = []
+
+        def react(ev, run_id):
+            if ev["type"] == "approval" and ev.get("kind") == "plan":
+                plans.append(ev)
+                self.answer(run_id, "approval", ev["id"], approve=True)
+
+        ev = self.agent("what should change?", react=react, mode="plan")
+        self.assertEqual(len(plans), 1)
+        self.assertIn("return 2", plans[0]["new"])
+        self.assertEqual(ev[-1]["type"], "done")
+        # the edit after approval applied without asking again — Edit-automatically, not a second approval
+        self.assertFalse([e for e in ev if e["type"] == "approval" and e.get("kind") != "plan"])
+        self.assertEqual(self.read("src/app.py"), "def run():\n    return 2\n")
+
+    def test_a_rejected_plan_ends_the_run_and_changes_nothing(self):
+        ScriptedEngine.script = [[text("1. Change return 1 to return 2.")]]
+        ev = self.agent("what should change?", mode="plan",
+                        react=lambda e, rid: e["type"] == "approval" and self.answer(rid, "approval", e["id"], approve=False))
+        self.assertEqual(ev[-1]["type"], "done")
+        self.assertEqual(len(ScriptedEngine.seen), 1)          # no second request: the run ended, not continued
+        self.assertEqual(self.read("src/app.py"), "def run():\n    return 1\n")
+
+    def test_exploring_tool_calls_are_not_mistaken_for_the_plan(self):
+        # a turn that only calls tools (no final text yet) must not be treated as "the plan" and ask early
+        ScriptedEngine.script = [[call(1, "read_file", {"path": "src/app.py"})], [text("1. Looks fine as is.")]]
+        asked = []
+
+        def react(ev, run_id):
+            if ev["type"] == "approval":
+                asked.append(ev)
+                self.answer(run_id, "approval", ev["id"], approve=False)
+
+        ev = self.agent("look around first", mode="plan", react=react)
+        self.assertEqual(len(asked), 1)                        # exactly once, after the read, not before it
+        self.assertEqual(ev[-1]["type"], "done")
+
+
 class TestRunLifecycle(Base):
     def test_closing_the_connection_while_waiting_cancels_the_run(self):
         ScriptedEngine.script = [[call(1, "edit_file", TestEditsAndCommands.EDIT)], [text("never")]]

@@ -5,6 +5,8 @@ import SwiftUI
 struct ApprovalInfo: Codable, Equatable {
     var id: String, kind: String
     var path: String?, old: String?, new: String?, command: String?, dangerous: String?
+    /// Plan Mode's own approval (the plan text, not a file/command) — same card, different body and labels.
+    var isPlanApproval: Bool { kind == "plan" }
 }
 struct QuestionInfo: Codable, Equatable {
     var id: String, question: String, options: [String]
@@ -37,6 +39,7 @@ final class ChatStore: ObservableObject {
     @Published var sessions: [ChatSession] = []
     @Published var currentID: UUID?
     @Published var busy = false
+    private var runStartIndex = 0         // where the active run's items begin, for `planPhase` below
     @Published var think = false
     @Published var effort: String?        // nil = the model's own default level
     @Published var mode: AgentMode {
@@ -210,6 +213,7 @@ final class ChatStore: ObservableObject {
         let history = plainHistory()
         // what the person is looking at: "check this code" means the open file (and where the cursor is)
         let active: [String: Any]? = ws.active.map { ["file": $0.path, "line": ws.cursor.0] }
+        runStartIndex = current?.items.count ?? 0
         busy = true
         task = Task { await self.run(history: history, attached: attached, inline: inline, pictures: pictures, active: active) }
     }
@@ -234,6 +238,23 @@ final class ChatStore: ObservableObject {
 
     func stop() { task?.cancel() }
 
+    /// A short Plan Mode phase label for the composer, purely derived from this run's own items — no new
+    /// backend signal for Research/Analysis/Planning (they're the existing activity/reasoning/text events,
+    /// relabelled), Execution once a `kind == "plan"` approval in *this* run was answered "Approved". nil
+    /// when there's nothing to show yet, or outside Plan mode, or between runs.
+    var planPhase: String? {
+        guard mode == .plan, busy, let items = current?.items, items.count > runStartIndex else { return nil }
+        let thisRun = items[runStartIndex...]
+        if thisRun.contains(where: { $0.approval?.isPlanApproval == true && $0.resolved == "Approved" }) {
+            return "Execution"
+        }
+        guard let last = thisRun.last else { return nil }
+        if last.approval?.isPlanApproval == true { return "Approval" }
+        if last.kind == .activity { return "Research" }
+        if last.kind == .assistant { return last.text.isEmpty && !last.reasoning.isEmpty ? "Analysis" : "Planning" }
+        return nil
+    }
+
     /// A turn whose reply did not complete — stopped, failed, or cut off by a crash (the last item is the
     /// user's message or an error, with no finished answer after it). Such a turn can be asked again.
     var canRetry: Bool {
@@ -246,6 +267,7 @@ final class ChatStore: ObservableObject {
         guard !busy, let items = current?.items, let i = items.lastIndex(where: { $0.kind == .user }) else { return }
         mutate { s in if i + 1 < s.items.count { s.items.removeSubrange((i + 1)...) } }
         save()
+        runStartIndex = current?.items.count ?? 0
         busy = true
         let history = plainHistory()
         task = Task { await self.run(history: history, attached: [], inline: [], pictures: [], active: nil) }
@@ -586,20 +608,30 @@ struct ApprovalCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: a.kind == "run" ? "terminal" : "pencil.line")
-                Text(a.kind == "run" ? "Run a command?" : "\(a.kind == "write" ? "Write" : "Edit") \(a.path ?? "")?").font(.headline)
+                Image(systemName: a.kind == "run" ? "terminal" : (a.isPlanApproval ? "list.bullet.clipboard" : "pencil.line"))
+                Text(a.kind == "run" ? "Run a command?" : (a.isPlanApproval ? "Proceed with this plan?"
+                     : "\(a.kind == "write" ? "Write" : "Edit") \(a.path ?? "")?")).font(.headline)
                 Spacer()
                 if let d = a.dangerous { Text("⚠ \(d)").font(.caption).bold().foregroundColor(.red) }
             }
             if a.kind == "run" {
                 Text(a.command ?? "").font(.system(size: 12, design: .monospaced)).padding(6)
                     .frame(maxWidth: .infinity, alignment: .leading).background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            } else if a.isPlanApproval {
+                Text(a.new ?? "").font(.system(size: 13)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 DiffView(lines: LineDiff.diff(old: a.old ?? "", new: a.new ?? ""))
             }
             if let r = item.resolved {
-                Label(r, systemImage: r == "Approved" ? "checkmark.circle" : "xmark.circle")
+                let label = a.isPlanApproval ? (r == "Approved" ? "Proceeding" : "Revising") : r
+                Label(label, systemImage: r == "Approved" ? "checkmark.circle" : "xmark.circle")
                     .foregroundColor(r == "Approved" ? .green : .secondary)
+            } else if a.isPlanApproval {
+                HStack {
+                    Button("Proceed") { store.decide(item, approve: true) }.keyboardShortcut(.return, modifiers: .command)
+                    Button("Revise") { store.decide(item, approve: false) }.keyboardShortcut(.escape, modifiers: [])
+                }
             } else {
                 HStack {
                     Button("Approve") { store.decide(item, approve: true) }.keyboardShortcut(.return, modifiers: .command)

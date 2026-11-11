@@ -11,6 +11,9 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   is missing. In LLM Voice, asking for an image by voice draws one and shows it in the conversation; saying
   "stop"/"cancel" or "new conversation" (English or Russian) as the *whole* thing you say acts on it directly
   instead of being sent to the model — a stray word inside a real question is never mistaken for a command.
+- **The code editor's Plan mode asks before acting on its own plan, in the same conversation.** The plan is
+  now presented as an approval card; approving it continues the same run with edits applied automatically
+  (commands still ask), rejecting it keeps the conversation in Plan mode to refine the plan further.
 - **Interrupted downloads stay visible in the Models panel**, independent of the current search box, until
   resumed to completion or removed — including one left over from a previous session, not only the current
   app launch.

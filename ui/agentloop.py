@@ -616,6 +616,7 @@ def run_agent(project, engine_port, messages, emit, run, think=False, auto_edit=
     convo = [system] + messages
     previous = _previous_answer(messages)
     check_echo, retries = bool(previous), 0            # only the first reply to a new message can be an echo
+    plan_asked = False        # Plan mode asks for approval exactly once per run, right after the plan itself
     for step in range(MAX_STEPS):
         content, calls, held = [], [], []
         guard = check_echo and retries < 2
@@ -658,6 +659,24 @@ def run_agent(project, engine_port, messages, emit, run, think=False, auto_edit=
         check_echo = False
         msg = {"role": "assistant", "content": "".join(content)}
         if not calls:
+            # Plan mode: the plan itself is an approval, not the end of the run — once the model's final
+            # text is in, ask (same mechanism as any edit/write/run approval) and, if approved, keep going
+            # in this same run instead of making the user switch modes and type a new message.
+            if tools.mode == "plan" and not plan_asked and msg["content"].strip():
+                plan_asked = True
+                pid = f"plan_{step}"
+                emit({"type": "approval", "id": pid, "kind": "plan", "new": msg["content"]})
+                ans = run.wait("approval:" + pid)
+                if run.cancelled:
+                    return True
+                if ans and ans.get("approve"):
+                    tools.mode, tools.auto = "edit", True   # lifts PLAN_BLOCKED; edits auto-apply, commands still ask
+                    convo[0] = {"role": "system",
+                               "content": system_prompt(os.path.basename(project.root), system_extra, web, tools.mode)}
+                    convo.append(msg)
+                    convo.append({"role": "user", "content": "The plan is approved. Proceed with it now."})
+                    emit({"type": "note", "text": "Plan approved — continuing with edits."})
+                    continue
             convo.append(msg)
             return True
         msg["tool_calls"] = [{"id": c.get("id") or f"call_{step}_{i}", "type": "function", "function": c["function"]}

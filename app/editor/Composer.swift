@@ -320,6 +320,11 @@ struct Composer: View {
                     .help(store.web ? "Web search is on: the assistant may search the internet and read pages (click to turn off)"
                                     : "Let the assistant search the internet and read web pages")
                 Spacer()
+                if let phase = store.planPhase {
+                    Text(phase).font(.caption).foregroundColor(.secondary)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Palette.field, in: Capsule()).overlay(Capsule().stroke(Palette.hairline))
+                }
                 contextButton
                 modeButton
                 if store.busy {

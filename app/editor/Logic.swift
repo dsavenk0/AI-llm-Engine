@@ -724,7 +724,7 @@ enum AgentMode: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .manual: return "Asks for approval before every edit and command."
         case .edit: return "Applies file edits right away; commands still ask."
-        case .plan: return "Explores the project and presents a plan; changes nothing until you switch mode."
+        case .plan: return "Explores the project and presents a plan; asks once before acting on it, then edits automatically."
         case .auto: return "Runs edits and commands that pass a safety check; pauses for anything risky."
         }
     }

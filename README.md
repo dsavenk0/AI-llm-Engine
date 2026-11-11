@@ -470,10 +470,12 @@ Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one se
 - **Assistant:** an agent that searches and reads the project, asks you when something is ambiguous, and edits or runs
   commands only after your approval (a diff or the command is shown first). Attach files to a message with 📎.
 - **Modes** (the button left of the message box, Shift+Tab cycles): *Manual* asks before every edit and command;
-  *Edit automatically* applies file edits right away and still asks for commands; *Plan* explores the project and
-  presents a plan without changing anything; *Auto* also runs commands that pass a safety check (no chaining, no
-  paths outside the project, no destructive git forms) and pauses for anything else. **Effort** is the model's
-  reasoning level (off, then the levels its template offers).
+  *Edit automatically* applies file edits right away and still asks for commands; *Plan* explores the project,
+  presents the plan as an approval card, and — once approved, in the same conversation — continues applying its
+  edits automatically (commands still ask); rejecting it keeps the conversation in Plan mode to refine the plan.
+  *Auto* also runs commands that pass a safety check (no chaining, no paths outside the project, no destructive
+  git forms) and pauses for anything else. **Effort** is the model's reasoning level (off, then the levels its
+  template offers).
 - **Context:** a ring shows how much of the model's window the conversation fills; **Compact** folds older turns into
   a short note (the same two-stage compaction as the terminal agent). Chats are renamed and deleted from the ⋯ menu.
 - **Editor:** syntax colours and an outline for ~40 languages, line numbers, problems underlined as you type

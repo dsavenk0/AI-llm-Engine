@@ -25,6 +25,9 @@ eq(AgentEvent.parse(line: #"data: {"type":"approval","id":"c3","kind":"run","com
    .approval(id: "c3", kind: "run", path: nil, old: nil, new: nil, command: "git push", dangerous: "pushes code"), "dangerous run")
 eq(AgentEvent.parse(line: #"data: {"type":"approval","id":"c4","kind":"run","command":"ls","dangerous":null}"#),
    .approval(id: "c4", kind: "run", path: nil, old: nil, new: nil, command: "ls", dangerous: nil), "null danger")
+eq(AgentEvent.parse(line: #"data: {"type":"approval","id":"p1","kind":"plan","new":"1. Do X\n2. Do Y"}"#),
+   .approval(id: "p1", kind: "plan", path: nil, old: nil, new: "1. Do X\n2. Do Y", command: nil, dangerous: nil),
+   "Plan Mode's own approval, the plan text in `new`")
 eq(AgentEvent.parse(line: #"data: {"type":"question","id":"q","question":"Which?","options":["a","b"]}"#),
    .question(id: "q", question: "Which?", options: ["a", "b"]), "question")
 eq(AgentEvent.parse(line: #"data: {"type":"tool_result","id":"c1","name":"search","ok":false,"summary":"error: x"}"#),
