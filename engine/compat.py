@@ -140,6 +140,7 @@ class CompatEngine:
         tc = self.config.get("text_config") or self.config
         native = tc.get("max_position_embeddings") or tc.get("max_seq_len") or tc.get("n_positions") or 32768
         self.kv_per_token = kv_bytes_per_token(self.config)
+        self.base_work, self.act_per_token = 64 * 2**20, 512 * 1024      # what memory.reserve budgets with
         if not max_context:
             budget = memory.TOTAL * self.mem_limit - self.model_bytes - 4 * GiB
             max_context = int(max(4096, min(native, budget // max(1, self.kv_per_token) // 4096 * 4096)))
@@ -333,26 +334,11 @@ class CompatEngine:
         return br
 
     def _check_memory(self, stage):
-        if memory.used_fraction() <= self.mem_limit:
-            return True
-        mx.clear_cache()
-        if memory.used_fraction() <= self.mem_limit + 0.02:
-            return True
-        if stage == "prefill":
-            raise MemoryLimitError(f"system memory reached {memory.used_fraction():.0%} during prefill "
-                                   f"(limit {self.mem_limit:.0%}); request stopped to keep the Mac responsive")
-        return False
+        return memory.check(self, stage, mx.clear_cache)
 
     def _reserve(self, new_tokens):
-        if not self.prefill_guard:
-            return
-        need = new_tokens * self.kv_per_token + 64 * 2**20 + min(new_tokens, self.prefill_step) * 512 * 1024
-        mx.clear_cache()
-        if memory.headroom_bytes(min(1.0, self.mem_limit + 0.02)) < need:
-            raise MemoryLimitError(
-                f"not enough free RAM: {memory.used_fraction():.0%} of system memory in use, limit "
-                f"{self.mem_limit:.0%}; the prompt needs ~{need / GiB:.1f} GB more. Close other apps or "
-                f"shorten the conversation.")
+        # these backends prefill in one chunk size: no shrinking, the same refusal and grace band
+        memory.reserve(self, new_tokens, mx.clear_cache, shrink=False)
 
     # ───────────────────────── generate ─────────────────────────
     def _prefix_cache(self, ids):
@@ -374,14 +360,18 @@ class CompatEngine:
         return make_prompt_cache(self.model), 0
 
     def generate(self, ids, media=None, max_tokens=None, sampling=None, stop=None, should_stop=None,
-                 seed=None, thinking_open=False):
-        """Yield (token_id, text) pairs; the final item is a stats dict (same shape as Engine's)."""
+                 seed=None, thinking_open=False, fmt=None):
+        """Yield (token_id, text) pairs; the final item is a stats dict (same shape as Engine's).
+        `fmt` constrains the answer to a JSON format, as on the native engine (engine/structured.py)."""
         self.ensure_awake()
         if len(ids) >= self.max_context:
             raise ContextError(f"prompt is {len(ids)} tokens, context limit is {self.max_context}")
         max_tokens = min(max_tokens or self.max_tokens, self.max_tokens, self.max_context - len(ids))
+        max_tokens = memory.fit_output(self, max_tokens)      # the same clamp the native engine applies
         vocab = self.vocab or int(getattr(getattr(self.model, "args", None), "vocab_size", 0)) or 262144
         sampler = Sampler(vocab, seed=seed, **(sampling or {}))
+        from .structured import constrain
+        fmt_done = constrain(sampler, fmt, lambda tok: self.decoder.decode([tok]), self.eos)
         t0 = time.time()
 
         cache, reused = self._prefix_cache(ids)
@@ -428,6 +418,9 @@ class CompatEngine:
             if hit:
                 finish = "stop"
                 return True, piece
+            if fmt_done and fmt_done.pop(0):
+                finish = "stop"
+                return True, piece
             if should_stop and should_stop():
                 finish = "cancelled"
                 return True, piece
@@ -460,7 +453,7 @@ class CompatEngine:
 
         make_cache_, can_trim_, trim_ = self._cache_api()
         spec = {"drafted": 0, "accepted": 0, "verifies": 0}
-        if self.speculative and can_trim_(cache):
+        if self.speculative and can_trim_(cache) and fmt_done is None:
             # Prompt-lookup speculation with exact acceptance (the native engine's scheme): plain steps stay
             # pipelined; verification starts only while the output copies text already in prompt + output.
             drafter = Drafter(ids, nmin=self.ngram_min, nmax=max(4, self.ngram_min))

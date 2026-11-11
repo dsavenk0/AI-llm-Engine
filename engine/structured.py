@@ -416,3 +416,44 @@ def finished(text, schema=None, root="any"):
     except Invalid:
         return False
     return c.complete()
+
+
+def constrain(sampler, fmt, decode, eos):
+    """Tie a sampler to the format a request asked for. `fmt` is (schema, root) or None; `decode(token)` gives a
+    token's text; `eos` the tokens that end an answer. Returns None without a format, else the list the
+    decode loop reads: one entry per token the sampler picked — True once the document is whole — in the
+    order they were picked.
+
+    That list is a queue on purpose. The decode loop builds the graph for token t+1 while t is still
+    running, so the sampler runs ahead of whoever emits the text; advancing the cursor at pick time keeps
+    the constraint in step with what was chosen, and the queue hands each emitted token its own answer."""
+    if fmt is None:
+        return None
+    schema, root = fmt
+    cursor, text, done = Cursor(schema, root), {}, []
+
+    def piece(tok):
+        # decoded token by token, so the test and the feed always see the same string. A multi-byte
+        # character split across tokens only ever lands inside a JSON string, where any non-control
+        # character is allowed, so it cannot change whether the document is valid.
+        t = text.get(tok)
+        if t is None:
+            t = text[tok] = decode(tok)
+        return t
+
+    def allow(tok):
+        if tok in eos:
+            return cursor.complete()         # stopping early would hand back half a document
+        t = piece(tok)
+        if not t:
+            return False                     # a token that decodes to nothing passes any grammar check forever
+        return cursor.accepts(t)
+
+    def picked(tok):
+        if tok not in eos:
+            cursor.feed(piece(tok))
+        done.append(cursor.complete())
+
+    sampler.allow, sampler.on_pick = allow, picked
+    return done
+

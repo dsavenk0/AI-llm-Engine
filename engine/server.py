@@ -83,7 +83,8 @@ class Batcher:
 
     def takes(self, req):
         """Only plain text requests are merged; see the class docstring for why."""
-        return self.enabled and not req["media"] and not req["thinking_open"] and not req.get("fmt")
+        return (self.enabled and not req["media"] and not req["thinking_open"] and not req.get("fmt")
+                and protocol.can(ENGINE, "generate_batch"))      # a backend without it serves them in turn
 
     def start(self):
         if self.enabled and self.thread is None:
@@ -206,7 +207,7 @@ def worker(init):
     a small fraction of the SSD writes.
     """
     global ENGINE
-    ENGINE = init()
+    ENGINE = protocol.check(init())      # a backend that owes the protocol something stops here, by name
     READY.set()
     BATCHER.start()                      # no-op unless --batch-window is set; needs ENGINE for its lock
     # how often an idle engine looks at the clock: 20 s, or a quarter of a very short idle-sleep
@@ -360,6 +361,7 @@ class OutputParser:
         return out
 
 
+from engine import protocol  # noqa: E402
 from engine.parsers import FUNC_RE, PARAM_RE, parse_xml as parse_tool_calls  # noqa: E402,F401  (kept under its old name)
 
 
@@ -567,17 +569,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # the model is None while the engine sleeps — /health must still answer (the app polls it)
                 "vision": ("loaded" if ENGINE.model is not None and "vision_tower" in ENGINE.model else "on demand")
                 if ENGINE.vision_allowed else False,
-                "vision_capable": bool(getattr(ENGINE, "vision_capable", False)),
+                "vision_capable": bool(ENGINE.vision_capable),
                 "parsers": {"reasoning": ARGS.reasoning_parser, "tool_call": ARGS.tool_parser},
                 "images": self._images_ready(),
-                "efforts": list(getattr(ENGINE, "efforts", []) or []),
-                "thinking_supported": bool(getattr(ENGINE, "supports_thinking", True)),
+                "efforts": list(ENGINE.efforts or []),
+                "thinking_supported": bool(ENGINE.supports_thinking),
+                "backend": ENGINE.backend,
                 "steer": {"file": os.path.basename(ARGS.steer.rstrip("/")), "alpha": ARGS.steer_alpha}
                 if ARGS.steer else None,
                 "busy": ENGINE.lock.locked(),
                 "inflight": ADMISSION.inflight, "max_queue": ADMISSION.limit,
                 "shutting_down": SHUTTING_DOWN.is_set(),
-                "progress": getattr(ENGINE, "progress", None),
+                "progress": ENGINE.progress,
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
                               "peak": round(mx.get_peak_memory() / 2**30, 2),
                               "cache": round(mx.get_cache_memory() / 2**30, 2),
@@ -670,7 +673,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         of returning a plausible-looking vector.
         """
         from engine.generate import ContextError, MemoryLimitError
-        if not hasattr(ENGINE, "embed"):
+        if not protocol.can(ENGINE, "embed"):
             return self._error(501, f"the {ARGS.backend} backend does not produce embeddings; run the native "
                                     f"engine (--backend native) for this endpoint",
                                "invalid_request_error", "unsupported_endpoint")
@@ -788,7 +791,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             thinking = False      # a reasoning block is not JSON; the constraint starts at the first token
         log(f"trace: request model={body.get('model')!r} messages={len(messages)} tools={len(tools or [])} "
             f"stream={bool(body.get('stream'))} max_tokens={body.get('max_tokens') or body.get('max_completion_tokens')}")
-        if not getattr(ENGINE, "vision_allowed", False):      # no vision tower (or switched off): answer anyway
+        if not ENGINE.vision_allowed:      # no vision tower (or switched off): answer anyway
             from engine.media import strip_images
             messages, n_dropped = strip_images(messages)
             if n_dropped:
@@ -821,8 +824,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         from engine import parsers
         markers, parse_calls = parsers.pick(
             ARGS.reasoning_parser, ARGS.tool_parser,
-            ENGINE.parser_markers() if hasattr(ENGINE, "parser_markers") else {},
-            ENGINE.parse_tool_calls if hasattr(ENGINE, "parse_tool_calls") else parse_tool_calls)
+            ENGINE.parser_markers() if protocol.can(ENGINE, "parser_markers") else {},
+            ENGINE.parse_tool_calls if protocol.can(ENGINE, "parse_tool_calls") else parse_tool_calls)
         parser = OutputParser(thinking_open, bool(tools), **markers)
         yield ("ready", rid, created)
 
@@ -1133,13 +1136,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _ollama_card(self):
         from engine import ollama
-        return ollama.model_card(ARGS.name, size_bytes=getattr(ENGINE, "model_bytes", 0), fmt="mlx")
+        return ollama.model_card(ARGS.name, size_bytes=ENGINE.model_bytes, fmt="mlx")
 
     def _capabilities(self):
         caps = ["completion", "tools"]
-        if getattr(ENGINE, "vision_allowed", False):
+        if ENGINE.vision_allowed:
             caps.append("vision")
-        if getattr(ENGINE, "supports_thinking", True):
+        if ENGINE.supports_thinking:
             caps.append("thinking")
         return caps
 

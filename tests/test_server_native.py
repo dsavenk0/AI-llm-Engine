@@ -84,10 +84,16 @@ class TestBatcher(unittest.TestCase):
     """The merging half of the scheduler: what it will and will not take into one pass."""
 
     def test_takes_only_plain_text_requests_and_only_when_enabled(self):
+        from engine import server
         from engine.server import Batcher
         plain = {"media": None, "thinking_open": False}
         self.assertFalse(Batcher(0).takes(plain))                 # no --batch-window: off
         on = Batcher(10)
+        before = server.ENGINE
+        self.addCleanup(setattr, server, "ENGINE", before)
+        server.ENGINE = type("NoBatch", (), {})()                 # a backend without generate_batch
+        self.assertFalse(on.takes(plain))                         # is never handed a merged pass
+        server.ENGINE = type("Batches", (), {"generate_batch": lambda self, reqs, on_piece=None: []})()
         self.assertTrue(on.takes(plain))
         self.assertFalse(on.takes({"media": ["an image"], "thinking_open": False}))   # no media path
         self.assertFalse(on.takes({"media": None, "thinking_open": True}))            # no thinking budget

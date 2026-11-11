@@ -33,8 +33,7 @@ class ContextError(ValueError):
     pass
 
 
-class MemoryLimitError(RuntimeError):
-    """Not enough free RAM to serve the request without crossing the system limit."""
+MemoryLimitError = memory.MemoryLimitError      # raised by the RAM guard (engine/memory.py)
 
 
 class FormatError(ValueError):
@@ -309,6 +308,8 @@ def is_looping(tail, min_n=6, max_n=400, window=3000):
 
 
 class Engine:
+    backend = "native"
+
     def __init__(self, path, vision=True, max_context=32768, max_tokens=8192, prefill_step=1024,
                  max_pixels=1024 * 1024, thinking=None, effort="medium", speculative=True,
                  mem_limit=0.88, sampling_override=None, draft_max=15, ngram_min=2, cache_limit_mb=128,
@@ -649,61 +650,16 @@ class Engine:
         mx.clear_cache()
 
     def _reserve(self, new_tokens):
-        """Make sure prefill of `new_tokens` fits under the system RAM limit.
-
-        Picks the largest prefill chunk (1024 → 512 → 256 → 128) whose peak fits
-        the current headroom, so tight memory means smaller chunks, not a refusal.
-        """
-        if not self.prefill_guard:      # --prefill-guard off: never refuse, never shrink the chunk
-            self.step_now = self.prefill_step
-            return
-
-        def need(step):
-            return new_tokens * self.kv_per_token + self.base_work + min(new_tokens, step) * self.act_per_token
-
-        steps = [s_ for s_ in (self.prefill_step, 512, 256, 128) if s_ <= self.prefill_step]
-        for attempt in range(3):
-            head = memory.headroom_bytes(self.mem_limit)
-            fit = next((s_ for s_ in steps if need(s_) <= head), None)
-            if fit:
-                self.step_now = fit
-                if fit < self.prefill_step:
-                    self.log(f"memory: {memory.used_fraction():.0%} RAM in use, prefill chunk {fit}")
-                return
-            mx.clear_cache()
-            if attempt == 1 and self.snapshots:
-                self.snapshots = []  # snapshot states are the cheapest thing to give up
-        need_last = need(steps[-1])
-        # sitting right at the limit (idle usage == mem_limit with a big model resident) must not
-        # refuse a trivially small request — give the same 2% grace band _check_memory already uses.
-        if memory.headroom_bytes(min(1.0, self.mem_limit + 0.02)) >= need_last:
-            self.step_now = steps[-1]
-            self.log(f"memory: {memory.used_fraction():.0%} RAM in use, prefill chunk {steps[-1]}")
-            return
-        raise MemoryLimitError(
-            f"not enough free RAM: {memory.used_fraction():.0%} of system memory in use, limit "
-            f"{self.mem_limit:.0%}; the prompt needs ~{need_last / GiB:.1f} GB more. Close other apps or "
-            f"shorten the conversation.")
+        """Make sure prefill of `new_tokens` fits under the system RAM limit; sets the chunk size."""
+        memory.reserve(self, new_tokens, mx.clear_cache)
 
     def _fit_output(self, max_tokens):
         """Clamp the output length to what still fits under the RAM limit."""
-        head = memory.headroom_bytes(self.mem_limit) - self.base_work
-        fit = max(16, head // self.kv_per_token)
-        if fit < max_tokens:
-            self.log(f"memory: output capped at {fit} tokens ({memory.used_fraction():.0%} RAM in use)")
-        return int(min(max_tokens, fit))
+        return memory.fit_output(self, max_tokens)
 
     def _check_memory(self, stage):
         """Called during long work; frees caches, raises when the limit cannot be kept."""
-        if memory.used_fraction() <= self.mem_limit:
-            return True
-        mx.clear_cache()
-        if memory.used_fraction() <= self.mem_limit + 0.02:
-            return True
-        if stage == "prefill":
-            raise MemoryLimitError(f"system memory reached {memory.used_fraction():.0%} during prefill "
-                                   f"(limit {self.mem_limit:.0%}); request stopped to keep the Mac responsive")
-        return False
+        return memory.check(self, stage, mx.clear_cache)
 
     # ───────────────────────── generate ─────────────────────────
     def generate(self, ids, media=None, max_tokens=None, sampling=None, stop=None, should_stop=None, seed=None,
@@ -720,38 +676,8 @@ class Engine:
             raise ContextError(f"prompt is {len(ids)} tokens, context limit is {self.max_context}")
         max_tokens = min(max_tokens or self.max_tokens, self.max_tokens, self.max_context - len(ids))
         sampler = Sampler(self.vocab, seed=seed, **(sampling or {}))
-        cursor, tok_text, fmt_done = None, {}, []
-        if fmt is not None:
-            from .structured import Cursor
-            schema, root = fmt
-            cursor = Cursor(schema, root)
-
-            def _text(tok):
-                # decoded token by token, so the test and the feed below always see the same string. A
-                # multi-byte character split across tokens only ever lands inside a JSON string, where any
-                # non-control character is allowed, so it cannot change whether the document is valid.
-                t = tok_text.get(tok)
-                if t is None:
-                    t = tok_text[tok] = self.tok.decode([tok])
-                return t
-
-            def _allow(tok):
-                if tok in self.eos:
-                    return cursor.complete()     # stopping early would hand back half a document
-                t = _text(tok)
-                if not t:
-                    return False     # a token that decodes to nothing passes any grammar check forever
-                return cursor.accepts(t)
-
-            def _picked(tok):
-                # the decode loop builds the graph for token t+1 while t is still running, so the sampler
-                # runs ahead of emit(); advancing here keeps the constraint in step with what was chosen,
-                # and the queue hands emit() the answer belonging to its own token.
-                if tok not in self.eos:
-                    cursor.feed(_text(tok))
-                fmt_done.append(cursor.complete())
-
-            sampler.allow, sampler.on_pick = _allow, _picked
+        from .structured import constrain
+        fmt_done = constrain(sampler, fmt, lambda tok: self.tok.decode([tok]), self.eos)
         t0 = time.time()
         delta = 0
         if media is not None:
@@ -833,7 +759,7 @@ class Engine:
             if hit:
                 finish = "stop"
                 return True, piece
-            if cursor is not None and fmt_done and fmt_done.pop(0):
+            if fmt_done and fmt_done.pop(0):
                 finish = "stop"
                 return True, piece
             if should_stop and should_stop():
@@ -887,7 +813,7 @@ class Engine:
                     return None
             return logits_
 
-        if not (self.speculative and media is None and cursor is None):
+        if not (self.speculative and media is None and fmt_done is None):
             # plain pipelined decode: graph for token t+1 is built while t runs
             y = sampler(logits)
             mx.async_eval(y)
