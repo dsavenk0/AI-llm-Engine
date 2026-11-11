@@ -563,7 +563,7 @@ class Engine:
             logits = self.model(cache=cache, pos=pos, embeds=embeds[:, s:e], hidden=hidden)
         else:
             logits = self.model(mx.array([ids[s:e]]), cache, pos, hidden=hidden)
-        mx.eval(logits, [a for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)])
+        mx.eval(logits, [a for c in cache for a in c.arrays])
         s = e
         if s < n:
             mx.clear_cache()
@@ -587,10 +587,7 @@ class Engine:
             for toks, snaps in sorted(self.snapshots, key=lambda x: -len(x[0])):
                 if len(ids) > len(toks) and ids[:len(toks)] == toks:
                     for c, s in zip(self.cache, snaps):
-                        if s is None:
-                            c.trim_to(len(toks))
-                        else:
-                            c.restore(s)
+                        c.restore(s)
                     # longer snapshots referred to KV positions that will now be overwritten
                     self.snapshots = [x for x in self.snapshots if len(x[0]) <= len(toks)]
                     return len(toks)
@@ -630,7 +627,7 @@ class Engine:
                     add("ssm", c.state)
             for _, snaps in list(self.snapshots):
                 for snap in snaps:
-                    if snap is not None:
+                    if isinstance(snap, tuple):          # a recurrent layer's restore point holds arrays
                         add("snapshots", snap[0])
                         add("snapshots", snap[1])
         except Exception:  # the worker thread may be swapping caches right now
@@ -724,7 +721,7 @@ class Engine:
             pos = reused
             for cut in cuts:
                 self._prefill(cache, ids[:cut], start=pos)
-                self.snapshots.append((ids[:cut], [c.snapshot() if hasattr(c, "snapshot") else None for c in cache]))
+                self.snapshots.append((ids[:cut], [c.snapshot() for c in cache]))
                 pos = cut
             self.snapshots = self.snapshots[-3:]
             logits = self._prefill(cache, ids, start=pos)
@@ -944,7 +941,7 @@ class Engine:
         tail = dec.flush()
         if tail and finish == "length":
             yield None, tail
-        mx.eval([a for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)])
+        mx.eval([a for c in cache for a in c.arrays])
         self.cache_tokens = fed
         if cache_stale:
             self.cache, self.cache_tokens = None, []     # the recurrent state ran past `fed` and cannot be trimmed

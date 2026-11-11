@@ -55,7 +55,7 @@ class PrefixStore:
             return
         arrays = {}
         for i, (c, s) in enumerate(zip(cache, snaps)):
-            if s is None:  # attention layer: KV up to n
+            if not isinstance(s, tuple):  # attention layer (its restore point is a length): KV up to n
                 if c.keys is None or c.offset < n:
                     return
                 arrays[f"{i}.k"] = c.keys[..., :n, :]
@@ -143,7 +143,7 @@ class PrefixStore:
                 # them back as they are would bring the per-step conversion of the whole cache with them
                 c.keys, c.values, c.offset = (arrays[f"{i}.k"].astype(mx.float16),
                                               arrays[f"{i}.v"].astype(mx.float16), n)
-                snaps.append(None)
+                snaps.append(c.snapshot())
             else:
                 c.conv, c.state, c.offset = arrays[f"{i}.conv"], arrays[f"{i}.state"], n
                 snaps.append(c.snapshot())

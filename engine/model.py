@@ -137,92 +137,7 @@ def swiglu(gate, x):
 
 
 # ───────────────────────────── cache ─────────────────────────────
-class KVCache:
-    step = 256
-
-    def __init__(self):
-        self.keys = self.values = None
-        self.offset = 0
-
-    def update(self, k, v):
-        prev = self.offset
-        n = k.shape[2]
-        if self.keys is None or prev + n > self.keys.shape[2]:
-            B, H, _, D = k.shape
-            grow = ((n + self.step - 1) // self.step) * self.step
-            nk = mx.zeros((B, H, grow, D), k.dtype)
-            nv = mx.zeros((B, H, grow, v.shape[3]), v.dtype)
-            if self.keys is not None:
-                self.keys = mx.concatenate([self.keys[..., :prev, :], nk], axis=2)
-                self.values = mx.concatenate([self.values[..., :prev, :], nv], axis=2)
-            else:
-                self.keys, self.values = nk, nv
-        self.offset += n
-        self.keys[..., prev:self.offset, :] = k
-        self.values[..., prev:self.offset, :] = v
-        return self.keys[..., :self.offset, :], self.values[..., :self.offset, :]
-
-    def trim_to(self, n):
-        self.offset = min(self.offset, n)
-
-    def begin_verify(self):
-        self.base = self.offset
-
-    def commit(self, m):
-        self.offset = self.base + m
-
-    @property
-    def state(self):
-        return [] if self.keys is None else [self.keys, self.values]
-
-    @property
-    def nbytes(self):
-        return 0 if self.keys is None else self.keys.nbytes + self.values.nbytes
-
-
-class SSMCache:
-    """Conv tail + recurrent state of one GatedDeltaNet layer.
-
-    Speculative verify: begin_verify() remembers the pre-verify state; the
-    layer stashes the recurrence inputs; commit(m) keeps the first m tokens by
-    re-running only the (cheap) recurrence on them — no second weight pass.
-    """
-
-    def __init__(self):
-        self.conv = None
-        self.state = None
-        self.offset = 0
-        self.verifying = False
-        self.pending = None
-
-    def begin_verify(self):
-        self.verifying = True
-        self.before = (self.state, self.offset)
-        self.pending = None
-
-    def commit(self, m):
-        from .gated_delta import gated_delta_kernel
-        self.verifying = False
-        if self.pending is None:
-            return
-        q, k, v, g, beta, conv_in, kernel = self.pending
-        self.pending = None
-        S = q.shape[1]
-        if m < S:
-            state0, off0 = self.before
-            _, self.state = gated_delta_kernel(q[:, :m], k[:, :m], v[:, :m], g[:, :m], beta[:, :m], state0)
-            self.conv = mx.contiguous(conv_in[:, m:m + kernel - 1])
-            self.offset = off0 + m
-
-    def snapshot(self):
-        return (self.conv, self.state, self.offset)
-
-    def restore(self, snap):
-        self.conv, self.state, self.offset = snap
-
-    @property
-    def arrays(self):
-        return [a for a in (self.conv, self.state) if a is not None]
+from .cache import KVCache, SSMCache  # noqa: E402,F401  (one implementation for every engine: engine/cache.py)
 
 
 # ───────────────────────────── rope ─────────────────────────────
@@ -643,7 +558,7 @@ class Model(nn.Module):
         for layer, c in zip(lm.model.layers, cache):
             h = layer(h, self.ops, c, pos, mask)
             if step_eval:
-                mx.eval(h, c.arrays if hasattr(c, "arrays") else c.state)
+                mx.eval(h, c.arrays)
         if last_only:
             h = h[:, -1:, :]
         if hidden:

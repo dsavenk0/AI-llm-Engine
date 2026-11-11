@@ -59,14 +59,11 @@ def prefix_times(eng, cache):
     """Cumulative forward time for the first N layers, N = 0..all, plus the whole step for comparison."""
     model = eng.model
     layers = model.language_model.model.layers
-    saves = [(c.snapshot() if hasattr(c, "snapshot") else c.offset) for c in cache]
+    saves = [c.snapshot() for c in cache]
 
     def restore():
         for c, s in zip(cache, saves):
-            if hasattr(c, "restore"):
-                c.restore(s)
-            else:
-                c.offset = s
+            c.restore(s)
 
     tok = mx.array([[1000]])
 
@@ -100,7 +97,7 @@ def main(path, contexts):
         eng, cache = build(path, ctx)
         kinds = ["attn" if not l.is_linear else "gdn" for l in eng.model.language_model.model.layers]
         times, full = prefix_times(eng, cache)
-        kv = sum(a.nbytes for c in cache for a in (c.arrays if hasattr(c, "arrays") else c.state)
+        kv = sum(a.nbytes for c in cache for a in c.arrays
                  if a is not None)
         res[ctx] = {"kinds": kinds, "per": [(times[i + 1] - times[i]) * 1e3 for i in range(len(times) - 1)],
                     "embed": times[0] * 1e3, "full": full * 1e3, "kv": kv, "weights": eng.model_bytes}

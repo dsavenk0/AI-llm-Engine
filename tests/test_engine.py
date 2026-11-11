@@ -98,6 +98,35 @@ class TestCaches(unittest.TestCase):
         k, _ = c.update(mx.zeros((1, 2, 1, 4)), mx.zeros((1, 2, 1, 4)))
         self.assertEqual(k.shape[2], 11)
 
+    def test_one_contract_for_both_kinds_of_cache(self):
+        from engine import cache as C, dense, model
+        self.assertIs(model.KVCache, C.KVCache)
+        self.assertIs(dense.KVCache, C.KVCache)                  # there used to be two classes
+        for cls in (C.KVCache, C.SSMCache):
+            for name in ("truncate", "snapshot", "restore", "arrays", "nbytes", "dtype", "rewindable"):
+                self.assertTrue(hasattr(cls, name), f"{cls.__name__}.{name}")
+        kv = C.KVCache()
+        self.assertEqual((kv.nbytes, kv.dtype, kv.arrays), (0, None, []))
+        k = mx.ones((1, 2, 5, 4), mx.float16)
+        kv.append(k, k)
+        self.assertEqual((kv.dtype, kv.nbytes), (mx.float16, 2 * 1 * 2 * 256 * 4 * 2))
+        snap = kv.snapshot()
+        kv.append(k, k)
+        kv.restore(snap)
+        self.assertEqual(kv.offset, 5)
+        self.assertEqual(kv.trim(2), 2)                           # mlx-lm's verb, same object
+        self.assertEqual(kv.offset, 3)
+        mixed = C.KVCache()                                       # the buffers take the type of the first append
+        mixed.append(k, k.astype(mx.float32))
+        with self.assertRaisesRegex(TypeError, "one type"):       # a mixed cache is a defect, and says so
+            mixed.dtype
+        ssm = C.SSMCache()
+        ssm.conv, ssm.state, ssm.offset = mx.ones((1, 3, 4), mx.float16), mx.zeros((1, 2, 2, 2)), 7
+        self.assertEqual((ssm.dtype, ssm.nbytes, ssm.rewindable), (mx.float16, 24 + 32, False))
+        ssm.truncate(7)                                           # where it already is: fine
+        with self.assertRaisesRegex(ValueError, "cannot be rewound"):
+            ssm.truncate(5)
+
     def test_ssm_snapshot_restore(self):
         c = SSMCache()
         c.conv, c.state, c.offset = mx.ones((1, 3, 4)), mx.zeros((1, 2, 2, 2)), 7
@@ -543,7 +572,7 @@ class TestPrefixStore(unittest.TestCase):
         self.assertIsNone(store.lookup([5] + tokens[1:] + [1]))      # a different first token: no hit
         model = type("M", (), {"make_cache": lambda self: [KVCache()]})()
         cache, snaps, toks = store.load(hit, model)
-        self.assertEqual((cache[0].offset, snaps, len(toks)), (300, [None], 300))
+        self.assertEqual((cache[0].offset, snaps, len(toks)), (300, [300], 300))      # a KV restore point is a length
         self.assertEqual(mx.array(cache[0].keys).shape, (1, 2, 300, 8))
         store.discard(hit[0])
         self.assertFalse(store.has(tokens))
@@ -950,6 +979,31 @@ class TestEveryMlxQuantization(unittest.TestCase):
             self.assertEqual(c.values.dtype, mx.float16)
         self.assertEqual(out.dtype, mx.float16)
         np.testing.assert_allclose(self.logits(b), self.logits(a), rtol=2e-3, atol=2e-3)
+
+    def test_every_cache_an_engine_keeps_is_float16(self):
+        # the guard the float32 leak lived without: whatever the checkpoint stores, what a forward pass
+        # keeps between tokens has the type the context budget counts with — on both of the engine's models
+        import os
+        import tempfile
+        from engine.generate import Engine
+        from engine.gguf_engine import GGUFEngine
+        from tests import gguf_synth as G
+        from tests.synth import make_bundle
+        d = tempfile.mkdtemp()
+        make_bundle(d, seed=41)
+        path = os.path.join(tempfile.mkdtemp(), "llama-Q8_0.gguf")
+        G.write(path, seed=5, quant="Q8_0", arch="llama", moe=False)
+        native = Engine(d, vision=False, max_context=256, max_tokens=8, disk_cache_gb=0, log=lambda *_: None)
+        gguf = GGUFEngine(path, max_context=256, max_tokens=8, log=lambda *_: None)
+        for eng in (native, gguf):
+            *_, st = eng.generate([3, 4, 5, 6, 7], max_tokens=4, sampling={"temperature": 0})
+            self.assertTrue(eng.cache, type(eng).__name__)
+            for c in eng.cache:
+                self.assertEqual(c.dtype, mx.float16, f"{type(eng).__name__}: {type(c).__name__}")
+            per_token = sum(c.nbytes for c in eng.cache if c.rewindable) / eng.cache[-1].keys.shape[2] \
+                if eng.cache[-1].rewindable else None
+            if per_token is not None:                             # the budget's figure is what is really used
+                self.assertEqual(per_token, eng.kv_per_token, type(eng).__name__)
 
     def test_text_only_exports_without_the_language_model_prefix(self):
         # mlx-lm style exports name tensors model.* / lm_head.*; the loader maps them across

@@ -248,45 +248,7 @@ def _expert_safe_groups(layer, idx):
     return groups
 
 
-class KVCache:
-    """Keys and values of one layer, grown in steps; `trim` forgets the newest tokens (speculation, reuse)."""
-    STEP = 256
-
-    def __init__(self):
-        self.keys = self.values = None
-        self.offset = 0
-
-    def update_and_fetch(self, k, v):
-        n = k.shape[2]
-        if self.keys is None or self.offset + n > self.keys.shape[2]:
-            B, H, _, D = k.shape
-            cap = ((self.offset + n + self.STEP - 1) // self.STEP) * self.STEP
-            nk = mx.zeros((B, H, cap, D), k.dtype)
-            nv = mx.zeros((B, H, cap, v.shape[3]), v.dtype)
-            if self.keys is not None:
-                nk[..., :self.offset, :] = self.keys[..., :self.offset, :]
-                nv[..., :self.offset, :] = self.values[..., :self.offset, :]
-            self.keys, self.values = nk, nv
-        self.keys[..., self.offset:self.offset + n, :] = k
-        self.values[..., self.offset:self.offset + n, :] = v
-        self.offset += n
-        return self.keys[..., :self.offset, :], self.values[..., :self.offset, :]
-
-    @property
-    def state(self):
-        return [] if self.keys is None else [self.keys, self.values]
-
-    @property
-    def nbytes(self):
-        return 0 if self.keys is None else self.keys.nbytes + self.values.nbytes
-
-    def is_trimmable(self):
-        return True
-
-    def trim(self, n):
-        n = min(n, self.offset)
-        self.offset -= n
-        return n
+from .cache import KVCache  # noqa: E402,F401  (one implementation for every engine: engine/cache.py)
 
 
 def _rms(x, w, eps):

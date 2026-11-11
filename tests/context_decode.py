@@ -73,7 +73,7 @@ def cache_bytes(cache):
     """What the cache really occupies right now, counted off the arrays the layers hold."""
     total = 0
     for c in cache:
-        for a in (c.arrays if hasattr(c, "arrays") else c.state):
+        for a in c.arrays:
             if a is not None:
                 total += a.nbytes
     return total
