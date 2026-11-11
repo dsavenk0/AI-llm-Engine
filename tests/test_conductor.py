@@ -137,6 +137,62 @@ class TestConductEndToEnd(Base):
         self.assertIn("heavy", str(cm.exception))
 
 
+class TestBoard(Base):
+    """The subtask board (.llm/conduct.log): who a run delegated what to, and whether it worked — written
+    as the run goes, readable afterward even though conduct() itself still just returns the final text."""
+
+    def test_empty_before_anything_has_run(self):
+        self.assertEqual(conductor.read_board(self.root), [])
+
+    def test_a_run_records_start_plan_subtasks_and_end(self):
+        conductor.set_role(self.root, "heavy", self.remote("big"))
+        conductor.set_role(self.root, "code", self.remote("coder"))
+        conductor.set_role(self.root, "fast", self.remote("quick"))
+        answer = conductor.conduct("build a feature", self.root)
+        self.assertEqual(answer, "FINAL ANSWER")
+
+        entries = conductor.read_board(self.root)
+        kinds = [e["kind"] for e in entries]
+        self.assertEqual(kinds[0], "run")
+        self.assertEqual(entries[0]["event"], "start")
+        self.assertEqual(kinds[-1], "run")
+        self.assertEqual(entries[-1]["event"], "end")
+        self.assertEqual(entries[-1]["status"], "done")
+
+        plan = next(e for e in entries if e["kind"] == "plan")
+        self.assertEqual({s["id"] for s in plan["subtasks"]}, {"s1", "s2"})
+
+        subs = [e for e in entries if e["kind"] == "subtask"]
+        # each of s1/s2 appears twice: once "running", once settled — never left stuck mid-way
+        self.assertEqual({(e["id"], e["status"]) for e in subs},
+                         {("s1", "running"), ("s1", "done"), ("s2", "running"), ("s2", "done")})
+        self.assertTrue(all("role" in e and "where" in e for e in subs))
+
+    def test_a_failed_run_is_recorded_not_left_silent(self):
+        with self.assertRaises(RuntimeError):
+            conductor.conduct("x", self.root)        # no heavy role configured: fails before any subtask
+        entries = conductor.read_board(self.root)
+        self.assertEqual(entries[0]["event"], "start")
+        self.assertEqual(entries[-1]["event"], "end")
+        self.assertEqual(entries[-1]["status"], "failed")
+        self.assertIn("heavy", entries[-1]["error"])
+
+    def test_read_board_tolerates_a_missing_or_corrupt_log(self):
+        self.assertEqual(conductor.read_board(self.root), [])          # no file yet
+        p = conductor.board_path(self.root)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write("not json\n")
+            f.write(json.dumps({"kind": "run", "event": "start"}) + "\n")
+        self.assertEqual(conductor.read_board(self.root), [{"kind": "run", "event": "start"}])
+
+    def test_limit_keeps_the_newest_entries(self):
+        for i in range(5):
+            conductor._log(self.root, kind="subtask", id=f"s{i}")
+        entries = conductor.read_board(self.root, limit=2)
+        self.assertEqual([e["id"] for e in entries], ["s3", "s4"])
+
+
 class TestConfig(Base):
     def test_set_role_writes_and_resolve_reads(self):
         conductor.set_role(self.root, "heavy", self.remote("big"))

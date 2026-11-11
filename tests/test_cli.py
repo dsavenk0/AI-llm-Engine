@@ -626,6 +626,42 @@ def _dispatch_names():
     return set()
 
 
+class TestConductBoard(unittest.TestCase):
+    """`./llm conduct board` — the CLI wrapper around harness.conductor.read_board."""
+
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    def test_empty_board_is_a_clean_message_not_a_crash(self):
+        tmp = tempfile.mkdtemp()
+        rv, out = self.capture(llm.conduct_cmd, cfg(), ["board", "--root", tmp])
+        self.assertTrue(rv)
+        self.assertIn("No subtasks", out)
+
+    def test_populated_board_prints_entries_and_json(self):
+        from harness import conductor
+        tmp = tempfile.mkdtemp()
+        conductor._log(tmp, kind="run", event="start", task="demo")
+        conductor._log(tmp, kind="subtask", id="s1", role="fast", where="quick (local)", status="done", result="ok")
+        conductor._log(tmp, kind="run", event="end", status="done")
+
+        rv, out = self.capture(llm.conduct_cmd, cfg(), ["board", "--root", tmp])
+        self.assertTrue(rv)
+        self.assertIn("s1", out)
+        self.assertIn("fast", out)
+
+        rv, out = self.capture(llm.conduct_cmd, cfg(), ["board", "--root", tmp, "--json"])
+        self.assertTrue(rv)
+        entries = json.loads(out)
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[1]["id"], "s1")
+
+
 class TestReplyNote(unittest.TestCase):
     def test_repetition_is_explained(self):
         self.assertIn("repeat", llm.reply_note("repetition").lower())

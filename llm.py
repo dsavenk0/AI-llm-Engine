@@ -3387,9 +3387,37 @@ def _conduct_status_json(cfg, conductor, root):
     return True
 
 
+def _conduct_board(conductor, root, as_json):
+    """`./llm conduct board [--json]` — the subtask board: who the last run(s) delegated what to, on which
+    model, and whether it worked (`.llm/conduct.log`, written by harness/conductor.py as it goes)."""
+    entries = conductor.read_board(root)
+    if as_json:
+        print(json.dumps(entries, ensure_ascii=False)); return True
+    if not entries:
+        print(DIM(T("No subtasks have run yet."))); return True
+    for e in entries:
+        kind = e.get("kind")
+        if kind == "run":
+            tag = G("● " + T("run started")) if e.get("event") == "start" else (
+                R("● " + T("run failed")) if e.get("status") == "failed" else G("● " + T("run finished")))
+            extra = f" — {e['task']}" if e.get("task") else (f" — {e['error']}" if e.get("error") else "")
+            print(f"{e.get('ts', '')}  {tag}{extra}")
+        elif kind == "plan":
+            print(f"{e.get('ts', '')}  {DIM(T('plan:'))} " + ", ".join(
+                f"{s['id']}·{s['role']}" for s in e.get("subtasks", [])))
+        elif kind == "subtask":
+            status = e.get("status")
+            mark = Y("…") if status == "running" else (G("✓") if status == "done" else R("✗"))
+            preview = e.get("result") or e.get("task") or ""
+            print(f"{e.get('ts', '')}  {mark} {e.get('id', '?')} · {e.get('role', '?')} → {e.get('where', '?')}"
+                  + (f"  {DIM(preview)}" if preview else ""))
+    return True
+
+
 def conduct_cmd(cfg, args):
     """Optional orchestrator: split a task across models by role. Opt-in — single-model work is unaffected.
-    `--root DIR` points at the project (the editor passes it); `--json` prints the status for a UI."""
+    `--root DIR` points at the project (the editor passes it); `--json` prints the status for a UI.
+    `board` shows the subtask board (who the last run(s) delegated what to and whether it worked)."""
     from harness import conductor
     root, as_json, files, rest = os.getcwd(), False, [], []
     i = 0
@@ -3403,6 +3431,8 @@ def conduct_cmd(cfg, args):
         rest.append(args[i]); i += 1
     args = rest
     sub = args[0] if args else "status"
+    if sub == "board":
+        return _conduct_board(conductor, root, as_json)
     if as_json or (sub in ("status", "roles", "show") and len(args) <= 1):
         return _conduct_status_json(cfg, conductor, root) if as_json else _conduct_status(cfg, conductor, root)
     if sub == "set":

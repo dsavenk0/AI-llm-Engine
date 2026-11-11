@@ -140,6 +140,7 @@ its Metal headroom estimate (~8.5K on 16 GB).
   **Conductor** splits the task across your installed models by role — a fast model reads and extracts, the senior
   model writes the code — and merges one answer. Each subtask is given only the passages of the attachment relevant
   to it (TF·IDF, so a long document stays small). No cloud at any step. `./llm conduct "add tests for this" --file spec.pdf`.
+  `./llm conduct board` shows which subtask went to which model and whether it worked, after the run as well as during it.
 
 Numbers and the full mechanism are in [How it is fast](#how-it-is-fast).
 

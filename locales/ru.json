@@ -340,5 +340,10 @@
   "Video and music generation are not implemented in this engine yet.": "Генерация видео и музыки в этом движке пока не реализована.",
   "Not an unfinished download: {repo}": "Это не недокачанная загрузка: {repo}",
   "Delete the unfinished download of {repo}?": "Удалить недокачанную загрузку {repo}?",
-  "Removed: {repo}": "Удалено: {repo}"
+  "Removed: {repo}": "Удалено: {repo}",
+  "No subtasks have run yet.": "Подзадачи пока не запускались.",
+  "run started": "запуск начат",
+  "run failed": "запуск не удался",
+  "run finished": "запуск завершён",
+  "plan:": "план:"
 }

@@ -40,6 +40,49 @@ def config_path(root):
     return os.path.join(root, ".llm", "conductor.json")
 
 
+def board_path(root):
+    return os.path.join(root, ".llm", "conduct.log")
+
+
+def _log(root, **fields):
+    """Append one line to the subtask board (`.llm/conduct.log`, JSONL, newest last) — who ran what, on which
+    model, and whether it worked, so a run's routing survives after the terminal scrolls past it. Never the
+    task or result text itself beyond the same short preview the `[route]` trace line already shows the
+    person live — this is an audit trail of what happened, not a second copy of potentially sensitive content.
+    Best-effort: a logging failure (a read-only project, a full disk) never breaks the run it is recording."""
+    import time
+    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **fields}
+    try:
+        p = board_path(root)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def read_board(root, limit=50):
+    """The last `limit` entries of the subtask board, newest last, as parsed dicts. A missing log is simply
+    empty (nothing has run yet); a corrupt or unrecognised line is skipped, never a read failure."""
+    try:
+        with open(board_path(root), encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
 def is_local(spec):
     return isinstance(spec, dict) and isinstance(spec.get("local"), str) and bool(spec["local"].strip())
 
@@ -257,19 +300,31 @@ def run_subtasks(subtasks, roles, engine, root, emit=lambda _l: None, srctext=""
         return s["task"] + ctx
 
     def run_remote(s):
-        emit(f"[route] {s['id']} · {s['role']} → {where(roles[s['role']])} | {s['task'][:80]}")
+        dest = where(roles[s["role"]])
+        emit(f"[route] {s['id']} · {s['role']} → {dest} | {s['task'][:80]}")
+        _log(root, kind="subtask", id=s["id"], role=s["role"], where=dest, task=s["task"][:80], status="running")
         try:
-            return s["id"], engine.run(roles[s["role"]], prompt_for(s), root)
+            ans = engine.run(roles[s["role"]], prompt_for(s), root)
+            _log(root, kind="subtask", id=s["id"], role=s["role"], where=dest,
+                status="failed" if ans.startswith("error:") else "done", result=ans[:160])
+            return s["id"], ans
         except (RuntimeError, OSError, ValueError) as e:
+            _log(root, kind="subtask", id=s["id"], role=s["role"], where=dest, status="failed", result=f"error: {e}")
             return s["id"], f"error: {e}"
 
     def run_local_chain(locals_):
         for s in sorted(locals_, key=lambda s: roles[s["role"]]["local"]):   # group same-model subtasks together
-            emit(f"[route] {s['id']} · {s['role']} → {where(roles[s['role']])} | {s['task'][:80]}")
+            dest = where(roles[s["role"]])
+            emit(f"[route] {s['id']} · {s['role']} → {dest} | {s['task'][:80]}")
+            _log(root, kind="subtask", id=s["id"], role=s["role"], where=dest, task=s["task"][:80], status="running")
             try:
                 results[s["id"]] = engine.run(roles[s["role"]], prompt_for(s), root)
+                ans = results[s["id"]]
+                _log(root, kind="subtask", id=s["id"], role=s["role"], where=dest,
+                    status="failed" if ans.startswith("error:") else "done", result=ans[:160])
             except (RuntimeError, OSError, ValueError) as e:
                 results[s["id"]] = f"error: {e}"
+                _log(root, kind="subtask", id=s["id"], role=s["role"], where=dest, status="failed", result=f"error: {e}")
 
     for level in _levels(subtasks):
         locals_ = [s for s in level if is_local(roles[s["role"]])]
@@ -303,18 +358,28 @@ def conduct(task, root, local=None, switch_local=None, emit=lambda _l: None, sou
     `emit(line)` gets the trace. `sources`: recognised attachments (harness.perception.recognize) — the planner
     sees them and each subtask draws the relevant passages, so the senior/code model works on a scan, a recording
     or a document without a manual step. Returns the final answer text."""
+    _log(root, kind="run", event="start", task=task.strip()[:80])
     roles, dropped = resolve_roles(root, local=local)
     if "heavy" not in roles:
-        raise RuntimeError("the 'heavy' role needs a model (it plans and synthesizes). "
-                           "Set it with: llm conduct set heavy <model-or-worker>")
+        err = ("the 'heavy' role needs a model (it plans and synthesizes). "
+              "Set it with: llm conduct set heavy <model-or-worker>")
+        _log(root, kind="run", event="end", status="failed", error=err)
+        raise RuntimeError(err)
     from harness import perception
     srctext = perception.as_text(sources) if sources else ""
     engine = _Engine(switch_local, emit)
     if sources:
         emit("[perceive] " + ", ".join(f"{s['name']} ({s['kind']})" for s in sources))
     emit("[plan] " + " · ".join(f"{r} → {where(roles[r])}" for r in ROLES if r in roles))
-    subtasks = decompose(task, roles["heavy"], engine, root, set(roles), srctext)
-    emit(f"[plan] {len(subtasks)} subtask(s)")
-    results = run_subtasks(subtasks, roles, engine, root, emit, srctext)
-    emit("[synth] heavy → " + where(roles["heavy"]))
-    return synthesize(task, subtasks, results, roles["heavy"], engine, root)
+    try:
+        subtasks = decompose(task, roles["heavy"], engine, root, set(roles), srctext)
+        emit(f"[plan] {len(subtasks)} subtask(s)")
+        _log(root, kind="plan", subtasks=[{"id": s["id"], "role": s["role"], "task": s["task"][:80]} for s in subtasks])
+        results = run_subtasks(subtasks, roles, engine, root, emit, srctext)
+        emit("[synth] heavy → " + where(roles["heavy"]))
+        answer = synthesize(task, subtasks, results, roles["heavy"], engine, root)
+    except Exception as e:
+        _log(root, kind="run", event="end", status="failed", error=str(e)[:200])
+        raise
+    _log(root, kind="run", event="end", status="done")
+    return answer
