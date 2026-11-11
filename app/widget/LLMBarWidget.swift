@@ -225,12 +225,14 @@ struct OrbWidgetView: View {
     @ViewBuilder private var modelName: some View {
         let label = entry.model.isEmpty ? (entry.russian ? "МОДЕЛЬ НЕ ВЫБРАНА" : "NO MODEL SELECTED")
                                         : (entry.favorite ? "★ " : "") + entry.model
-        if entry.cycles {
-            Link(destination: URL(string: "llmbar://model?next=favorite")!) {
+        // Always a link: with two or more favourites it walks those, otherwise every installed model that
+        // fits this Mac (`llm fav --next` decides). The switch happens in the app, in the background — no
+        // window opens — and a running engine restarts on the new model.
+        Link(destination: URL(string: "llmbar://model?next=favorite")!) {
+            HStack(spacing: 4) {
                 Text(label).lineLimit(1).truncationMode(.middle)
+                Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 8, weight: .bold)).opacity(0.7)
             }
-        } else {
-            Text(label).lineLimit(1).truncationMode(.middle)
         }
     }
 
@@ -277,7 +279,9 @@ struct OrbWidgetView: View {
                 }
             }
         }
-        .widgetURL(URL(string: "llmbar://launch?target=voice"))
+        // the small widget is the voice orb; on the medium one only its buttons act, and a tap between them
+        // opens the panel instead of starting to listen
+        .widgetURL(URL(string: family == .systemMedium ? "llmbar://panel" : "llmbar://launch?target=voice"))
         .containerBackground(for: .widget) {
             LinearGradient(colors: [Color(red: 0.02, green: 0.05, blue: 0.08), Color(red: 0.04, green: 0.10, blue: 0.14)],
                            startPoint: .topLeading, endPoint: .bottomTrailing)

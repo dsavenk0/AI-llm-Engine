@@ -3,6 +3,8 @@
     .venv/bin/python -m unittest tests.test_cli -v
 """
 import ast
+import contextlib
+import io
 import json
 import os
 import re
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import urllib.parse
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -349,6 +352,79 @@ class TestRouteFeatures(unittest.TestCase):
                 mock.patch("os.walk", return_value=[("/m", [], ["config.json"])]):
             got = llm.scan_models({"dirs": ["/m"], "favorites": []})
         self.assertEqual((got[0]["engine"], got[0]["features"]), ("mlx-lm", []))
+
+
+class TestStartReplacesAnotherModel(unittest.TestCase):
+    """Start means "run the selected model". An engine of ours that holds or is still loading a different one
+    is stopped, not waited for — the panel used to sit on "still loading" for a model nobody had selected."""
+
+    def start(self, selected, running_model=None, pid_file_model=None, healthy=True):
+        calls = []
+        m = {"path": selected, "name": os.path.basename(selected), "size": 1.0}
+        health = (lambda cfg, timeout=3: {"model_path": running_model}) if healthy else (lambda cfg, timeout=3: None)
+        with mock.patch.object(llm, "env_ready", return_value=True), \
+                mock.patch.object(llm, "current_model", return_value=m), \
+                mock.patch.object(llm, "read_pid", return_value=4242), \
+                mock.patch.object(llm, "pid_model", return_value=pid_file_model), \
+                mock.patch.object(llm, "health", side_effect=health), \
+                mock.patch.object(llm, "port_busy", return_value=True), \
+                mock.patch.object(llm, "stop", side_effect=lambda cfg, quiet=False: calls.append("stop")), \
+                mock.patch.object(llm, "route_blocker", side_effect=lambda *a: calls.append("fresh start") or "halt here"), \
+                mock.patch.object(llm.time, "sleep"), contextlib.redirect_stdout(io.StringIO()) as out:
+            ok = llm.start(dict(llm.DEFAULTS, port=1), interactive=False)
+        return ok, calls, out.getvalue()
+
+    def test_a_running_engine_on_another_model_is_stopped_first(self):
+        ok, calls, out = self.start("/m/small", running_model="/m/big")
+        self.assertEqual(calls, ["stop", "fresh start"])
+        self.assertIn("big", out)
+
+    def test_an_engine_still_loading_another_model_is_stopped_too(self):
+        ok, calls, out = self.start("/m/small", pid_file_model="/m/big", healthy=False)
+        self.assertEqual(calls, ["stop", "fresh start"])
+
+    def test_the_selected_model_already_running_is_left_alone(self):
+        ok, calls, out = self.start("/m/small", running_model="/m/small")
+        self.assertEqual((ok, calls), (True, []))
+
+    def test_the_pid_file_names_the_model(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "engine.pid")
+        with open(path, "w") as f:
+            f.write("123\nengine.server\n/models/with space/Q 4bit")
+        self.assertEqual(llm.pid_model(path), "/models/with space/Q 4bit")
+        with open(path, "w") as f:
+            f.write("123\nengine.server")                   # written by an older version
+        self.assertIsNone(llm.pid_model(path))
+        self.assertIsNone(llm.pid_model(os.path.join(d, "absent")))
+
+
+class TestNextModel(unittest.TestCase):
+    """What the widget's model name does: walk the favourites when there are two, else what is installed."""
+
+    def run_next(self, models, favs, current):
+        picked = []
+        cfg = dict(llm.DEFAULTS, favorites=favs, model=current)
+        with mock.patch.object(llm, "scan_models", return_value=models), \
+                mock.patch.object(llm, "choose_model", side_effect=lambda c, p: picked.append(p) or True), \
+                mock.patch.object(llm, "RAM_GB", 16), contextlib.redirect_stdout(io.StringIO()):
+            ok = llm.fav_cmd(cfg, ["--next"])
+        return ok, picked
+
+    M = [{"path": "/m/a", "name": "a", "size": 1, "supported": True, "favorite": False},
+         {"path": "/m/b", "name": "b", "size": 2, "supported": True, "favorite": False},
+         {"path": "/m/huge", "name": "huge", "size": 40, "supported": True, "favorite": False},
+         {"path": "/m/odd", "name": "odd", "size": 1, "supported": False, "favorite": False}]
+
+    def test_two_favourites_are_walked(self):
+        self.assertEqual(self.run_next(self.M, ["/m/b", "/m/huge"], "/m/b"), (True, ["/m/huge"]))
+
+    def test_without_favourites_the_installed_models_that_fit_are_walked(self):
+        self.assertEqual(self.run_next(self.M, [], "/m/a"), (True, ["/m/b"]))
+        self.assertEqual(self.run_next(self.M, ["/m/a"], "/m/b"), (True, ["/m/a"]))     # wraps; huge and odd are skipped
+
+    def test_nothing_to_switch_to(self):
+        self.assertEqual(self.run_next(self.M[:1], [], "/m/a"), (False, []))
 
 
 class TestTranslations(unittest.TestCase):
@@ -1465,10 +1541,11 @@ class TestFavouriteModels(unittest.TestCase):
         with mock.patch.object(llm, "choose_model", return_value=True) as ch:
             self.assertTrue(llm.fav_cmd(self.cfg, ["--next"]))
         ch.assert_called_once_with(self.cfg, self.paths["beta"])               # gamma is skipped
+        # fewer than two favourites is not a set to walk: the installed models that can run are walked instead
         self.cfg["favorites"] = [self.paths["alpha"]]
         with mock.patch.object(llm, "choose_model", return_value=True) as ch:
-            self.assertFalse(llm.fav_cmd(self.cfg, ["--next"]))
-        ch.assert_not_called()
+            self.assertTrue(llm.fav_cmd(self.cfg, ["--next"]))
+        ch.assert_called_once_with(self.cfg, self.paths["beta"])
 
     def test_the_default_is_no_favourites_and_the_flag_is_false(self):
         self.assertTrue(all(m["favorite"] is False for m in llm.scan_models(self.cfg)))

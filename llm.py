@@ -519,9 +519,12 @@ def fav_cmd(cfg, args):
     favs = [f for f in cfg.get("favorites", []) if isinstance(f, str)]
     if "--next" in flags:
         usable = {m["path"] for m in models if m.get("supported", True)}
-        nxt = next_favorite([f for f in favs if f in usable], cfg.get("model", ""))
+        ring = [f for f in favs if f in usable]
+        if len(ring) < 2:          # no set of favourites to walk: walk the installed models that fit this Mac
+            ring = [m["path"] for m in models if m["path"] in usable and m["size"] + 2 <= RAM_GB * 0.75]
+        nxt = next_favorite(ring, cfg.get("model", ""))
         if nxt is None:
-            print(Y(T("No other favourite model to switch to."))); return False
+            print(Y(T("No other model to switch to."))); return False
         return choose_model(cfg, nxt)
     if not rest:
         names = [m for m in models if m["favorite"]]
@@ -1050,6 +1053,17 @@ def read_pid(path):
             except OSError: pass
             return None
     return pid
+
+
+def pid_model(path):
+    """The model the engine in pid file `path` was started with (its third line), or None when the file is
+    from an older version or unreadable."""
+    try:
+        with open(path) as f:
+            lines = f.read().split("\n")
+        return lines[2] or None
+    except (OSError, IndexError):
+        return None
 
 
 def kill_pid(pid, wait=15):
@@ -1761,6 +1775,18 @@ def start(cfg, interactive=True):
         if not interactive or not choose_model(cfg): return False
         m = current_model(cfg)
     loading = read_pid(ENGINE_PID)
+    # The selected model is the one that runs. An engine of ours that holds, or is still loading, a different
+    # one — a switch made while it was loading, a load that hung — is stopped first: waiting for it would end
+    # with the wrong model, and with a hung one would not end at all (the panel just kept saying "loading").
+    if loading:
+        up = health(cfg, 1)
+        other = (up or {}).get("model_path") or pid_model(ENGINE_PID)
+        if other and os.path.realpath(other) != os.path.realpath(m["path"]):
+            print(Y(T("Another model is loaded or loading ({name}) — stopping it to start the selected one.")
+                    .format(name=os.path.basename(other.rstrip("/")))))
+            stop(cfg, quiet=True)
+            time.sleep(0.5)
+            loading = None
     if loading and health(cfg):
         print(Y(T("Engine is already running."))); return True
     if loading and not port_busy(cfg["port"]):
@@ -1823,7 +1849,7 @@ def start(cfg, interactive=True):
     # the pid file also names what was started (module or script): see read_pid
     what = next((a for a in cmd[1:] if not a.startswith("-")), "engine.server")
     with open(ENGINE_PID, "w") as f:
-        f.write(f"{p.pid}\n{what}")
+        f.write(f"{p.pid}\n{what}\n{m['path']}")      # third line: which model, so a later start can tell
     print(T("Loading {name} ({size:.1f} GB)").format(name=B(m["name"]), size=m["size"]), end="", flush=True)
     t0 = time.time()
     while time.time() - t0 < 600:

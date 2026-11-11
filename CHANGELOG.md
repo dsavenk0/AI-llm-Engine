@@ -83,6 +83,15 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   never actually stuck — the read size is now much smaller, so progress moves far more often. And when a
   repo's listing didn't report a file's size, LLMBar silently dropped every progress line for it instead of
   at least recognizing the transfer was still alive, which could make a healthy download look stalled.
+- **Start runs the model you selected, even when another one is stuck.** An engine that held — or was still
+  loading — a different model than the selected one used to be waited for; LLMBar sat on "still loading"
+  for a model nobody had picked. It is stopped and the selected model starts.
+- **A tap on the widget's background no longer starts the voice chat** — only its Voice button does; a tap
+  between the buttons opens the panel. The model name on the widget now always switches the model (the next
+  favourite, or with fewer than two favourites the next installed model that fits), in the background.
+- **Chats on GGUF models (own decoder) and mlx-lm models answered 500.** The server passed the request's
+  JSON format to a backend that did not accept the argument. Fixed; `response_format` now constrains the
+  answer on those backends too.
 - **Long conversations slowed down far more than they should on mlx-community checkpoints.** These store
   their quantization scales as bfloat16, which made half of the KV cache float32 — twice the size, and
   converted on every token. It is float16 throughout now: on Qwen3.5-0.8B-4bit decoding is about 1.3× faster

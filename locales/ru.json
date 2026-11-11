@@ -280,7 +280,6 @@
   "No internet connection — the engine libraries must be downloaded (~300 MB).": "Нет подключения к интернету — нужно скачать библиотеки движка (~300 МБ).",
   "Connect to the network (or set the proxy in Settings) and start again.": "Подключитесь к сети (или задайте прокси в настройках) и запустите снова.",
   "No internet connection — Python (about 35 MB) must be downloaded.": "Нет подключения к интернету — нужно скачать Python (около 35 МБ).",
-  "No other favourite model to switch to.": "Нет другой избранной модели для переключения.",
   "runs on": "работает на",
   "Conductor": "Дирижёр",
   "optional; working with one model is unaffected": "необязательно; работа с одной моделью не меняется",
@@ -406,5 +405,7 @@
   "  1. Safari ▸ Settings ▸ Advanced: turn on “Show features for web developers”.": "  1. Safari ▸ Настройки ▸ Дополнения: включите «Показывать функции для веб-разработчиков».",
   "  2. Safari ▸ Settings ▸ Developer: “Add Temporary Extension…” and choose the folder above.": "  2. Safari ▸ Настройки ▸ Разработчик: «Добавить временное расширение…» и выберите папку, указанную выше.",
   "  3. The extension's settings open: paste the token (already on the clipboard) and press Connect.": "  3. Откроются настройки расширения: вставьте токен (он уже в буфере обмена) и нажмите Connect.",
-  "Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. A permanent install needs a signed app; see docs/safari-assistant/README.md.": "Safari забывает временное расширение при выходе — повторите шаг 2 после перезапуска Safari. Постоянная установка требует подписанного приложения; см. docs/safari-assistant/README.md."
+  "Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. A permanent install needs a signed app; see docs/safari-assistant/README.md.": "Safari забывает временное расширение при выходе — повторите шаг 2 после перезапуска Safari. Постоянная установка требует подписанного приложения; см. docs/safari-assistant/README.md.",
+  "No other model to switch to.": "Нет другой модели для переключения.",
+  "Another model is loaded or loading ({name}) — stopping it to start the selected one.": "Загружена или загружается другая модель ({name}) — останавливаю её, чтобы запустить выбранную."
 }

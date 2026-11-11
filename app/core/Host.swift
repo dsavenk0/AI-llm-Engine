@@ -95,8 +95,12 @@ enum AppHost {
         case "cli":
             openTerminal("./llm")
             preloadModel()
-        default:
+        case "voice":
             openVoice()                                            // listening starts the model itself
+        default:
+            // a tap on the widget's background, or a link this version does not know: show the panel. It
+            // used to fall through to the voice chat, so any stray tap on the widget started listening.
+            openPanel()
         }
     }
 
