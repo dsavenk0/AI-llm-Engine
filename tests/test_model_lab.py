@@ -1,5 +1,5 @@
-"""Model Lab, first increment: tensor inspection (model_lab.inspection) and activation capture
-(model_lab.capture). No weight editing yet — see docs/model-lab/compatibility.md.
+"""Model Lab: tensor inspection (model_lab.inspection), activation capture (model_lab.capture), weight
+patches (engine.weightpatch, model_lab.patch), ablation and export — see docs/model-lab/compatibility.md.
 
     .venv/bin/python -m unittest tests.test_model_lab -v
 """
@@ -321,6 +321,56 @@ class TestExport(unittest.TestCase):
         b = np.asarray(reloaded(ids, reloaded.make_cache()).astype(mx.float32))
         np.testing.assert_array_equal(a, b)
 
+    def test_a_vision_model_is_still_a_vision_model_after_export(self):
+        # the lab loads text-only, so the tower is not in the parameter tree; it was simply left behind,
+        # and with no index the loader no longer even offered vision
+        from engine.loader import has_vision, load
+        from tests.synth import make_vision_bundle
+        src = tempfile.mkdtemp()
+        make_vision_bundle(src, seed=3)
+        model, _, _ = load(src, vision=False, log=lambda *a: None)
+        export.export_model(model, src, self.out)
+        self.assertTrue(has_vision(self.out))
+        a, _, _ = load(src, vision=True, log=lambda *a: None)
+        b, _, _ = load(self.out, vision=True, log=lambda *a: None)
+        from mlx.utils import tree_flatten
+        ta, tb = dict(tree_flatten(a.vision_tower.parameters())), dict(tree_flatten(b.vision_tower.parameters()))
+        self.assertEqual(sorted(ta), sorted(tb))
+        for k in ta:
+            self.assertTrue(mx.array_equal(ta[k], tb[k]).item(), k)
+
+    def test_a_hadamard_bundle_exports_with_its_sign_vectors(self):
+        # the signs become model.had at load — not parameters — so the export had none and would not load
+        from engine.loader import load
+        from tests.synth import make_ptq1_bundle
+        src = tempfile.mkdtemp()
+        make_ptq1_bundle(src, seed=4, twin=True)          # fp16 weights under an ordinary Hadamard config
+        model, _, _ = load(src, vision=False, log=lambda *a: None)
+        export.export_model(model, src, self.out)
+        reloaded, _, _ = load(self.out, vision=False, log=lambda *a: None)
+        ids = mx.array([[3, 7, 11, 5, 9]])
+        np.testing.assert_array_equal(np.asarray(model(ids, model.make_cache()).astype(mx.float32)),
+                                      np.asarray(reloaded(ids, reloaded.make_cache()).astype(mx.float32)))
+
+    def test_a_jang_layout_that_asks_for_the_norm_shift_is_not_shifted_twice(self):
+        # jang_config.json can ask for the "+1" as well as config.json; the export pinned only the latter
+        import json
+        from engine.loader import load
+        src = tempfile.mkdtemp()
+        make_bundle(src, seed=19)
+        file = os.path.join(src, "model.safetensors")
+        t = {k: (v - 1.0 if k.endswith(("layernorm.weight", "model.norm.weight")) else v)
+             for k, v in mx.load(file).items()}       # zero-centred, the way such a bundle stores them
+        mx.save_safetensors(file, t)
+        with open(os.path.join(src, "jang_config.json"), "w") as f:
+            json.dump({"layout": {"language_norms": "zero-centered-runtime-plus-one"}}, f)
+        model, _, _ = load(src, vision=False, log=lambda *a: None)
+        export.export_model(model, src, self.out)
+        reloaded, _, _ = load(self.out, vision=False, log=lambda *a: None)
+        ids = mx.array([[3, 7, 11, 5, 9]])
+        np.testing.assert_array_equal(np.asarray(model(ids, model.make_cache()).astype(mx.float32)),
+                                      np.asarray(reloaded(ids, reloaded.make_cache()).astype(mx.float32)))
+
     def test_refuses_to_export_into_a_nonempty_folder(self):
         from engine.loader import load
         model, _, _ = load(self.bundle, vision=False, log=lambda *a: None)
@@ -366,6 +416,177 @@ class TestPatchArtifacts(unittest.TestCase):
         self.assertIsNone(patch.load_evaluation(self.root, exp_id))
         patch.save_evaluation(self.root, exp_id, {"prompt": "hi", "baseline": [1], "patched": [2]})
         self.assertEqual(patch.load_evaluation(self.root, exp_id)["prompt"], "hi")
+
+    def test_two_patches_made_in_the_same_second_do_not_share_a_folder(self):
+        # the id is the folder; its suffix used to come from hash(), equal for equal arguments in one
+        # process — the second patch silently overwrote the first
+        d = {"a.weight": np.zeros((2, 2), np.float32)}
+        ids = {patch.create_patch(self.root, "m", "native", d)[0] for _ in range(20)}
+        self.assertEqual(len(ids), 20)
+        self.assertEqual(len(patch.list_patches(self.root, "m")), 20)
+
+    def test_storage_is_recorded_and_checked(self):
+        d = {"a.weight": np.zeros((2, 2), np.float32)}
+        exp_id, _ = patch.create_patch(self.root, "m", "native", d, storage="float16")
+        self.assertEqual(patch.load_patch(self.root, exp_id)[0]["storage"], "float16")
+        with self.assertRaisesRegex(patch.PatchError, "storage"):
+            patch.create_patch(self.root, "m", "native", d, storage="exactly")
+
+
+class TestWhatAPatchReallyDoes(unittest.TestCase):
+    """A delta is added to a *quantized* tensor, and the sum has to be stored somehow. These pin what each
+    storage does to the request — measured first on Qwen3.5-0.8B-4bit, where re-quantizing from scratch
+    changed 15 % of a tensor's packed words for a delta of zero and realized a third of an ablation."""
+
+    NAME = "language_model.model.layers.0.mlp.down_proj.weight"
+
+    @classmethod
+    def setUpClass(cls):
+        from engine.loader import load
+        cls.bundle = tempfile.mkdtemp()
+        make_bundle(cls.bundle, seed=23)                 # everything affine 4-bit, group 64
+        cls.load = staticmethod(lambda: load(cls.bundle, vision=False, log=lambda *a: None)[0])
+
+    def words(self, model, name=None):
+        leaf = patch.locate(model, "native", name or self.NAME)
+        return (np.asarray(leaf.weight).copy(), np.asarray(leaf.scales.astype(mx.float32)).copy(),
+                np.asarray(leaf.biases.astype(mx.float32)).copy())
+
+    def test_a_zero_delta_changes_nothing_at_all(self):
+        model = self.load()
+        before = self.words(model)
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        report = patch.apply_delta(model, "native", self.NAME, np.zeros_like(base))
+        for a, b in zip(before, self.words(model)):
+            np.testing.assert_array_equal(a, b)
+        self.assertEqual(report["groups_refit"], 0)
+        self.assertEqual(report["unrequested"], 0.0)
+
+    def test_weights_that_were_not_asked_to_move_keep_their_codes(self):
+        model = self.load()
+        w0, s0, b0 = self.words(model)
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        step = float(np.median(np.abs(s0)))
+        delta = np.zeros_like(base)
+        delta[3, :64] = step * 0.9                        # one group of one row, within its range or not
+        patch.apply_delta(model, "native", self.NAME, delta)
+        w1, s1, b1 = self.words(model)
+        rows = [r for r in range(base.shape[0]) if r != 3]
+        np.testing.assert_array_equal(w1[rows], w0[rows])
+        np.testing.assert_array_equal(s1[rows], s0[rows])
+        np.testing.assert_array_equal(s1[3, 1:], s0[3, 1:])           # the row's other groups too
+        after, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        np.testing.assert_array_equal(after[rows], base[rows])
+        self.assertGreater(float(np.abs(after[3, :64] - base[3, :64]).max()), 0)
+
+    def test_a_delta_finer_than_the_grid_is_reported_as_mostly_lost(self):
+        model = self.load()
+        _w, s, _b = self.words(model)
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        delta = np.random.default_rng(0).standard_normal(base.shape).astype(np.float32) * float(np.median(np.abs(s))) * 0.1
+        report = patch.apply_delta(model, "native", self.NAME, delta)
+        self.assertEqual(report["storage"], "quantized")
+        self.assertLess(report["realized"], 0.6)          # a tenth of a step: most of it rounds away
+        self.assertIn("finer than the quantization grid", patch.describe({self.NAME: report}))
+
+    def test_float16_storage_holds_the_whole_delta(self):
+        model = self.load()
+        ids = mx.array([[3, 7, 11, 5]])
+        before = np.asarray(model(ids, model.make_cache()).astype(mx.float32))
+        _w, s, _b = self.words(model)
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        delta = np.random.default_rng(0).standard_normal(base.shape).astype(np.float32) * float(np.median(np.abs(s))) * 0.1
+        report = patch.apply_delta(model, "native", self.NAME, delta, storage="float16")
+        self.assertEqual(report["storage"], "float16")
+        self.assertGreater(report["realized"], 0.99)
+        self.assertLess(report["unrequested"], 0.1)       # float16 rounding of the sum, nothing else
+        after = np.asarray(model(ids, model.make_cache()).astype(mx.float32))
+        self.assertTrue(np.isfinite(after).all())
+        self.assertGreater(float(np.abs(after - before).max()), 0)
+        again, spec = patch.read_logical(patch.locate(model, "native", self.NAME))      # still patchable
+        self.assertEqual(spec["kind"], "plain")
+        np.testing.assert_allclose(again, base + delta, atol=2e-3)
+
+    def test_an_ablation_on_a_quantized_tensor_removes_the_direction_only_in_float16(self):
+        # the case the original end-to-end test stepped around by storing down_proj unquantized
+        results = {}
+        for storage in ("quantized", "float16"):
+            model = self.load()
+            safe = [mx.array([[1, 2, 3, 4]]), mx.array([[5, 6, 7, 8, 9]])]
+            harmful = [mx.array([[10, 11, 12]]), mx.array([[13, 14, 15, 16]])]
+            direction = ablation.mean_diff_direction(ablation.collect_last_token_residual(model, harmful, 0),
+                                                     ablation.collect_last_token_residual(model, safe, 0))
+            base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+            deltas = ablation.ablation_deltas(model, safe, harmful, [0])
+            patch.apply_delta(model, "native", self.NAME, deltas[self.NAME], storage=storage)
+            got, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+            results[storage] = float(np.linalg.norm(direction @ got) / np.linalg.norm(direction @ base))
+        self.assertLess(results["float16"], 0.02)
+        self.assertGreater(results["quantized"], 5 * results["float16"])
+
+    def test_a_patch_folder_is_applied_with_the_storage_it_names(self):
+        from engine.weightpatch import apply_patch_dir
+        root = tempfile.mkdtemp()
+        model = self.load()
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        delta = np.full_like(base, 1e-4)
+        _id, folder = patch.create_patch(root, "m", "native", {self.NAME: delta}, storage="float16")
+        manifest = apply_patch_dir(model, "native", folder)
+        self.assertEqual(manifest["applied"][self.NAME]["storage"], "float16")
+        self.assertGreater(manifest["applied"][self.NAME]["realized"], 0.9)
+        untouched = self.load()
+        self.assertEqual(apply_patch_dir(untouched, "native", folder, alpha=0)["applied"], {})
+
+    def test_a_float16_patch_survives_export_exactly(self):
+        from engine.loader import load
+        model = self.load()
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        patch.apply_delta(model, "native", self.NAME, np.full_like(base, 3e-4), storage="float16")
+        out = tempfile.mkdtemp()
+        os.rmdir(out)
+        export.export_model(model, self.bundle, out)
+        reloaded, _, _ = load(out, vision=False, log=lambda *a: None)
+        ids = mx.array([[3, 7, 11, 5, 9, 2, 8]])
+        np.testing.assert_array_equal(np.asarray(model(ids, model.make_cache()).astype(mx.float32)),
+                                      np.asarray(reloaded(ids, reloaded.make_cache()).astype(mx.float32)))
+
+    def test_the_ssd_prefix_cache_of_a_patched_model_is_its_own(self):
+        # the cache key named the checkpoint and the steering file but not the weight patch: a patched
+        # model restored prefixes computed by the unpatched one
+        from engine.generate import Engine
+        root, cache = tempfile.mkdtemp(), tempfile.mkdtemp()
+        model = self.load()
+        base, _ = patch.read_logical(patch.locate(model, "native", self.NAME))
+        _id, folder = patch.create_patch(root, "m", "native", {self.NAME: np.full_like(base, 1e-3)})
+        kw = dict(vision=False, max_context=256, max_tokens=8, disk_cache_gb=1, disk_cache_dir=cache,
+                  log=lambda *_: None)
+        plain = Engine(self.bundle, **kw).store.root
+        patched = Engine(self.bundle, weight_patch=(folder, None), **kw).store.root
+        half = Engine(self.bundle, weight_patch=(folder, 0.5), **kw).store.root
+        off = Engine(self.bundle, weight_patch=(folder, 0), **kw).store.root
+        self.assertEqual(len({plain, patched, half}), 3)
+        self.assertEqual(off, plain)                      # alpha 0 is the unpatched model
+
+
+class TestTiedEmbeddingGGUF(unittest.TestCase):
+    def test_a_patch_on_a_tied_embedding_reaches_the_output_head_too(self):
+        """Gemma's head is `embed.as_linear()`: a second object holding the same arrays. The refusal for
+        `output.weight` says "patch token_embd.weight instead" — which then has to change both."""
+        from engine.dense import build
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "gemma3.gguf")
+        G.write(path, seed=2, quant="Q8_0", arch="gemma3")
+        for storage in ("quantized", "float16"):
+            model, _, _ = build(path)
+            self.assertIs(model.head.w, model.embed.w)
+            base, _ = patch.read_logical(patch.locate(model, "gguf", "token_embd.weight"))
+            delta = np.random.default_rng(4).standard_normal(base.shape).astype(np.float32) * 0.05
+            patch.apply_delta(model, "gguf", "token_embd.weight", delta, storage=storage)
+            self.assertIs(model.head.w, model.embed.w, storage)
+            self.assertEqual(model.head.bits, model.embed.bits, storage)
+            out = model(mx.array([[1, 2, 3]]), model.make_cache())
+            mx.eval(out)
+            self.assertTrue(np.isfinite(np.asarray(out.astype(mx.float32))).all())
 
 
 if __name__ == "__main__":

@@ -12,32 +12,48 @@ the native route's fused input projections, `mx`-mode quantization) — all enfo
 """
 import json
 import os
+import secrets
 import time
 
 import mlx.core as mx
 import numpy as np
 
-from engine.weightpatch import PatchError, apply_delta, locate, read_logical, write_logical  # noqa: F401
+from engine.weightpatch import (STORAGES, PatchError, apply_delta, describe, fidelity, locate,  # noqa: F401
+                                read_logical, write_logical)
 
-__all__ = ["PatchError", "apply_delta", "locate", "read_logical", "write_logical",
+__all__ = ["PatchError", "STORAGES", "apply_delta", "describe", "fidelity", "locate", "read_logical", "write_logical",
           "create_patch", "load_patch", "list_patches", "save_evaluation", "load_evaluation"]
 
 
-def create_patch(root, model_name, route, deltas, note=""):
+def create_patch(root, model_name, route, deltas, note="", storage="quantized"):
     """`deltas`: {tensor_name: float32 ndarray}, one or more. Writes
     `<root>/experiments/<id>/candidate.patch/{manifest.json, delta.safetensors}` — the spec's own
-    artifact layout, scoped down for this increment (no lineage/conflict-checking machinery yet)."""
+    artifact layout, scoped down for this increment (no lineage/conflict-checking machinery yet).
+
+    `storage`: how the engine keeps the patched tensors — "quantized" (same bits, deltas finer than the
+    grid mostly round away) or "float16" (exact, the patched tensors cost unquantized memory). See
+    engine/weightpatch.py."""
     if not deltas:
         raise PatchError("a patch needs at least one tensor")
-    exp_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{abs(hash((model_name, tuple(deltas)))) % 10000:04d}"
-    patch_dir = os.path.join(root, "experiments", exp_id, "candidate.patch")
-    os.makedirs(patch_dir, exist_ok=True)
+    if storage not in STORAGES:
+        raise PatchError(f"unknown storage {storage!r} (one of: {', '.join(STORAGES)})")
+    # the id is the folder: two patches made in the same second must not land in one (the second used to
+    # overwrite the first — the suffix came from hash(), which only varies between processes)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    while True:
+        exp_id = f"{stamp}-{secrets.randbelow(10000):04d}"
+        patch_dir = os.path.join(root, "experiments", exp_id, "candidate.patch")
+        try:
+            os.makedirs(patch_dir)
+            break
+        except FileExistsError:
+            continue
     mx.save_safetensors(os.path.join(patch_dir, "delta.safetensors"),
                         {name: mx.array(d) for name, d in deltas.items()})
     manifest = {"model": model_name, "route": route, "tensors": list(deltas),
                "shapes": {name: list(d.shape) for name, d in deltas.items()},
                "max_abs_delta": {name: float(np.max(np.abs(d))) if d.size else 0.0 for name, d in deltas.items()},
-               "note": note, "created": exp_id}
+               "storage": storage, "note": note, "created": exp_id}
     with open(os.path.join(patch_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     return exp_id, patch_dir

@@ -43,7 +43,8 @@ def projection_delta(base_weight, direction, alpha=1.0):
 
 def collect_last_token_residual(model, ids_list, layer):
     """ids_list: a list of already-tokenized [1, L] mx arrays, one per prompt. Returns [N, hidden] — the
-    post-MLP residual (this layer's own output) at each prompt's last token."""
+    residual stream after this layer (everything written up to and including it, not the layer's own
+    contribution alone) at each prompt's last token."""
     rows = []
     for ids in ids_list:
         captured, _ = capture.capture_activations(model, ids, layers=[layer])
@@ -55,11 +56,21 @@ def ablation_deltas(model, safe_ids, harmful_ids, layers, alpha=1.0):
     """{tensor_name: delta} for the native route's `mlp.down_proj` at each layer in `layers`, each from its
     own `direction = unit(mean(harmful) - mean(safe))` at that layer's post_mlp_residual."""
     from engine.weightpatch import locate, read_logical
+    layers = list(layers)
+
+    def acts(ids_list):
+        # one forward pass per prompt serves every layer (it used to be one pass per prompt per layer)
+        rows = {i: [] for i in layers}
+        for ids in ids_list:
+            captured, _ = capture.capture_activations(model, ids, layers=layers)
+            for i in layers:
+                rows[i].append(captured[i]["post_mlp_residual"][0, -1])
+        return {i: np.stack(r) for i, r in rows.items()}
+
+    safe_acts_all, harmful_acts_all = acts(safe_ids), acts(harmful_ids)
     out = {}
     for i in layers:
-        safe_acts = collect_last_token_residual(model, safe_ids, i)
-        harmful_acts = collect_last_token_residual(model, harmful_ids, i)
-        direction = mean_diff_direction(harmful_acts, safe_acts)
+        direction = mean_diff_direction(harmful_acts_all[i], safe_acts_all[i])
         name = f"language_model.model.layers.{i}.mlp.down_proj.weight"
         base, _spec = read_logical(locate(model, "native", name))
         out[name] = projection_delta(base, direction, alpha)

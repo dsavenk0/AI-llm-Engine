@@ -73,6 +73,14 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   never actually stuck — the read size is now much smaller, so progress moves far more often. And when a
   repo's listing didn't report a file's size, LLMBar silently dropped every progress line for it instead of
   at least recognizing the transfer was still alive, which could make a healthy download look stalled.
+- **A weight patch on a quantized model did not do what it said.** Writing the patched tensor back
+  re-quantized all of it, which moved weights nobody asked to move (15 % of a 4-bit tensor's words for a
+  delta of zero) and realized only part of a fine-grained edit such as an ablation. A patch now changes only
+  the weights its delta touches, reports how much of the requested change is really in the model, and can be
+  stored exactly (`--storage float16`, the default for `ablate`). Also fixed: a patched model shared its SSD
+  prefix cache with the unpatched one; `wsp patches export` lost the vision tower, produced a Hadamard
+  (JANG / Prism) bundle that would not load, and could shift a JANG bundle's norms twice; `activate` accepted
+  a patch made for another model.
 
 ### Changed
 - **The README's efficiency figures were overstated and are corrected**: the weights column counted the

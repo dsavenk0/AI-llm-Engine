@@ -403,6 +403,16 @@ class Engine:
                 sf, ra = steering.resolve(self.steer[0])
                 with open(sf, "rb") as g:
                     key += g.read() + repr(self.steer[1] if self.steer[1] is not None else ra).encode()
+            if self.weight_patch and self.weight_patch[1] != 0:
+                # patched weights compute different activations too: without this a patched model restored
+                # prefixes the unpatched one had stored (and the reverse), mixing two models in one reply.
+                # The manifest names the patch; size and mtime of the deltas catch a file replaced in place
+                # without reading a delta that can be hundreds of megabytes.
+                pdir, palpha = self.weight_patch
+                with open(os.path.join(pdir, "manifest.json"), "rb") as g:
+                    key += g.read()
+                st = os.stat(os.path.join(pdir, "delta.safetensors"))
+                key += repr((st.st_size, st.st_mtime_ns, 1.0 if palpha is None else palpha)).encode()
             mid = os.path.basename(path.rstrip("/")) + "-" + hashlib.sha1(key).hexdigest()[:8]
             self.store = PrefixStore(os.path.join(root, mid), int(gb * GiB), log=log)
         self._warmup()

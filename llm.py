@@ -3479,15 +3479,20 @@ def lab_cmd(cfg, args):
     path this doesn't instrument). Saved under `<data dir>/model-lab-data/experiments/<id>/captures/`.
 
     `./llm lab wsp patches create --model <m> --tensor <name> (--delta <file.safetensors> | --std <value>
-    [--seed <n>]) [--note <text>]`: a reversible weight edit, W_effective = W_base + ΔW, for one tensor —
-    on the native or GGUF route, quantized (affine) or plain. The original checkpoint file is never
-    touched. MoE experts and ternary (PTQ1/Bonsai) tensors are refused, not silently misapplied — see
+    [--seed <n>]) [--note <text>] [--storage quantized|float16]`: a reversible weight edit, W_effective =
+    W_base + ΔW, for one tensor — on the native or GGUF route, quantized (affine) or plain. The original
+    checkpoint file is never touched. `--storage quantized` (the default here) keeps the tensor's bits: a
+    delta finer than the quantization grid mostly rounds away, and `apply` prints how much of it arrived.
+    `--storage float16` keeps the patched tensor dequantized — exact, at an unquantized tensor's memory.
+    MoE experts and ternary (PTQ1/Bonsai) tensors are refused, not silently misapplied — see
     docs/model-lab/compatibility.md.
 
     `./llm lab wsp patches ablate --model <m> --safe <prompt> [--safe <prompt> ...] --harmful <prompt>
-    [--harmful <prompt> ...] [--layers 0,1,2] [--alpha 1.0] [--note <text>]`: a multi-layer patch computed
-    from two prompt groups — a mean-diff direction at each chosen layer's MLP output, removed from that
-    layer's `down_proj` rows (native route only). A candidate to evaluate, not a proven fix — see
+    [--harmful <prompt> ...] [--layers 0,1,2] [--alpha 1.0] [--note <text>] [--storage float16|quantized]`:
+    a multi-layer patch computed from two prompt groups — a mean-diff direction in the residual stream
+    after each chosen layer, removed from that layer's `down_proj` rows (native route only). Stored
+    float16 unless asked otherwise: the delta is a fraction of a quantization step, and on a 4-bit tensor
+    about a third of it survives requantization. A candidate to evaluate, not a proven fix — see
     docs/model-lab/compatibility.md's scientific-boundaries note.
 
     `wsp patches apply --patch <id> --prompt <text>` applies a patch in memory (this process only) and
@@ -3639,7 +3644,7 @@ def _lab_wsp(cfg, args):
         if rest[i] in LIST_FLAGS and i + 1 < len(rest):
             opts.setdefault(rest[i][2:], []).append(rest[i + 1]); i += 2; continue
         if rest[i] in ("--model", "--tensor", "--delta", "--std", "--seed", "--patch", "--prompt", "--note",
-                      "--layers", "--alpha", "--out") and i + 1 < len(rest):
+                      "--layers", "--alpha", "--out", "--storage") and i + 1 < len(rest):
             opts[rest[i][2:]] = rest[i + 1]; i += 2; continue
         if rest[i] == "--json":
             opts["json"] = True; i += 1; continue
@@ -3656,6 +3661,8 @@ def _lab_wsp(cfg, args):
         else:
             print(R(T("Model not found.")))
         return False
+    if opts.get("storage") and opts["storage"] not in patch.STORAGES:
+        print(R(T("--storage is one of: {s}").format(s=", ".join(patch.STORAGES)))); return False
 
     if verb == "list":
         patches = patch.list_patches(root, pick["name"])
@@ -3704,7 +3711,7 @@ def _lab_wsp(cfg, args):
             print(R(T("delta shape {d} does not match {t}'s logical shape {s}")
                     .format(d=delta.shape, t=opts["tensor"], s=base_shape))); return False
         exp_id, out_dir = patch.create_patch(root, pick["name"], route, {opts["tensor"]: delta},
-                                             opts.get("note", ""))
+                                             opts.get("note", ""), opts.get("storage") or "quantized")
         if opts.get("json"):
             print(json.dumps({"experiment": exp_id, "path": out_dir}, ensure_ascii=False))
         else:
@@ -3733,7 +3740,10 @@ def _lab_wsp(cfg, args):
         except (ValueError, patch.PatchError) as e:
             print(R(str(e))); return False
         note = opts.get("note") or f"ablation: {len(opts['safe'])} safe vs {len(opts['harmful'])} harmful prompts"
-        exp_id, out_dir = patch.create_patch(root, pick["name"], route, deltas, note)
+        # an ablation delta is rank one and, on a quantized model, far finer than the grid (a tenth of a
+        # step on Qwen3.5-0.8B-4bit): kept quantized, about a third of it survives. Exact unless asked.
+        exp_id, out_dir = patch.create_patch(root, pick["name"], route, deltas, note,
+                                             opts.get("storage") or "float16")
         if opts.get("json"):
             print(json.dumps({"experiment": exp_id, "path": out_dir, "layers": layers}, ensure_ascii=False))
         else:
@@ -3756,6 +3766,11 @@ def _lab_wsp(cfg, args):
             _manifest, _deltas, patch_dir = patch.load_patch(root, opts["patch"])
         except OSError:
             print(R(T("No such patch:") + " " + opts["patch"])); return False
+        # the same check `apply` makes — here it matters more: a patch made for another model is either
+        # refused by the engine at every start from now on (shapes differ) or, worse, applied (they match)
+        if _manifest.get("model") != pick["name"]:
+            print(R(T("This patch was created for {m}, not {n}.").format(m=_manifest.get("model"), n=pick["name"])))
+            return False
         cfg["models"].setdefault(pick["path"], {})
         cfg["models"][pick["path"]]["weight_patch"] = patch_dir
         cfg["models"][pick["path"]]["weight_patch_alpha"] = float(opts["alpha"]) if opts.get("alpha") else None
@@ -3777,9 +3792,13 @@ def _lab_wsp(cfg, args):
             model, route = _lab_load_model(pick)
             if opts.get("patch"):
                 _manifest, deltas, _patch_dir = patch.load_patch(root, opts["patch"])
+                if _manifest.get("model") != pick["name"]:
+                    raise ValueError(T("This patch was created for {m}, not {n}.")
+                                     .format(m=_manifest.get("model"), n=pick["name"]))
                 alpha = float(opts["alpha"]) if opts.get("alpha") else 1.0
                 for name, delta in deltas.items():
-                    patch.apply_delta(model, route, name, delta, alpha)
+                    patch.apply_delta(model, route, name, delta, alpha,
+                                      opts.get("storage") or _manifest.get("storage", "quantized"))
             out_dir = export_mod.export_model(model, pick["path"], opts["out"])
         except (ValueError, patch.PatchError, OSError) as e:
             print(R(str(e))); return False
@@ -3810,10 +3829,13 @@ def _lab_wsp(cfg, args):
         tok, ids = _lab_tokenize(pick, route, prompt)
         baseline = _lab_top_tokens(model, tok, ids)
         if verb == "apply":
-            for name, delta in deltas.items():
-                patch.apply_delta(model, route, name, delta)
+            applied = {name: patch.apply_delta(model, route, name, delta, 1.0, manifest.get("storage", "quantized"))
+                       for name, delta in deltas.items()}
             patched = _lab_top_tokens(model, tok, ids)
-            patch.save_evaluation(root, opts["patch"], {"prompt": prompt, "baseline": baseline, "patched": patched})
+            realized = {n: {k: r[k] for k in ("storage", "realized", "unrequested", "groups_refit")}
+                        for n, r in applied.items()}
+            patch.save_evaluation(root, opts["patch"], {"prompt": prompt, "baseline": baseline, "patched": patched,
+                                                        "applied": realized})
         else:
             saved = saved_eval
             matches = saved is not None and saved.get("baseline") == baseline
@@ -3824,10 +3846,11 @@ def _lab_wsp(cfg, args):
     if verb == "apply":
         if opts.get("json"):
             print(json.dumps({"experiment": opts["patch"], "prompt": prompt, "baseline": baseline,
-                              "patched": patched}, ensure_ascii=False))
+                              "patched": patched, "applied": realized}, ensure_ascii=False))
         else:
             print(T("Baseline (unpatched):") + " " + ", ".join(f"{t['token']!r} {t['prob']}" for t in baseline))
             print(T("Patched:") + "             " + ", ".join(f"{t['token']!r} {t['prob']}" for t in patched))
+            print(DIM(patch.describe(applied)))
         return True
     if opts.get("json"):
         print(json.dumps(result, ensure_ascii=False))

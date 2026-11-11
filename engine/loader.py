@@ -294,7 +294,8 @@ def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None,
         patch_dir, patch_alpha = weight_patch
         patch_alpha = 1.0 if patch_alpha is None else patch_alpha
         manifest = weightpatch.apply_patch_dir(model, "native", patch_dir, patch_alpha)
-        log(f"weight patch on: {', '.join(manifest['tensors'])}, alpha {patch_alpha:g}")
+        log(f"weight patch on: {', '.join(manifest['tensors'])}, alpha {patch_alpha:g} — "
+            f"{weightpatch.describe(manifest['applied'])}")
 
     model.ptq1 = is_ptq1
     model.eval()

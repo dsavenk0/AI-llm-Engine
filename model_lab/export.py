@@ -121,6 +121,20 @@ def _exportable_weights(model):
     return flat
 
 
+def _carried_over(source_path, have):
+    """Tensors of the source checkpoint the live model does not hold but a reload needs: the Hadamard sign
+    vectors (the loader turns them into `model.had` — they are not parameters, so the parameter tree never
+    had them, and a JANG / Prism export without them does not load) and the vision tower (the lab loads
+    text-only; without the tower and an index naming it the export silently stopped being a vision model).
+    Copied under the names the source used; the loader maps them the same way it did the first time."""
+    out = {}
+    for f in sorted(glob.glob(os.path.join(source_path, "*.safetensors"))):
+        for k, v in mx.load(f).items():
+            if k not in have and (k.endswith(".signs") or k.startswith("vision_tower.")):
+                out[k] = v
+    return out
+
+
 def export_model(model, source_path, out_dir):
     """Writes a complete, standalone copy of `source_path` to `out_dir`, with `model`'s current (live,
     possibly weight-patched) parameters as the weights, fused tensors split back to the checkpoint's
@@ -148,11 +162,24 @@ def export_model(model, source_path, out_dir):
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
 
+    # JANG bundles say the same thing a second way: jang_config.json's layout.language_norms asks for the
+    # "+1" at run time, and the loader obeys it whatever the pin above says — the exported norms already
+    # carry it, so that request has to go too or every norm comes back shifted twice.
+    jang_path = os.path.join(out_dir, "jang_config.json")
+    if os.path.isfile(jang_path):
+        with open(jang_path) as f:
+            jang = json.load(f)
+        if (jang.get("layout") or {}).get("language_norms") == "zero-centered-runtime-plus-one":
+            jang["layout"]["language_norms"] = "final"
+            with open(jang_path, "w") as f:
+                json.dump(jang, f, indent=2)
+
     weights = _exportable_weights(model)
+    weights.update(_carried_over(source_path, weights))
     mx.save_safetensors(os.path.join(out_dir, "model.safetensors"), weights)
     for stale in glob.glob(os.path.join(out_dir, "model-*-of-*.safetensors")):
         os.remove(stale)      # the source may have been sharded; the export is always one file
-    stale_index = os.path.join(out_dir, "model.safetensors.index.json")
-    if os.path.isfile(stale_index):
-        os.remove(stale_index)
+    # the loader finds the vision tower through the index, so the single file gets one of its own
+    with open(os.path.join(out_dir, "model.safetensors.index.json"), "w") as f:
+        json.dump({"metadata": {"format": "mlx"}, "weight_map": {k: "model.safetensors" for k in sorted(weights)}}, f)
     return out_dir

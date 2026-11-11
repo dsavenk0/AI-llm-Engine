@@ -385,5 +385,6 @@
   "run started": "запуск начат",
   "run failed": "запуск не удался",
   "run finished": "запуск завершён",
-  "plan:": "план:"
+  "plan:": "план:",
+  "--storage is one of: {s}": "--storage — одно из: {s}"
 }

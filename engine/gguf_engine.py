@@ -63,7 +63,8 @@ class GGUFEngine(CompatEngine):
             patch_dir, patch_alpha = self.weight_patch
             patch_alpha = 1.0 if patch_alpha is None else patch_alpha
             manifest = weightpatch.apply_patch_dir(model, "gguf", patch_dir, patch_alpha)
-            self.log(f"weight patch on: {', '.join(manifest['tensors'])}, alpha {patch_alpha:g}")
+            self.log(f"weight patch on: {', '.join(manifest['tensors'])}, alpha {patch_alpha:g} — "
+                     f"{weightpatch.describe(manifest['applied'])}")
         self.model = model
         self.model_bytes = model.nbytes
         self.decoder = _Decoder(self.tok)
