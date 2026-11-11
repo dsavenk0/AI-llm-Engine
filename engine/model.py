@@ -280,6 +280,10 @@ class Ops:
         nh, nkv, hd = a["num_attention_heads"], a["num_key_value_heads"], a["head_dim"]
         inv = dk ** -0.5
         self.had = had
+        # None while the MLX reference is the one in use, so the default path is exactly what it was
+        from . import kernels
+        name, fn = kernels.resolve("attn_decode")
+        self.attn_decode = None if name == kernels.REFERENCE else fn
         scheme = a.get("ternary_scheme", "ptq1")
         # activation steering (engine/steering.py): applied to what each layer writes into the residual
         st = steer if steer is not None else (lambda y: y)
@@ -411,7 +415,12 @@ class Attention(nn.Module):
         # `mask` (an additive [B,1,Lq,Lk] array) comes from batched decode to hide other rows' padding;
         # without it the single-sequence path keeps its plain causal / no-mask behaviour.
         m = mask if mask is not None else ("causal" if L > 1 else None)
-        o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=m)
+        o = None
+        if ops.attn_decode is not None and L == 1 and mask is None:
+            # a replacement kernel (engine/kernels) takes the cache buffers whole; None = it declines
+            o = ops.attn_decode(q, cache.keys, cache.values, cache.offset, self.scale)
+        if o is None:
+            o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=m)
         return ops.attn_post(o, gate, x, *_w(self.o_proj))
 
 

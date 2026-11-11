@@ -170,6 +170,13 @@ def _encode_vector(v, fmt):
     return base64.b64encode(struct.pack(f"<{len(v)}f", *v)).decode()
 
 
+def _active_kernels():
+    """Which implementation each replaceable operation runs on (engine/kernels) — {} if the registry is not
+    loaded, which is the case for a backend that never touches the native model code."""
+    mod = sys.modules.get("engine.kernels")
+    return mod.active() if mod else {}
+
+
 def generate_stream(req):
     """The engine's items for one request — text pieces, then the final stats dict — taking either the
     ordinary single-request path or, when other requests overlap it, one merged batch pass."""
@@ -559,6 +566,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               "model": round(ENGINE.model_bytes / 2**30, 2)},
                 "system_ram_used": round(__import__("engine.memory", fromlist=["x"]).used_fraction(), 3),
                 "mem_limit": ENGINE.mem_limit,
+                "kernels": _active_kernels(),
                 "wired_limit_advice_mb": ENGINE.wired_limit_advice_mb,
                 "memory_breakdown": ENGINE.memory_breakdown(),
                 "cached_tokens": len(ENGINE.cache_tokens),
