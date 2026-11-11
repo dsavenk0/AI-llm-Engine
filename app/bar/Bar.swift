@@ -1374,8 +1374,11 @@ final class Downloader: ObservableObject {
                 while let nl = buffer.firstIndex(of: "\n") {
                     let line = String(buffer[..<nl]); buffer.removeSubrange(...nl)
                     let parts = line.split(separator: " ", maxSplits: 3).map(String.init)
-                    if parts.first == "PROGRESS", parts.count >= 3, let d = Double(parts[1]), let t = Double(parts[2]), t > 0 {
-                        j.fraction = d / t
+                    if parts.first == "PROGRESS", parts.count >= 3, let d = Double(parts[1]), let t = Double(parts[2]) {
+                        // `t` can be 0 when the hub didn't report a size for this repo's files (seen on
+                        // some community/GGUF repos) — still count it as progress (and keep the watchdog
+                        // from bouncing a transfer that's working fine), just without a fraction to show
+                        if t > 0 { j.fraction = d / t }
                         j.file = parts.count > 3 ? parts[3] : ""
                         j.lastTick = Date()                   // progress → not stalled
                     } else if line.contains("✗") || line.lowercased().contains("error") {

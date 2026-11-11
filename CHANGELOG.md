@@ -30,6 +30,14 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   at the first token check.
 - `tools/make-tiles.py` trims the dead field around each screenshot and puts them on one canvas, so the README
   row reads as a set rather than a pile; the transparent background is kept.
+- **Downloads in LLMBar often stalled or failed outright.** Three independent causes: a transient DNS/
+  connection hiccup or Hugging Face rate-limit on the one metadata request that starts a pull crashed the
+  whole download before a single byte of the model was fetched — it now retries like the rest of the
+  transfer does. A slow connection could go over a minute between progress updates (progress only ticked
+  after a full 1 MiB read), long enough for LLMBar's 90-second stall watchdog to bounce a transfer that was
+  never actually stuck — the read size is now much smaller, so progress moves far more often. And when a
+  repo's listing didn't report a file's size, LLMBar silently dropped every progress line for it instead of
+  at least recognizing the transfer was still alive, which could make a healthy download look stalled.
 
 ### Changed
 - **The README's efficiency figures were overstated and are corrected**: the weights column counted the

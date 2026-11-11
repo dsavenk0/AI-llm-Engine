@@ -2250,12 +2250,28 @@ HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/"
 PULL_SKIP = (".png", ".jpg", ".jpeg", ".gif", ".mp4", ".gguf", ".bin", ".pt", ".pth", ".onnx", ".h5", ".msgpack")
 
 
-def _hf(path, timeout=20):
+def _hf(path, timeout=20, retries=3):
+    """A transient DNS hiccup, connection reset, or HF rate-limit on this one metadata call used to crash
+    the whole `llm pull` before a single byte of the model was fetched; retried the same way
+    `download_file`'s own transfer retries are, just with a shorter backoff since this is a small request."""
     req = urllib.request.Request(HF_ENDPOINT + path, headers={"User-Agent": "AI-llm-Engine"})
     if os.environ.get("HF_TOKEN"):
         req.add_header("Authorization", "Bearer " + os.environ["HF_TOKEN"])
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or attempt >= retries:
+                raise
+            attempt += 1
+            time.sleep(min(2 ** attempt, 10))
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ValueError):
+            attempt += 1
+            if attempt > retries:
+                raise
+            time.sleep(min(2 ** attempt, 10))
 
 
 def hub_route(tags):
@@ -2437,7 +2453,11 @@ def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, ret
                 if have and getattr(r, "status", 206) != 206:
                     have = 0
                 with open(part, "ab" if have else "wb") as out:
-                    while chunk := r.read(1 << 20):
+                    # a smaller read size than the old 1 MiB: on a slow connection, read(n) blocks until
+                    # n bytes arrive, so a big n can silently go 1+ minutes between progress ticks — long
+                    # enough for LLMBar's 90s stall watchdog (app/bar/Bar.swift) to bounce a transfer that
+                    # was never actually stuck, just slow
+                    while chunk := r.read(1 << 16):
                         out.write(chunk)
                         on_chunk(len(chunk))
         except (urllib.error.URLError, OSError, http.client.HTTPException):
@@ -2480,10 +2500,14 @@ def hf_pull(repo, progress=False, revision=None):
             info = {"siblings": ms_files(rid), "sha": "master"}
         except (OSError, urllib.error.URLError, ValueError, KeyError) as e:
             print(R(T("Download failed: {name}: {err}").format(name=repo, err=e))); return False
-    elif revision and re.match(r"^[0-9a-f]{7,40}$", revision):       # the exact commit an edit was made for
-        info = _hf(f"/api/models/{repo}/revision/{revision}?blobs=true")
     else:
-        info = _hf(f"/api/models/{repo}?blobs=true")
+        try:
+            if revision and re.match(r"^[0-9a-f]{7,40}$", revision):   # the exact commit an edit was made for
+                info = _hf(f"/api/models/{repo}/revision/{revision}?blobs=true")
+            else:
+                info = _hf(f"/api/models/{repo}?blobs=true")
+        except (OSError, urllib.error.URLError, ValueError, KeyError) as e:
+            print(R(T("Download failed: {name}: {err}").format(name=repo, err=e))); return False
     files = [f for f in info.get("siblings", []) if not f["rfilename"].lower().endswith(PULL_SKIP)]
     gg = [f for f in info.get("siblings", []) if f["rfilename"].lower().endswith(".gguf")]
     if gg and not any(f["rfilename"].lower().endswith(".safetensors") for f in info.get("siblings", [])):

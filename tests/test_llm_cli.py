@@ -749,6 +749,47 @@ class TestHub(State):
         data = json.loads(out)
         self.assertEqual({"id", "downloads", "size", "route", "compatible", "local", "fits"} - set(data[0]), set())
 
+    def test_a_transient_metadata_fetch_error_retries_and_still_succeeds(self):
+        """Before this was fixed, any transient DNS/connection/429 hiccup on the one metadata request that
+        starts a pull crashed the whole `llm pull` before a single byte of the model was fetched — this
+        reproduces that hiccup (two failures, then the real response) and checks `_hf`'s own retry now
+        recovers from it, rather than mocking `_hf` itself away (which would remove the retry under test)."""
+        real_urlopen = llm.urllib.request.urlopen
+        calls = {"n": 0}
+
+        def flaky(req, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise llm.urllib.error.URLError("connection reset")
+            return real_urlopen(req, *a, **kw)
+
+        with mock.patch.object(llm.urllib.request, "urlopen", side_effect=flaky), \
+                mock.patch("time.sleep", lambda s: None):          # don't actually wait out the backoff
+            ok, out = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertTrue(ok, out)
+        self.assertEqual(calls["n"], 3)
+
+    def test_a_permanently_unreachable_hub_fails_cleanly_not_with_a_crash(self):
+        with mock.patch.object(llm, "_hf", side_effect=llm.urllib.error.URLError("connection reset")), \
+                mock.patch("time.sleep", lambda s: None):
+            ok, out = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertFalse(ok)
+        self.assertIn("Download failed", out)
+
+    def test_download_file_ticks_progress_more_than_once_for_a_multi_chunk_file(self):
+        """The read size download_file() uses bounds how long a slow connection can go without a progress
+        tick — too large, and LLMBar's stall watchdog (app/bar/Bar.swift) can bounce a transfer that was
+        never actually stuck. This doesn't simulate slowness, just confirms more than one tick happens for
+        a body bigger than one read() call, i.e. ticking isn't gated on the whole file arriving at once."""
+        dest = llm._pull_dest("org/native-4bit")
+        os.makedirs(dest, exist_ok=True)
+        big = os.urandom(3 * (1 << 16) + 100)
+        ticks = []
+        url = f"{self.endpoint}/org/native-4bit/resolve/main/big.bin"
+        with mock.patch.dict(REPOS["org/native-4bit"]["files"], {"big.bin": big}):
+            llm.download_file(url, os.path.join(dest, "big.bin"), len(big), on_chunk=lambda n: ticks.append(n))
+        self.assertGreater(len(ticks), 1)
+        self.assertEqual(sum(ticks), len(big))
 
 if __name__ == "__main__":
     unittest.main()
