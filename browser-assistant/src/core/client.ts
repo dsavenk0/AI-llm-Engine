@@ -1,0 +1,93 @@
+// The assistant service's client. Used by the background script only: no page and no content script ever
+// holds the token or talks to the service.
+
+import { ChatEvent, PageContext, ServiceError, Snapshot, Task } from "./protocol";
+import { readSse } from "./sse";
+
+export interface Settings {
+  service: string;
+  token: string;
+}
+
+export class ServiceFailure extends Error {
+  constructor(public status: number, public error: ServiceError) {
+    super(error.message);
+  }
+}
+
+export class Client {
+  constructor(private settings: Settings) {}
+
+  private headers(): Record<string, string> {
+    return { "Content-Type": "application/json", Authorization: `Bearer ${this.settings.token}` };
+  }
+
+  private url(path: string): string {
+    return this.settings.service.replace(/\/+$/, "") + path;
+  }
+
+  async hello(): Promise<{ service: string; protocol: number }> {
+    const r = await fetch(this.url("/v1/assistant/hello"));
+    if (!r.ok) throw new ServiceFailure(r.status, { code: "unreachable", message: `service answered ${r.status}` });
+    return r.json();
+  }
+
+  async state(): Promise<Snapshot> {
+    return this.json("GET", "/v1/assistant/state");
+  }
+
+  async post<T>(path: string, body: unknown): Promise<T> {
+    return this.json("POST", path, body);
+  }
+
+  private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const r = await fetch(this.url(path), {
+      method, headers: this.headers(), body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const err = (data && data.error) || { code: "http_" + r.status, message: `the service answered ${r.status}` };
+      throw new ServiceFailure(r.status, err);
+    }
+    return data as T;
+  }
+
+  /** Follow the state stream until `signal` aborts or the connection drops. */
+  async events(onState: (s: Snapshot) => void, signal: AbortSignal): Promise<void> {
+    const r = await fetch(this.url("/v1/assistant/events"), { headers: this.headers(), signal });
+    if (!r.ok || !r.body) {
+      const data = await r.json().catch(() => ({}));
+      throw new ServiceFailure(r.status, data.error || { code: "http_" + r.status, message: `events: ${r.status}` });
+    }
+    await readSse(r.body, (ev) => {
+      const e = ev as { type?: string; state?: Snapshot };
+      if (e.type === "state" && e.state) onState(e.state);
+    });
+  }
+
+  /** One task about a page, streamed. Resolves when the answer ends, however it ends. */
+  async chat(req: {
+    session: string; task: Task; question?: string; page: PageContext; lang?: string; tone?: string;
+    thinking?: boolean;
+  }, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
+    const body = {
+      session: req.session, task: req.task, question: req.question, lang: req.lang, tone: req.tone,
+      thinking: req.thinking, selection: req.page.selection,
+      page: { title: req.page.title, url: req.page.url, text: req.page.text },
+    };
+    const r = await fetch(this.url("/v1/assistant/chat"), {
+      method: "POST", headers: this.headers(), body: JSON.stringify(body), signal,
+    });
+    if (!r.ok || !r.body) {
+      const data = await r.json().catch(() => ({}));
+      const err: ServiceError = data.error || { code: "http_" + r.status, message: `the service answered ${r.status}` };
+      onEvent({ type: "error", message: err.message, code: err.code });
+      return;
+    }
+    await readSse(r.body, (ev) => onEvent(ev as ChatEvent));
+  }
+
+  async cancel(id: string, session: string): Promise<void> {
+    await this.post(`/v1/assistant/generations/${encodeURIComponent(id)}/cancel`, { session });
+  }
+}

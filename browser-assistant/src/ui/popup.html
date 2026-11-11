@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Local assistant</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <span id="dot" class="dot" aria-hidden="true"></span>
+  <span id="status" role="status">Connecting…</span>
+  <button id="settings" type="button" title="Settings" aria-label="Settings">⚙︎</button>
+</header>
+<div id="metrics"></div>
+<div id="problem" class="bad" role="alert" hidden></div>
+<div id="update" class="update" role="status" hidden></div>
+<div id="main" hidden>
+  <section aria-label="Model">
+    <label for="model">Model — the default for every client on this Mac</label>
+    <select id="model"></select>
+    <div id="controls"></div>
+    <div id="note" role="alert"></div>
+  </section>
+  <section aria-label="Ask about this page">
+    <div id="page" title="The page the question is about"></div>
+    <textarea id="question" rows="2" placeholder="Ask about this page — or leave empty to summarize it"
+              aria-label="Question about this page"></textarea>
+    <div class="row">
+      <button id="ask" type="button" class="primary">Ask</button>
+      <button type="button" data-task="summarize">Summarize</button>
+      <button type="button" data-task="key_points">Key points</button>
+      <button type="button" data-task="explain">Explain</button>
+      <span class="spacer"></span>
+      <button id="stop-generation" type="button" class="danger" hidden title="Stop this answer only">Stop generation</button>
+    </div>
+    <div class="row"><label style="margin:0"><input id="thinking" type="checkbox"> Let the model reason first (slower)</label></div>
+  </section>
+  <section id="answer-slot" aria-label="Answer"></section>
+</div>
+<footer>
+  <span class="dim">Runs on this Mac. Nothing is sent to a cloud.</span><span class="spacer"></span>
+  <button id="copy" type="button" title="Copy the answer">Copy</button><span id="version"></span>
+</footer>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

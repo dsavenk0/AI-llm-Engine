@@ -35,3 +35,4 @@ node_modules/
 
 # built OCR helper (compiled by ./llm setup --ocr or build-app.sh)
 /bin/
+node_modules/

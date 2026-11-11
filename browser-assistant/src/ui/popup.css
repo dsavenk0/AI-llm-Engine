@@ -1,0 +1,18 @@
+body { width: 380px; padding: 12px; }
+header { display: flex; align-items: center; gap: 8px; }
+header #status { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--dim); }
+.dot.ok { background: var(--ok); } .dot.busy { background: var(--busy); } .dot.bad { background: var(--bad); }
+#metrics, #page, #version { color: var(--dim); font-size: 11px; }
+#metrics { min-height: 16px; margin: 2px 0 8px 17px; }
+#problem { margin: 10px 0; }
+.update { margin: 8px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--busy); font-size: 12px; overflow-wrap: anywhere; }
+section { margin-top: 10px; }
+label { display: block; color: var(--dim); font-size: 11px; margin-bottom: 3px; }
+#controls, .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+#note { color: var(--bad); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+#note button { margin-left: 4px; }
+textarea { resize: vertical; min-height: 44px; }
+#page { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 4px; }
+.spacer { flex: 1; }
+footer { display: flex; align-items: center; gap: 8px; margin-top: 10px; }

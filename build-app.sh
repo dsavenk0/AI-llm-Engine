@@ -39,7 +39,21 @@ swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$APP/Contents/Resources/llm/
 
 echo "▸ Bundling engine + CLI…"
 for f in llm llm.py agent.py requirements.txt LICENSE NOTICE; do cp "$ROOT/$f" "$APP/Contents/Resources/llm/"; done
-for d in engine harness ui locales third_party; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
+for d in engine harness ui locales third_party model_lab assistant; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
+# The browser extension ships built, so a Mac without Node.js can still install it (./llm assistant setup
+# copies it to Application Support, and copies it again when a later build of this app brings a newer one).
+if [ -f "$ROOT/browser-assistant/package.json" ] && command -v npm >/dev/null 2>&1; then
+  echo "▸ Browser extension…"
+  if (cd "$ROOT/browser-assistant" && npm install --no-audit --no-fund >/dev/null 2>&1 && npm run -s build >/dev/null); then
+    mkdir -p "$APP/Contents/Resources/llm/browser-assistant"
+    ditto "$ROOT/browser-assistant/dist/safari" "$APP/Contents/Resources/llm/browser-assistant/dist/safari"
+    ditto "$ROOT/browser-assistant/dist/chromium" "$APP/Contents/Resources/llm/browser-assistant/dist/chromium"
+  else
+    echo "  (the extension did not build — the app is made without it)"
+  fi
+else
+  echo "▸ Browser extension: skipped (Node.js is not installed)"
+fi
 find "$APP/Contents/Resources/llm" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 cat > "$APP/Contents/Info.plist" <<PLIST

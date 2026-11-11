@@ -1,0 +1,6 @@
+.panel { width: 360px; max-width: calc(100vw - 32px); padding: 10px 12px 12px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg); box-shadow: 0 8px 30px rgba(0,0,0,.25);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; text-align: left; }
+.bar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.bar .title { flex: 1; font-weight: 600; }
+.answer { border-top: 1px solid var(--line); max-height: 50vh; }

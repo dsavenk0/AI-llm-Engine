@@ -1,0 +1,17 @@
+{
+  "name": "ai-llm-engine-browser-assistant",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Safari-first browser assistant for the local AI-llm-Engine",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "tsc --noEmit -p .",
+    "test": "node build.mjs --tests && node --test \"dist/tests/*.test.mjs\""
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "@types/node": "22.15.3"
+  }
+}

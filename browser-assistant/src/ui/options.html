@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Local assistant — settings</title>
+<link rel="stylesheet" href="popup.css">
+<style>body { width: auto; max-width: 560px; padding: 20px; } p, li { color: var(--dim); } code { color: var(--fg); }</style>
+</head>
+<body>
+<h2>Connect to the local engine</h2>
+<ol>
+  <li>Start the assistant service once: <code>./llm assistant install</code> — or LLMBar ▸ Tools ▸ Browser Assistant.</li>
+  <li>Copy the pairing token: <code>./llm assistant token</code> (it is put on the clipboard).</li>
+  <li>Paste it below and press Connect.</li>
+</ol>
+<section>
+  <label for="service">Service address (this Mac only)</label>
+  <input id="service" type="text" spellcheck="false" autocomplete="off">
+</section>
+<section>
+  <label for="token">Pairing token</label>
+  <input id="token" type="password" spellcheck="false" autocomplete="off">
+</section>
+<div class="row">
+  <button id="save" type="button" class="primary">Connect</button>
+  <button id="forget" type="button">Remove token</button>
+</div>
+<p id="result" role="status"></p>
+<p>The token stays in this browser's extension storage. It lets the extension talk to the local model and start
+or stop the engine — nothing else on your Mac. Pages you visit never see it.</p>
+<script type="module" src="options.js"></script>
+</body>
+</html>

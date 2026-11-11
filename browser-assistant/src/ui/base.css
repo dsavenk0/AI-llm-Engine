@@ -1,0 +1,27 @@
+:root { color-scheme: light dark; --fg: #1d1d1f; --dim: #6e6e73; --bg: #ffffff; --line: #d2d2d7; --accent: #0071e3;
+  --bad: #c9302c; --ok: #1f9d55; --busy: #c98a00; --field: #f5f5f7; }
+@media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --dim: #a1a1a6; --bg: #1c1c1e; --line: #3a3a3c;
+  --accent: #2997ff; --bad: #ff6961; --ok: #30d158; --busy: #ffd60a; --field: #2c2c2e; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; color: var(--fg);
+  background: var(--bg); }
+button, select, textarea, input { font: inherit; color: inherit; }
+button { border: 1px solid var(--line); background: var(--field); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px; }
+select, textarea, input[type=text], input[type=password] { width: 100%; border: 1px solid var(--line);
+  background: var(--field); border-radius: 6px; padding: 5px 7px; }
+.dim { color: var(--dim); }
+.bad { color: var(--bad); }
+.ok { color: var(--ok); }
+.answer { border-top: 1px solid var(--line); padding-top: 8px; max-height: 260px; overflow: auto; }
+.answer .shared { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
+.answer .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.answer .think { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+.answer .think-body { white-space: pre-wrap; max-height: 90px; overflow: auto; }
+.answer .note { color: var(--dim); font-size: 11px; margin-top: 6px; }
+.answer .note.bad { color: var(--bad); font-size: 12px; }

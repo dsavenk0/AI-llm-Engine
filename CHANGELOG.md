@@ -5,6 +5,16 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **Browser Assistant (Safari, optional).** An extension that asks the model on your Mac about the page you
+  are reading — a question, a summary, or Explain / Translate / Rewrite on selected text — and controls the
+  model from the browser: pick it, load it, unload it, stop an answer, with LLMBar and the terminal closed.
+  It reads a page only when you ask, says how much of it was sent, and nothing leaves the machine. Install
+  it from LLMBar ▸ Tools ▸ Browser Assistant or `./llm assistant setup`. For now Safari loads it as a
+  temporary extension (it has to be added again after Safari restarts) — a permanent install needs a signed
+  app. See [docs/safari-assistant/README.md](docs/safari-assistant/README.md). Not yet tried in a browser
+  by its author: the service and the extension's logic are tested, Safari itself was not driven.
+- **`POST /v1/engine/sleep` and `/v1/engine/wake`**: unload the model's weights without stopping the engine,
+  and load them again — refused while other requests are in flight unless forced.
 - **Chat and voice understand a plain request for a picture or to be read aloud, without a tag.** `./llm chat`
   offers the model `generate_image`/`speak` tool calls once the matching backend (mflux/Kokoro) is installed,
   and `/draw <prompt>` / `/speak <text>` do the same directly, offering to install the backend first if it

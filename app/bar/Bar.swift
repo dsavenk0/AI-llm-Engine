@@ -1814,9 +1814,18 @@ struct ToolsTab: View {
                 tool("speedometer", L("Benchmarks", "Бенчмарки"), L("Compare with the baseline · stop the engine first", "Сравнение с базой · сначала остановите движок")) { CLI.terminal("./llm perf") }
                 tool("terminal", L("Terminal menu", "Меню в Терминале"), "./llm") { CLI.terminal("./llm") }
                 tool("flask", L("Model Lab", "Лаборатория модели"),
-                     L("Inspect tensors, capture activations — no weight editing yet",
-                       "Инспекция тензоров, захват активаций — редактирование весов пока нет")) {
+                     L("Inspect tensors, capture activations, weight patches",
+                       "Инспекция тензоров, захват активаций, патчи весов")) {
                     CLI.terminal("./llm lab")
+                }
+                // Optional and independent of this app: the Safari extension talks to its own small service,
+                // so it keeps working with LLMBar closed. This only installs what is missing (the service,
+                // the extension's files, the token on the clipboard) and shows the steps Safari reserves
+                // for the user — an extension cannot be enabled, or given a site, on anyone's behalf.
+                tool("safari", L("Browser Assistant", "Браузерный ассистент"),
+                     L("Safari extension: ask the local model about the page · installs if missing",
+                       "Расширение Safari: вопросы локальной модели о странице · установит, если нет")) {
+                    CLI.terminal("./llm assistant setup --reveal; ./llm assistant status")
                 }
             }
         }
