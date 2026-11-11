@@ -106,6 +106,7 @@ class CompatEngine:
         self.speculative = False         # a subclass with a trimmable cache turns it on
         self.draft_levels, self.ngram_min = tuple(sorted({min(l, 15) for l in DRAFT_LEVELS})), 2
         self.store = None                # no SSD prefix cache on this backend
+        self.moe = None                  # the expert pools of a streamed Mixture-of-Experts model (moe_stream.py)
         self.wired_limit_advice_mb = None
         mx.set_cache_limit(int(cache_limit_mb) * 2**20)
 
@@ -171,16 +172,45 @@ class CompatEngine:
     def _load(self):
         from mlx_lm import load
         from mlx.utils import tree_flatten
+        from . import moe_stream
         t0 = time.time()
-        self.model, self.tok = load(self.path)
+        streamed = ""
+        plan = None
+        if os.path.isdir(self.path):
+            try:
+                plan = moe_stream.plan(self.path, self.config, self.mem_limit, memory.TOTAL)
+            except moe_stream.StreamError as e:
+                raise MemoryLimitError(str(e)) from None
+        if plan:
+            try:
+                self.model, self.tok, self.moe = moe_stream.load(self.path, plan, self.log)
+                streamed = (f", experts streamed from disk: {plan['capacity']} of {plan['experts']} per layer "
+                            f"resident ({plan['resident_gb']:.1f} of {plan['total_gb']:.1f} GiB)")
+                if plan["thrashing"]:
+                    self.log(f"moe: a pool of {plan['capacity']} is smaller than the {plan['top_k']} experts one "
+                             f"token uses — every token will read from disk")
+            except moe_stream.StreamError as e:
+                self.log(f"moe: not streaming — {e}; loading the whole model")
+                plan = None
+        if not plan:
+            self.model, self.tok = load(self.path)
         self.model_bytes = sum(v.nbytes for _, v in tree_flatten(self.model.parameters()))
+        if self.moe:
+            self.model_bytes += sum(p.nbytes for p in self.moe.pools.values())
         self.decoder = _Decoder(self.tok)
         self.log(f"loaded {os.path.basename(self.path.rstrip('/'))}: {self.model_bytes / GiB:.2f} GiB, "
-                 f"{time.time() - t0:.1f}s")
+                 f"{time.time() - t0:.1f}s{streamed}")
+
+    def moe_stats(self):
+        """Hit rate and traffic of the expert pools while a MoE model streams its experts, else None."""
+        return self.moe.stats() if self.moe else None
 
     def sleep(self):
         if self.sleeping:
             return
+        if getattr(self, "moe", None):
+            self.moe.close()                 # saves the hot set, so the next load starts warm
+            self.moe = None
         self.model, self.cache, self.cache_tokens = None, None, []
         gc.collect()
         mx.clear_cache()
@@ -197,7 +227,8 @@ class CompatEngine:
         self.log(f"wake: model reloaded in {time.time() - t0:.1f}s")
 
     def persist_prefix(self):
-        pass
+        if getattr(self, "moe", None):
+            self.moe.save_usage()
 
     # ───────────────────────── prompt ─────────────────────────
     def _template_source(self):

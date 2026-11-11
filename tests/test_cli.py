@@ -399,6 +399,46 @@ class TestStartReplacesAnotherModel(unittest.TestCase):
         self.assertIsNone(llm.pid_model(os.path.join(d, "absent")))
 
 
+class TestStreamableModels(unittest.TestCase):
+    """A Mixture-of-Experts model bigger than memory is listed as runnable, not as "won't fit"."""
+
+    def folder(self, experts=True, moe_cfg=True):
+        import struct
+        d = tempfile.mkdtemp()
+        header = {"model.embed.weight": {"dtype": "F16", "shape": [10, 10], "data_offsets": [0, 200]}}
+        n = 200
+        if experts:
+            for p in ("gate_proj", "up_proj", "down_proj"):
+                header[f"model.layers.0.mlp.switch_mlp.{p}.weight"] = {"dtype": "U32", "shape": [8, 4, 4],
+                                                                       "data_offsets": [n, n + 512]}
+                n += 512
+        raw = json.dumps(header).encode()
+        with open(os.path.join(d, "model.safetensors"), "wb") as f:
+            f.write(struct.pack("<Q", len(raw)) + raw + bytes(n))
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump({"model_type": "qwen3_moe", **({"num_experts": 8} if moe_cfg else {})}, f)
+        return d
+
+    def test_the_bytes_in_stacked_experts_are_read_from_the_headers(self):
+        d = self.folder()
+        self.assertAlmostEqual(llm.streamable_gb(d, ["model.safetensors"], {"num_experts": 8}), 3 * 512 / 2**30)
+        self.assertEqual(llm.streamable_gb(d, ["model.safetensors"], {"model_type": "llama"}), 0.0)   # not a MoE
+        self.assertEqual(llm.streamable_gb(self.folder(experts=False), ["model.safetensors"], {"num_experts": 8}), 0.0)
+        self.assertEqual(llm.streamable_gb(d, ["absent.safetensors"], {"num_experts": 8}), 0.0)
+
+    def test_only_a_moe_too_big_whole_is_listed_as_streaming(self):
+        coder = {"size": 46.0, "streamable": 44.0}                                       # Qwen3-Coder-Next 4-bit
+        with mock.patch.object(llm, "RAM_GB", 32):
+            self.assertTrue(llm.streams(coder))                                          # 13 GB always loaded + a quarter
+            self.assertIn("SSD", llm.fit(coder))
+            self.assertFalse(llm.streams({"size": 8.0, "streamable": 7.0}))              # fits whole: no need
+            self.assertFalse(llm.streams({"size": 46.0, "streamable": 0.0}))             # dense: cannot
+            self.assertIn("won't fit", llm.fit({"size": 46.0, "streamable": 0.0}))
+        with mock.patch.object(llm, "RAM_GB", 16):
+            self.assertFalse(llm.streams(coder))                                         # 15 GB needed, 12 usable
+            self.assertIn("won't fit", llm.fit(coder))
+            self.assertTrue(llm.streams({"size": 20.0, "streamable": 18.0}))             # a smaller MoE does
+
 class TestNextModel(unittest.TestCase):
     """What the widget's model name does: walk the favourites when there are two, else what is installed."""
 

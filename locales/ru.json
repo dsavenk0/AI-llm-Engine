@@ -407,5 +407,6 @@
   "  3. The extension's settings open: paste the token (already on the clipboard) and press Connect.": "  3. Откроются настройки расширения: вставьте токен (он уже в буфере обмена) и нажмите Connect.",
   "Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. A permanent install needs a signed app; see docs/safari-assistant/README.md.": "Safari забывает временное расширение при выходе — повторите шаг 2 после перезапуска Safari. Постоянная установка требует подписанного приложения; см. docs/safari-assistant/README.md.",
   "No other model to switch to.": "Нет другой модели для переключения.",
-  "Another model is loaded or loading ({name}) — stopping it to start the selected one.": "Загружена или загружается другая модель ({name}) — останавливаю её, чтобы запустить выбранную."
+  "Another model is loaded or loading ({name}) — stopping it to start the selected one.": "Загружена или загружается другая модель ({name}) — останавливаю её, чтобы запустить выбранную.",
+  "⇄ streams experts from the SSD": "⇄ эксперты читаются с SSD"
 }

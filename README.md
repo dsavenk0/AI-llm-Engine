@@ -672,6 +672,34 @@ every one at load time (`stream_experts`, on by default — `LLM_GGUF_STREAM_EXP
 cache holds only the experts a token actually routes to, useful when the full set of experts would not
 otherwise fit comfortably in memory.
 
+**MLX Mixture-of-Experts models bigger than memory** run with their experts on the SSD. When such a model
+(Qwen3-MoE, Mixtral, OLMoE, DeepSeek, GLM, Granite-MoE… — anything mlx-lm builds from `SwitchGLU`) would not
+fit under the RAM limit, the engine loads the always-needed part — attention, routers, embeddings, a few
+hundred MB for a 7B-total model — and gives each layer a pool of experts, filled from the checkpoint file as
+the router asks. It is exact: the experts a token routes to are made resident before they are used, so the
+answers are the same as with everything in memory; only the speed differs. A miss is three positional reads at
+known offsets, in parallel; the pool evicts the least-used expert, and the hot set is saved between runs so the
+next start is warm. `./llm models` shows such a model as “⇄ streams experts from the SSD” instead of “won't fit”.
+`LLM_MOE_STREAM=auto|on|off` (default auto: only when the model does not fit), `LLM_MOE_CACHE=<experts per
+layer>`, `LLM_MOE_DIRECT=1` (read around the file cache). `/health` reports the pool's hit rate and traffic.
+
+What it costs, measured on OLMoE-1B-7B-4bit (64 experts per layer, 8 per token — the *hard* case for this
+technique: no shared expert, flat routing), M5, reads around the file cache, `tests/bench_moe.py`:
+
+| Experts resident per layer | Memory | Decode | Pool hit rate | Read per token |
+|---|---|---|---|---|
+| all (no streaming) | 3.6 GB | 108 – 126 tok/s | — | — |
+| 64 of 64 | 3.6 GB | 77 – 95 tok/s | 100 % | 0 |
+| 32 of 64 | 1.9 GB | 15 – 18 tok/s | 77 % | ~100 MB |
+| 16 of 64 | 1.1 GB | 8 – 9 tok/s | 53 % | ~220 MB |
+| 8 of 64 | 0.7 GB | ~7 tok/s | 36 % | ~300 MB |
+
+It is a way to run a model that does not otherwise run, not a way to run it fast: once experts come from the
+disk, speed is set by the hit rate and the SSD (~2 GB/s here). It pays where routing is concentrated, there is a
+shared expert and many experts per token's pick — the models that are far larger than memory in the first place.
+Not done: prefetching the next layer's experts while this one computes, and per-expert files with scales for
+architectures whose mlx-lm loader does not stack them (those load whole, with a note in the log).
+
 Not supported: non-MLX, non-GGUF weights, 1-bit affine JANG. Speculative decoding with a trained drafter (DFlash,
 DSpark) is not implemented: measured, the vendor's own numbers say it does not pay on Apple Silicon (≈1.2× at best on
 an M5 Max, slower for the 1-bit model), and the published Q4_1 drafter needs the vendor's fork to load; the engine

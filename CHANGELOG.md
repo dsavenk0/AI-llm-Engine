@@ -92,6 +92,13 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 - **Chats on GGUF models (own decoder) and mlx-lm models answered 500.** The server passed the request's
   JSON format to a backend that did not accept the argument. Fixed; `response_format` now constrains the
   answer on those backends too.
+- **MLX Mixture-of-Experts models bigger than memory run with their experts on the SSD.** Exact — the same
+  answers as with everything loaded — with a per-layer pool of experts filled from the checkpoint as the router
+  asks, parallel positional reads, least-used eviction and a hot set saved between runs. On by itself when a MoE
+  model does not fit (`LLM_MOE_STREAM`, `LLM_MOE_CACHE`, `LLM_MOE_DIRECT`); `./llm models` lists it as
+  "streams experts from the SSD", `/health` reports the pool's hit rate. It makes such a model runnable, not
+  fast: on OLMoE-1B-7B it gives 15 – 18 tok/s at half the experts resident (against 108 – 126 with all), set by
+  the hit rate and the SSD. Both ways MLX stores experts are read — stacked, and one tensor per expert.
 - **Long conversations slowed down far more than they should on mlx-community checkpoints.** These store
   their quantization scales as bfloat16, which made half of the KV cache float32 — twice the size, and
   converted on every token. It is float16 throughout now: on Qwen3.5-0.8B-4bit decoding is about 1.3× faster

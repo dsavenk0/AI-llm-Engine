@@ -27,6 +27,7 @@ OPTIONAL = (
     "generate_batch",     # several requests in one forward pass per step (--batch-window)
     "parser_markers",     # the reasoning / tool-call tags of this model's template
     "parse_tool_calls",   # a model-specific tool-call parser; the server's own is the fallback
+    "moe_stats",          # expert-pool hit rate and traffic, while a MoE model streams its experts
 )
 
 # the keys every generate() ends with; a backend that cannot fill one reports None, never omits it

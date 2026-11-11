@@ -143,15 +143,21 @@ class GGUFServer:
              "--context", "512", "--max-tokens", "16", "--backend", "gguf", *extra],
             cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT)
         deadline = time.time() + 120
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError("server exited:\n" + open(self.log.name).read()[-2000:])
-            try:
-                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=1).read()
-                return
-            except OSError:
-                time.sleep(0.3)
-        raise RuntimeError("server did not come up")
+        try:
+            while time.time() < deadline:
+                if self.proc.poll() is not None:
+                    raise RuntimeError("server exited:\n" + open(self.log.name).read()[-2000:])
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=1).read()
+                    return
+                except urllib.error.HTTPError as e:      # answering, but with an error: say which
+                    raise RuntimeError(f"/health answered {e.code}:\n" + open(self.log.name).read()[-1500:]) from None
+                except OSError:
+                    time.sleep(0.3)
+            raise RuntimeError("server did not come up")
+        except BaseException:
+            self.stop()                                    # a server that failed to start must not be left running
+            raise
 
     def post(self, path, body):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=json.dumps(body).encode(),

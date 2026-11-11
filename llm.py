@@ -248,6 +248,29 @@ def mlxlm_installed():
     return bool(sp)
 
 
+def streamable_gb(path, files, cfgj):
+    """GiB held in the stacked expert tensors of a Mixture-of-Experts MLX checkpoint — what the engine can leave
+    on the SSD (engine/moe_stream.py) — else 0. Reads only the safetensors headers."""
+    text = cfgj.get("text_config", cfgj)
+    if not (text.get("num_experts") or text.get("n_routed_experts") or text.get("num_local_experts")):
+        return 0.0
+    total = 0
+    for f in files:
+        try:
+            with open(os.path.join(path, f), "rb") as fh:
+                n = int.from_bytes(fh.read(8), "little")
+                header = json.loads(fh.read(n))
+        except (OSError, ValueError):
+            return 0.0
+        for name, t in header.items():
+            if name == "__metadata__" or "shared" in name:
+                continue
+            if (len(t.get("shape", ())) >= 3 and ".switch_mlp." in name) or re.search(r"\.experts\.\d+\.", name):
+                a, b = t["data_offsets"]
+                total += b - a
+    return total / 2**30
+
+
 def inspect_model(path):
     cfgj = _json(os.path.join(path, "config.json"))
     if not cfgj:
@@ -294,7 +317,8 @@ def inspect_model(path):
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
             "efforts": efforts, "hadamard": bool(cfgj.get("hadamard") or jang.get("hadamard")),
             "tool_calls": "<tool_call>" in tpl or "tools" in tpl,
-            "supported": not problems, "problems": problems}
+            "supported": not problems, "problems": problems,
+            "streamable": streamable_gb(path, weights, cfgj) if route == "mlxlm" else 0.0}
 
 
 def scan_models(cfg):
@@ -477,10 +501,18 @@ def served_name(m):
     return re.sub(r"[^a-z0-9._-]+", "-", m["name"].lower()).strip("-")
 
 
+def streams(m):
+    """A Mixture-of-Experts model too big for memory whole, that the engine can run with its experts on the SSD:
+    the always-loaded part plus a quarter of the experts (a pool that keeps the hit rate reasonable) fits."""
+    s = m.get("streamable") or 0
+    return s > 0 and m["size"] + 2.0 > RAM_GB * 0.75 and m["size"] - s * 0.75 + 2.0 <= RAM_GB * 0.75
+
+
 def fit(m):
     need, limit = m["size"] + 2.0, RAM_GB * 0.75
     if need <= limit - 1: return G(T("✓ fits"))
     if need <= limit + 0.5: return Y(T("~ tight"))
+    if streams(m): return Y(T("⇄ streams experts from the SSD"))
     return R(T("✗ won't fit"))
 
 

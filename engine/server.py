@@ -588,6 +588,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "system_ram_used": round(__import__("engine.memory", fromlist=["x"]).used_fraction(), 3),
                 "mem_limit": ENGINE.mem_limit,
                 "kernels": _active_kernels(),
+                "moe_stream": ENGINE.moe_stats() if protocol.can(ENGINE, "moe_stats") else None,
                 "wired_limit_advice_mb": ENGINE.wired_limit_advice_mb,
                 "memory_breakdown": ENGINE.memory_breakdown(),
                 "cached_tokens": len(ENGINE.cache_tokens),
