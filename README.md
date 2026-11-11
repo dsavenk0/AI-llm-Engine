@@ -332,7 +332,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm free                 quit vMLX / oMLX / Ollama to free memory
 ./llm steer [repo|folder]   apply an activation edit (and fetch its base model) · `steer off`
 ./llm test                 unit + integration tests
-./llm perf [--save]        performance suite vs the saved baseline
+./llm perf [--save] [--long-context]   performance suite vs the saved baseline (64K/128K prefill, opt-in)
 ./llm eval [--save]        accuracy suite (math / code / sanity) vs the saved baseline
 ./llm calibrate [--apply]  find the largest context that actually prefills on this Mac
 ```

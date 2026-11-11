@@ -12,6 +12,10 @@ against this machine's measured bandwidth.
 
     .venv/bin/python tests/context_decode.py [model path] [max context]
 
+64K/128K are in SIZES below but excluded unless [max context] asks for them (default here and in
+./llm calibrate's own usage both stay at 32768) — a run at those sizes needs much more free memory for
+the KV cache; check ./llm calibrate first on a constrained machine.
+
 `floor` is (weights + cache) / measured bandwidth: what the bus alone owes at that context. `of floor` is how
 much of that the engine actually achieves — above 100 % would mean the step is faster than streaming both
 reads once, which the KV cache can manage when it is small enough to stay in cache hierarchies.
@@ -47,7 +51,7 @@ import mlx.core as mx                                           # noqa: E402
 from engine.generate import Engine                              # noqa: E402
 from engine.model import Positions                              # noqa: E402
 
-SIZES = (512, 2048, 8192, 16384, 32768)
+SIZES = (512, 2048, 8192, 16384, 32768, 65536, 131072)
 
 
 def bandwidth_gbs():

@@ -4,7 +4,8 @@
     .venv/bin/python -m tests.perf --save                 # measure and store as the new baseline
     .venv/bin/python -m tests.perf --tolerance 0.1        # fail on >10 % regressions (default 0.15)
     .venv/bin/python -m tests.perf --model A --model B    # compare several models in one run
-    ./llm perf [--save] [--model PATH ...]
+    .venv/bin/python -m tests.perf --long-context         # also measure prefill at 64K/128K (slow, heavy)
+    ./llm perf [--save] [--model PATH ...] [--long-context]
 
 Uses the model from ENGINE_TEST_MODEL or the one selected in ./llm, unless --model is given
 (repeat it to benchmark several models — e.g. a clean Qwen3.5 checkpoint, Bonsai JANG, and a
@@ -36,6 +37,12 @@ BASELINE = os.path.join(ROOT, "tests", "perf_baseline.json")
 
 # name -> (unit, direction): +1 higher is better, -1 lower is better
 PREFILL_SIZES = [("short", 128), ("medium", 1024), ("long", 4096)]
+# Opt-in only (`--long-context`): no benchmark tool in this repo had ever measured prefill at 64K/128K context
+# before this — `tests/calibrate.py` only answers "does it fit," not "how fast, how much memory" — but a run
+# at these sizes can take much longer and use much more memory than the default three, so it never runs
+# unless explicitly asked for. Check `./llm calibrate` first on a memory-constrained machine; a size that
+# does not fit is skipped (MemoryLimitError, via `guarded()` below), not crashed.
+LONG_PREFILL_SIZES = [("xlong", 65536), ("xxlong", 131072)]
 METRIC_UNITS = {
     "load_s": ("s", -1),
     "decode_step_ms": ("ms", -1),
@@ -97,7 +104,7 @@ def prompt_of_size(eng, target_tokens):
     return BASE_PARA * reps
 
 
-def measure_one(path):
+def measure_one(path, prefill_sizes=PREFILL_SIZES):
     import mlx.core as mx
     from engine import memory
     from engine.generate import Engine, MemoryLimitError
@@ -109,7 +116,7 @@ def measure_one(path):
         print("warning: other apps already use a lot of memory; numbers may be throttled or skipped")
 
     t0 = time.time()
-    eng = Engine(path, vision=False, max_context=max(8192, PREFILL_SIZES[-1][1] * 2), max_tokens=512,
+    eng = Engine(path, vision=False, max_context=max(8192, prefill_sizes[-1][1] * 2), max_tokens=512,
                 ptq1=True, log=lambda *a: None)
     res = {"load_s": round(time.time() - t0, 2)}
     model = eng.model
@@ -143,7 +150,7 @@ def measure_one(path):
 
     # prefill throughput across short/medium/long prompts — see the module docstring for why
     # a single prompt size isn't enough to compare prefill speed between engines or models.
-    for label, size in PREFILL_SIZES:
+    for label, size in prefill_sizes:
         prompt = prompt_of_size(eng, size)
         msgs = [{"role": "user", "content": prompt + "\nSummarize in one sentence."}]
         def prefill_run(msgs=msgs, label=label):
@@ -178,7 +185,15 @@ def main():
                          "default: ENGINE_TEST_MODEL or the model selected in ./llm")
     ap.add_argument("--save", action="store_true", help="store results as the new baseline")
     ap.add_argument("--tolerance", type=float, default=0.15, help="allowed relative regression (default 0.15)")
+    ap.add_argument("--long-context", action="store_true",
+                    help="also measure prefill at 64K/128K tokens (slow, memory-heavy — run ./llm calibrate "
+                         "first on a constrained machine; a size that does not fit is skipped, not crashed)")
     args = ap.parse_args()
+
+    prefill_sizes = PREFILL_SIZES + LONG_PREFILL_SIZES if args.long_context else PREFILL_SIZES
+    metric_units = dict(METRIC_UNITS)
+    if args.long_context:
+        metric_units.update({f"prefill_tps_{label}": ("tok/s", +1) for label, _ in LONG_PREFILL_SIZES})
 
     paths = model_paths(args)
     base_all = {}
@@ -191,11 +206,11 @@ def main():
         key = model_key(path)
         print(f"\n=== {key} ===")
         SYS_PEAK[0] = 0.0
-        res = measure_one(path)
+        res = measure_one(path, prefill_sizes)
         results[key] = res
         base = base_all.get(key, {})
         print(f"\n{'metric':20s} {'value':>10s} {'baseline':>10s} {'change':>9s}")
-        for k, (unit, sign) in METRIC_UNITS.items():
+        for k, (unit, sign) in metric_units.items():
             v, b = res.get(k), base.get(k)
             change, flag = "", ""
             if isinstance(v, (int, float)) and isinstance(b, (int, float)) and b:

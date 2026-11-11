@@ -22,6 +22,8 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   actually routes to are decoded, into a small LRU-cached pool, instead of every expert at load time. A
   prompt that would route to more distinct experts at once than the cache holds is processed in smaller
   token groups automatically, rather than refused.
+- **`./llm perf --long-context`**: also measures prefill throughput at 64K/128K tokens (off by default — a
+  size that does not fit on the machine is reported as skipped, not crashed).
 - **`./llm conduct board`**: the Conductor's subtask routing (who delegated what to which model, and whether
   it worked) is now written to an append-only log as a run goes, not only printed to the terminal and lost —
   inspectable during a run or after it finishes.
