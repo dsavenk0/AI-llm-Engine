@@ -133,6 +133,74 @@ class FakeStream:
     def __iter__(self): return iter(self.lines)
 
 
+class FakeToolCallStream:
+    """Always answers with a tool call, never a final text — used to drive chat()'s tool loop past
+    MAX_CHAT_TOOL_TURNS so the "too many tool calls" failure path actually runs."""
+
+    def __init__(self, call_id):
+        ev = {"choices": [{"delta": {"tool_calls": [
+            {"id": call_id, "type": "function",
+             "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "x"})}}]}}]}
+        self.lines = [b"data: " + json.dumps(ev).encode(), b"data: [DONE]"]
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def __iter__(self): return iter(self.lines)
+
+
+class TestChatToolLoop(unittest.TestCase):
+    """A regression test for a real bug a code review found: before the fix, a turn that failed (too many
+    tool calls, or an exception) after *earlier successful* tool rounds in the very same turn only popped
+    the single most recent message — leaving a dangling assistant `tool_calls` message with no matching
+    tool reply in `msgs`, which corrupts every later request in the chat until `/clear`."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cwd = "/work/proj"
+
+    def test_a_failed_turn_discards_itself_entirely_not_one_message(self):
+        from harness import chats
+        sent = []
+
+        def fake_input(prompt="", _n=iter(["draw something", "hello again"])):
+            try:
+                return next(_n)
+            except StopIteration:
+                raise EOFError
+
+        def fake_urlopen(req, timeout=None):
+            body = json.loads(req.data)
+            sent.append([dict(msg) for msg in body["messages"]])   # a snapshot: msgs is mutated afterward
+            # MAX_CHAT_TOOL_TURNS + 1 tool-call replies exhaust the first turn's budget and fail it; the
+            # second turn (after the first is fully discarded) gets an ordinary text answer
+            return (FakeToolCallStream(f"c{len(sent)}") if len(sent) <= llm.MAX_CHAT_TOOL_TURNS + 1
+                    else FakeStream("ok"))
+
+        m = {"name": "m", "thinking": False, "efforts": []}
+        buf = io.StringIO()
+        from engine import audio
+        with mock.patch.object(llm, "current_model", return_value=m), \
+                mock.patch.object(llm, "health", return_value={"images": True}), \
+                mock.patch.object(audio, "kokoro_available", return_value=False), \
+                mock.patch.object(llm, "_tool_generate_image", return_value="saved: x.png"), \
+                mock.patch.object(llm, "mcfg", return_value={"effort": None}), \
+                mock.patch.object(llm, "think_enabled", return_value=False), \
+                mock.patch.object(llm, "served_name", return_value="m"), \
+                mock.patch.object(chats, "default_dir", return_value=self.dir), \
+                mock.patch("builtins.input", fake_input), mock.patch("urllib.request.urlopen", fake_urlopen), \
+                mock.patch("os.getcwd", return_value=self.cwd), contextlib.redirect_stdout(buf):
+            llm.chat({"port": 1, "api_key": ""})
+
+        # the first turn made MAX_CHAT_TOOL_TURNS + 1 requests (it never got a final answer); the second
+        # turn's one request must show no trace of it — no dangling tool_calls message anywhere, and the
+        # conversation must still open with the second turn's own question, not an empty/corrupted history
+        self.assertEqual(len(sent), llm.MAX_CHAT_TOOL_TURNS + 2)
+        last = sent[-1]
+        self.assertFalse(any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in last))
+        self.assertEqual([msg["role"] for msg in last], ["user"])
+        self.assertEqual(last[0]["content"], "hello again")
+
+
 class TestChatCommands(unittest.TestCase):
     """`llm chat` driven by scripted input against a fake streaming reply."""
 
@@ -152,7 +220,12 @@ class TestChatCommands(unittest.TestCase):
 
         m = {"name": "m", "thinking": False, "efforts": []}
         buf = io.StringIO()
-        with mock.patch.object(llm, "current_model", return_value=m), mock.patch.object(llm, "health", return_value=True), \
+        from engine import audio
+        # health() always returns a dict (or None) in real use — chat() reads hc.get("images") from it, so a
+        # bare `True` here (the old mock) doesn't match the real contract and crashes with AttributeError
+        with mock.patch.object(llm, "current_model", return_value=m), \
+                mock.patch.object(llm, "health", return_value={"images": False}), \
+                mock.patch.object(audio, "kokoro_available", return_value=False), \
                 mock.patch.object(llm, "mcfg", return_value={"effort": None}), \
                 mock.patch.object(llm, "think_enabled", return_value=False), \
                 mock.patch.object(llm, "served_name", return_value="m"), \

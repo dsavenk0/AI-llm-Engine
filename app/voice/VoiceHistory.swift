@@ -241,3 +241,52 @@ enum WebLookup {
         return out.count > maxChars ? String(out.prefix(maxChars)) + " …" : out
     }
 }
+
+/// A spoken or typed utterance that is itself a control command — "stop", "new conversation" — acted on
+/// directly instead of being sent to the model as a question. Recognised only as the *whole* utterance (never
+/// a word found inside a longer sentence: "a nonstop flight" is a question, not a stop command), so this is
+/// safe to check before anything reaches the model, matching the project's rule that a transcript never
+/// triggers a tool just because a trigger word appears somewhere in it.
+enum VoiceCommand: Equatable {
+    case stop
+    case newConversation
+
+    private static let stopWords: Set<String> = [
+        "stop", "cancel", "stop it", "stop that", "stop generating", "never mind", "that's enough",
+        "стоп", "отмена", "отмени", "хватит", "остановись", "прекрати", "достаточно",
+    ]
+    private static let newWords: Set<String> = [
+        "new conversation", "new chat", "start over", "clear chat", "clear the chat",
+        "новый чат", "новая беседа", "начни заново", "очисти чат", "очисти историю",
+    ]
+
+    static func parse(_ text: String) -> VoiceCommand? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?,"))
+        if stopWords.contains(t) { return .stop }
+        if newWords.contains(t) { return .newConversation }
+        return nil
+    }
+}
+
+/// What the model answered when asked whether the message asks for a picture: the drawing prompt, or nil
+/// for "no". Same shape as `WebLookup.query` (one line, NO or a short reply) but with a generous length cap
+/// suited to a drawing prompt instead of WebLookup's 120-character "it started answering" guard, which would
+/// cut off an ordinary, legitimate prompt (subject, style, light, composition all named).
+enum ImagePrompt {
+    static func parse(_ reply: String) -> String? {
+        guard var line = reply.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) })
+            .first(where: { !$0.isEmpty }) else { return nil }
+        let junk = CharacterSet(charactersIn: "\"'`«»“”*").union(.whitespaces)
+        line = line.trimmingCharacters(in: junk)
+        for prefix in ["prompt:", "drawing prompt:", "image prompt:", "промпт:"] where line.lowercased().hasPrefix(prefix) {
+            line = String(line.dropFirst(prefix.count))
+            break
+        }
+        line = line.trimmingCharacters(in: junk)
+        let bare = line.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".!"))
+        if bare.isEmpty || bare == "no" || bare == "нет" { return nil }
+        if line.count > 300 { return nil }          // not a drawing prompt any more — it started a real answer
+        return line
+    }
+}

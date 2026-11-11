@@ -5,6 +5,12 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **Chat and voice understand a plain request for a picture or to be read aloud, without a tag.** `./llm chat`
+  offers the model `generate_image`/`speak` tool calls once the matching backend (mflux/Kokoro) is installed,
+  and `/draw <prompt>` / `/speak <text>` do the same directly, offering to install the backend first if it
+  is missing. In LLM Voice, asking for an image by voice draws one and shows it in the conversation; saying
+  "stop"/"cancel" or "new conversation" (English or Russian) as the *whole* thing you say acts on it directly
+  instead of being sent to the model — a stray word inside a real question is never mistaken for a command.
 - **Interrupted downloads stay visible in the Models panel**, independent of the current search box, until
   resumed to completion or removed — including one left over from a previous session, not only the current
   app launch.

@@ -511,6 +511,121 @@ class TestTranscribe(unittest.TestCase):
             self.assertEqual(w.getnframes(), 2400)
 
 
+class TestChatTools(unittest.TestCase):
+    """The plain chat's generate_image/speak tool calls (llm.py `chat`): the model, or /draw and /speak,
+    can reach the already-installed image and speech paths without a separate command."""
+
+    def test_generate_image_requires_a_prompt(self):
+        self.assertTrue(llm._tool_generate_image(cfg(), {}).startswith("error:"))
+
+    def test_generate_image_reports_a_failed_request_to_the_model(self):
+        from unittest import mock
+        with mock.patch.object(llm, "http_json", side_effect=OSError("no route to host")):
+            out = llm._tool_generate_image(cfg(), {"prompt": "a lighthouse"})
+        self.assertTrue(out.startswith("error:"))
+        self.assertIn("no route to host", out)
+
+    def test_generate_image_saves_the_png_and_tells_the_model_where(self):
+        from unittest import mock
+        import base64
+        png_bytes = b"\x89PNG\r\n\x1a\nfake"
+        fake_reply = {"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]}
+        tmp = tempfile.mkdtemp()
+        with mock.patch.object(llm, "http_json", return_value=fake_reply), \
+             mock.patch.object(llm, "DATA", tmp), \
+             mock.patch.object(llm.shutil, "which", return_value=None):          # no Preview window in a test
+            out = llm._tool_generate_image(cfg(), {"prompt": "a lighthouse", "size": "512x512"})
+        self.assertIn("saved as", out)
+        saved = [f for f in os.listdir(os.path.join(tmp, "images")) if f.endswith(".png")]
+        self.assertEqual(len(saved), 1)
+        with open(os.path.join(tmp, "images", saved[0]), "rb") as f:
+            self.assertEqual(f.read(), png_bytes)
+
+    def test_speak_requires_text(self):
+        self.assertTrue(llm._tool_speak({}).startswith("error:"))
+
+    def test_speak_without_kokoro_is_a_clear_error_to_the_model(self):
+        from unittest import mock
+        from engine import audio
+        with mock.patch.object(audio, "kokoro_available", lambda: False):
+            out = llm._tool_speak({"text": "hello"})
+        self.assertTrue(out.startswith("error:"))
+        self.assertIn("setup --audio", out)
+
+    def test_speak_plays_and_reports_success_to_the_model(self):
+        from unittest import mock
+        from engine import audio
+        with mock.patch.object(audio, "synthesize", return_value={"path": "/tmp/say.wav", "seconds": 1.2}), \
+             mock.patch.object(llm.shutil, "which", return_value=None):          # no afplay in a test
+            out = llm._tool_speak({"text": "hello"})
+        self.assertEqual(out, "The text was read aloud to the user.")
+
+    def _tool_names_offered(self, images, kokoro):
+        """Drives a real `chat()` turn against mocked /health + kokoro_available and returns the tool
+        names the first request actually carried — not just whether IMAGE_TOOL/SPEAK_TOOL look well-formed."""
+        import contextlib
+        import io
+        import tempfile as _tmp
+        from unittest import mock
+        from engine import audio
+        from harness import chats as store
+
+        sent = []
+
+        def fake_input(prompt="", _n=iter(["hi"])):
+            try:
+                return next(_n)
+            except StopIteration:
+                raise EOFError
+
+        def fake_urlopen(req, timeout=None):
+            body = json.loads(req.data)
+            sent.append(body.get("tools") or [])
+            ev = {"choices": [{"delta": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+            lines = [b"data: " + json.dumps(ev).encode(), b"data: [DONE]"]
+
+            class _Stream:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def __iter__(self): return iter(lines)
+            return _Stream()
+
+        m = {"name": "m", "thinking": False, "efforts": []}
+        with mock.patch.object(llm, "current_model", return_value=m), \
+                mock.patch.object(llm, "health", return_value={"images": images}), \
+                mock.patch.object(audio, "kokoro_available", return_value=kokoro), \
+                mock.patch.object(llm, "mcfg", return_value={"effort": None}), \
+                mock.patch.object(llm, "think_enabled", return_value=False), \
+                mock.patch.object(llm, "served_name", return_value="m"), \
+                mock.patch.object(store, "default_dir", return_value=_tmp.mkdtemp()), \
+                mock.patch("builtins.input", fake_input), mock.patch("urllib.request.urlopen", fake_urlopen), \
+                mock.patch("os.getcwd", return_value="/work/proj"), contextlib.redirect_stdout(io.StringIO()):
+            llm.chat({"port": 1, "api_key": ""})
+        return {t["function"]["name"] for t in sent[0]} if sent else set()
+
+    def test_chat_offers_the_tools_only_once_the_backend_is_ready(self):
+        """The schemas sent to the model mirror /health and the installed audio package — never offered,
+        and never silently dropped, by guesswork."""
+        self.assertEqual(self._tool_names_offered(images=True, kokoro=True), {"generate_image", "speak"})
+        self.assertEqual(self._tool_names_offered(images=False, kokoro=False), set())
+        self.assertEqual(self._tool_names_offered(images=True, kokoro=False), {"generate_image"})
+        self.assertEqual(self._tool_names_offered(images=False, kokoro=True), {"speak"})
+
+
+def _dispatch_names():
+    """The real command names in llm.py's `main()` dispatch, found by parsing the source (the same `ast`
+    approach `TestTranslations` already uses) rather than calling `main()`, which has side effects."""
+    with open(os.path.join(ROOT, "llm.py"), encoding="utf-8") as f:
+        src = f.read()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            for n in ast.walk(node):
+                if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Dict)
+                        and any(getattr(t, "id", None) == "actions" for t in n.targets)):
+                    return {k.value for k in n.value.keys if isinstance(k, ast.Constant)}
+    return set()
+
+
 class TestReplyNote(unittest.TestCase):
     def test_repetition_is_explained(self):
         self.assertIn("repeat", llm.reply_note("repetition").lower())

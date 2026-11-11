@@ -217,6 +217,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         didSet { UserDefaults.standard.set(webMode, forKey: "webMode") }
     }
     @Published private(set) var webNote: String?           // the query being looked up, while it is
+    /// Pictures: when the question asks for one and the engine has image generation ready (/health "images"),
+    /// the model's own prompt is drawn with the same route chat and the editor use — no separate switch, since
+    /// unlike web search there is nothing to leave on by mistake: it only ever runs when actually installed.
+    @Published private(set) var imageNote: String?         // the drawing prompt being rendered, while it is
     @Published var localeID: String {
         didSet { UserDefaults.standard.set(localeID, forKey: "voiceLocale") }
     }
@@ -759,9 +763,23 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         commitUtterance(out.isEmpty ? fallback : out)
     }
 
-    /// Send a finished user utterance (from the system recogniser or Whisper) as the next turn.
+    /// Send a finished user utterance (from the system recogniser or Whisper) as the next turn — or, said
+    /// outright as a whole utterance ("stop", "new conversation"), act on it directly and locally instead.
     private func commitUtterance(_ text: String) {
         guard !text.isEmpty else { dialogActive = false; state = .idle; return }   // nothing said: the dialog ends
+        if let cmd = VoiceCommand.parse(text) {
+            heard = ""
+            switch cmd {
+            case .stop:
+                // shown so the spoken command itself is never silent, then acted on like the Stop button
+                turns.append(Turn(role: "user", text: text, spoken: true))
+                saveCurrent()
+                stopReply()
+            case .newConversation:
+                newConversation()
+            }
+            return
+        }
         dialogActive = true
         turns.append(Turn(role: "user", text: text, spoken: true))
         saveCurrent()
@@ -849,11 +867,58 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return WebLookup.context(query: query, found: WebLookup.parse(out))
     }
 
+    /// Does this message ask for a picture? Same shape as `webQuery`: NO, or a short, concrete English
+    /// drawing prompt (the image model reads English only) — translated from whatever language the user
+    /// spoke or typed in. A side classification request, not the engine's own tool-calling: this is the
+    /// same choice `webQuery` already made, so a small or non-thinking model stays reliable here too.
+    private func imageQuery(_ history: [[String: Any]], question: String) async -> String? {
+        let ask = "You read the user's message and reply with exactly one line: NO if it does not ask to draw, "
+            + "generate, create or make a picture or image, or a short, concrete drawing prompt in English "
+            + "(subject, style, light, composition) if it does — translate the idea into English even when the "
+            + "user wrote in another language."
+        let shots: [(String, String)] = [
+            ("Generate an image of a lighthouse at dusk", "a lighthouse at dusk, dramatic sky, cinematic lighting"),
+            ("What's the weather like today?", "NO"),
+            ("Нарисуй кота в открытом космосе", "a cat floating in outer space, stars, detailed, digital art"),
+            ("Write me a poem about autumn.", "NO"),
+        ]
+        var messages: [[String: Any]] = [["role": "system", "content": ask]]
+        for (q, a) in shots { messages += [["role": "user", "content": q], ["role": "assistant", "content": a]] }
+        messages += Array(history.suffix(2))
+        guard let reply = await complete(messages, maxTokens: 64), let line = ImagePrompt.parse(reply),
+              !shots.contains(where: { $0.1.caseInsensitiveCompare(line) == .orderedSame }) else { return nil }
+        return line
+    }
+
+    /// Draws the prompt with the engine's own image route (`/v1/images/generations` — it sleeps the text
+    /// model first, the same request the editor's assistant and `./llm chat` send) and saves a copy beside
+    /// the voice history. A `data:` URL for the turn's `images`, or nil on failure.
+    private func generateImage(_ prompt: String) async -> String? {
+        var req = URLRequest(url: Setup.base.appendingPathComponent("v1/images/generations"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !Setup.apiKey.isEmpty { req.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["prompt": prompt])
+        req.timeoutInterval = 1800
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let first = (obj["data"] as? [[String: Any]])?.first,
+              let b64 = first["b64_json"] as? String, Data(base64Encoded: b64) != nil else { return nil }
+        if let png = Data(base64Encoded: b64) {
+            let dir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/LLMBar/voice-images")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? png.write(to: dir.appendingPathComponent("img-\(Int(Date().timeIntervalSince1970)).png"))
+        }
+        return "data:image/png;base64,\(b64)"
+    }
+
     private func respond(spoken: Bool) async {
         state = .thinking
         guard await ensureModel() else { return }                       // still loading: the question waits for it
         var system = (spoken ? Voice.spokenPrompt : Voice.chatPrompt) + " Today is \(Voice.today)."
-        let reply = Turn(role: "assistant", text: "", spoken: spoken)
+        var reply = Turn(role: "assistant", text: "", spoken: spoken)
         // the whole conversation so far (newest last), with each turn's files and pictures
         let kept = VoiceContext.window(turns.map { (role: $0.role, text: $0.text + $0.fileText) })
         let history: [[String: Any]] = kept.map { k in
@@ -861,6 +926,18 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             return ["role": k.role, "content": k.text]            // joined turns: text only
         }
         let lastQuestion = turns.last(where: { $0.role == "user" })?.text ?? ""
+        let imagesReady = (await health())?["images"] as? Bool ?? false
+        if imagesReady, let prompt = await imageQuery(history, question: lastQuestion), !Task.isCancelled {
+            imageNote = prompt
+            if let url = await generateImage(prompt) {
+                reply.images = [url]
+                system += "\n\nAn image was just generated for the user's request and is already shown to "
+                    + "them. Acknowledge it in one short sentence; never describe steps to make one yourself."
+            } else {
+                system += "\n\nAn image was requested but generation failed. Say so plainly, in one sentence."
+            }
+            imageNote = nil
+        }
         if webMode, let query = await webQuery(history, question: lastQuestion), !Task.isCancelled {
             webNote = query
             system += "\n\n" + (await webContext(query))
@@ -1245,13 +1322,22 @@ struct VoiceView: View {
         case .idle: return (voice.turns.isEmpty ? "SPEAK OR TYPE · CLICK THE SPHERE" : "READY", VHUD.dim)
         case .starting: return ("STARTING…", VHUD.yellow)
         case .listening: return (voice.dialogMode && voice.dialogActive ? "LISTENING · DIALOG" : "LISTENING", VHUD.cyan)
-        case .thinking: return (voice.webNote != nil ? "SEARCHING THE WEB" : "THINKING", VHUD.yellow)
+        case .thinking: return (voice.imageNote != nil ? "DRAWING" : (voice.webNote != nil ? "SEARCHING THE WEB" : "THINKING"), VHUD.yellow)
         case .speaking: return ("SPEAKING", VHUD.phosphor)
         case .failed: return ("PROBLEM", VHUD.magenta)
         }
     }
 
-    private func card(_ tag: String, _ text: String, _ color: Color, size: CGFloat, files: [String] = []) -> some View {
+    /// A `data:image/…;base64,…` URL (what `Turn.images` and attached pictures already carry) decoded for
+    /// display, or nil for anything malformed — never a crash on a turn saved by an older version.
+    private static func decodedImage(_ dataURL: String) -> NSImage? {
+        guard let comma = dataURL.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])) else { return nil }
+        return NSImage(data: data)
+    }
+
+    private func card(_ tag: String, _ text: String, _ color: Color, size: CGFloat, files: [String] = [],
+                      images: [String] = []) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 1).fill(color).frame(width: 2.5, height: 9)
@@ -1261,6 +1347,16 @@ struct VoiceView: View {
                 HStack(spacing: 4) {
                     ForEach(files, id: \.self) { f in
                         Label(f, systemImage: "doc.text").font(VHUD.mono(9)).foregroundColor(VHUD.dim).lineLimit(1)
+                    }
+                }
+            }
+            if !images.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(images, id: \.self) { url in
+                        if let img = VoiceView.decodedImage(url) {
+                            Image(nsImage: img).resizable().scaledToFit().frame(maxHeight: 220)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
                     }
                 }
             }
@@ -1413,9 +1509,9 @@ struct VoiceView: View {
                 VStack(spacing: 8) {
                     ForEach(voice.turns) { t in
                         if t.role == "user" {
-                            card(t.spoken ? "YOU · VOICE" : "YOU", t.text, VHUD.cyan, size: 12.5, files: t.files)
+                            card(t.spoken ? "YOU · VOICE" : "YOU", t.text, VHUD.cyan, size: 12.5, files: t.files, images: t.images)
                         } else {
-                            card("MODEL", t.text, VHUD.phosphor, size: 13)
+                            card("MODEL", t.text, VHUD.phosphor, size: 13, images: t.images)
                         }
                     }
                     if voice.state == .listening, !voice.heard.isEmpty {

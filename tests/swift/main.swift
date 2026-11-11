@@ -424,5 +424,34 @@ for q in ["найди в интернете рецепт борща", "поищ�
 }
 check(WebLookup.explicitRequest("Search online for it") && !WebLookup.explicitRequest("it is online"), "explicit request words")
 
+// ── ImagePrompt: NO, or a drawing prompt — the same one-line contract as WebLookup.query, a longer cap
+eq(ImagePrompt.parse("NO"), nil, "no picture asked for")
+eq(ImagePrompt.parse("no."), nil, "no, with a full stop")
+eq(ImagePrompt.parse("Нет"), nil, "no, Russian")
+eq(ImagePrompt.parse("a lighthouse at dusk, dramatic sky, cinematic lighting"), "a lighthouse at dusk, dramatic sky, cinematic lighting",
+   "a plain prompt")
+eq(ImagePrompt.parse("\"a cat floating in outer space\""), "a cat floating in outer space", "quotes are stripped")
+eq(ImagePrompt.parse("Prompt: a cozy cabin in the snow, warm light"), "a cozy cabin in the snow, warm light", "a 'Prompt:' prefix is dropped")
+eq(ImagePrompt.parse("a cozy cabin, warm light\nlet me know if you want changes"), "a cozy cabin, warm light",
+   "only the first non-empty line is kept")
+eq(ImagePrompt.parse("   \n  "), nil, "an empty reply")
+eq(ImagePrompt.parse(String(repeating: "word ", count: 80)), nil, "a real answer instead of a prompt is not drawn")
+let longPrompt = "a highly detailed cyberpunk city skyline at night, neon lights reflecting on rain-soaked streets, " +
+    "flying cars in the distance, cinematic wide shot, volumetric fog, dramatic lighting"
+check(longPrompt.count > 120 && longPrompt.count < 300, "the test prompt itself is between the two caps")
+eq(ImagePrompt.parse(longPrompt), longPrompt,
+   "a longer, legitimate prompt is not cut off the way WebLookup's 120-character query cap would")
+
+// ── VoiceCommand: a whole utterance, never a word inside a longer sentence
+eq(VoiceCommand.parse("Stop"), .stop, "stop")
+eq(VoiceCommand.parse("стоп."), .stop, "стоп, with a full stop")
+eq(VoiceCommand.parse("Хватит!"), .stop, "хватит, with an exclamation mark")
+eq(VoiceCommand.parse("new conversation"), .newConversation, "new conversation")
+eq(VoiceCommand.parse("новый чат"), .newConversation, "новый чат")
+eq(VoiceCommand.parse("a nonstop flight to Lisbon"), nil, "a trigger word inside a real question is not a command")
+eq(VoiceCommand.parse("what's new in Swift 6?"), nil, "'new' inside a question is not a command")
+eq(VoiceCommand.parse("how do I stop the engine from the CLI?"), nil, "'stop' inside a real question is not a command")
+eq(VoiceCommand.parse(""), nil, "empty")
+
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

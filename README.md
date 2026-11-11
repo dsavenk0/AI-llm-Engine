@@ -340,7 +340,10 @@ Language is English by default and Russian when the system locale is Russian. Yo
 in Settings.
 
 `./llm chat` keeps its history **per project in the same file the code editor uses**: `/history` lists the chats,
-`/open <N>` continues one (also one started in the editor), `/rename <N> <title>`, `/delete <N>`, `/new`.
+`/open <N>` continues one (also one started in the editor), `/rename <N> <title>`, `/delete <N>`, `/new`. Asking
+in plain words for a picture ("generate an image of...") or to hear something read back calls the image/speech
+modules on its own once they are installed; `/draw <prompt>` and `/speak <text>` do the same directly and offer
+to install the module first if it is missing.
 
 ## API
 
@@ -532,6 +535,12 @@ there is a progress bar with the bytes the engine process holds so far, and a sl
   model proposes a query, with keyword cues in five languages when a small model stays silent, `llm web search`
   fetches the results and the top pages, and the answer is built from them; a failed lookup is said honestly. Only the
   search query leaves the Mac (to DuckDuckGo).
+- **Pictures:** asking for one ("generate an image of a lighthouse at dusk") draws it with the installed image
+  module and shows it in the conversation — on automatically once that module is installed, no separate switch,
+  since unlike the web there is nothing to leave on by mistake.
+- **Voice commands:** saying "stop"/"cancel" or "new conversation" (English or Russian) as the *whole* thing you
+  say acts on it right away instead of being sent to the model — a word like "stop" inside a real question is
+  never mistaken for one.
 - **History:** a clock button at the top left opens saved conversations — open, rename, delete; the model menu under
   the sphere is always there (favourites, any installed model).
 

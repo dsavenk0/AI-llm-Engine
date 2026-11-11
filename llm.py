@@ -1771,15 +1771,102 @@ def reply_note(stop_reason):
     return ""
 
 
+# Tools the plain chat offers the model itself, so "generate an image of a cat" or "read that back to me"
+# works without a /image-style tag — the same schema-validated tool calling the code editor's assistant uses
+# (ui/agentloop.py), pointed at the image and speech paths that are already installed. Nothing here adds a
+# model: generate_image is only sent when the running engine reports /health images=true (mflux, --images on),
+# and speak only when Kokoro (./llm setup --audio) is importable.
+IMAGE_TOOL = {"type": "function", "function": {
+    "name": "generate_image",
+    "description": "Draw a picture from a text description with the local image model. Takes from half a "
+                   "minute to several minutes; the result is saved as a PNG and opened for the user. Describe "
+                   "the image concretely: subject, style, light, composition.",
+    "parameters": {"type": "object", "properties": {
+        "prompt": {"type": "string"},
+        "size": {"type": "string", "description": "WIDTHxHEIGHT, default 768x768, at most 1536 on a side"}},
+        "required": ["prompt"]}}}
+
+SPEAK_TOOL = {"type": "function", "function": {
+    "name": "speak",
+    "description": "Read text aloud on-device with the local text-to-speech voice and save it as a WAV. Use "
+                   "when the user asks to hear something spoken — not for every ordinary reply.",
+    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}
+
+MAX_CHAT_TOOL_TURNS = 4
+
+TOOL_LABEL = {"generate_image": "Generating an image…", "speak": "Speaking…"}
+
+
+def _tool_generate_image(cfg, args):
+    """Run a `generate_image` tool call: POST the already-running engine's own images route (it sleeps the
+    text model first, so the two never share memory) and save the PNG. Returns the text handed back to the
+    model — on failure, one the model can relay honestly (not installed, bad prompt, generation failed)."""
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return "error: a prompt is required"
+    body = {"prompt": prompt}
+    if args.get("size"):
+        body["size"] = str(args["size"])
+    try:
+        r = http_json(f"http://127.0.0.1:{cfg['port']}/v1/images/generations", body, timeout=1800, key=cfg["api_key"])
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read(2000)).get("error", {})
+            detail = detail.get("message") if isinstance(detail, dict) else str(detail)
+        except (ValueError, OSError):
+            detail = ""
+        e.close()
+        return f"error: image generation failed ({e.code}): {detail or 'not installed? ./llm setup --images'}"
+    except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError) as e:
+        return f"error: image generation failed: {e}"
+    import base64
+    import secrets
+    png = base64.b64decode(r["data"][0]["b64_json"])
+    out_dir = os.path.join(DATA, "images")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, time.strftime("img-%Y%m%d-%H%M%S") + f"-{secrets.token_hex(2)}.png")
+    with open(out, "wb") as f:
+        f.write(png)
+    print(G(T("Image saved:") + f" {out}"))
+    if shutil.which("open"):
+        subprocess.Popen(["open", out], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return f"The image was generated and saved as {out} (opened for the user). Describe it briefly if useful."
+
+
+def _tool_speak(args):
+    """Run a `speak` tool call: Kokoro (MLX), in-process like `./llm say` — small enough to not need the
+    text model unloaded. Returns the text handed back to the model."""
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return "error: no text given"
+    from engine import audio
+    dest = os.path.join(DATA, "say.wav")
+    try:
+        r = audio.synthesize(text, dest)
+    except audio.AudioError as e:
+        return f"error: {e}"
+    print(G(T("Spoken:") + f" {dest} ({r['seconds']}s)"))
+    if shutil.which("afplay"):
+        subprocess.run(["afplay", dest])
+    return "The text was read aloud to the user."
+
+
 def chat(cfg, system="", params=None):
     m = current_model(cfg)
-    if not m or not health(cfg):
+    hc = health(cfg)
+    if not m or not hc:
         print(R(T("The model is not running."))); return
     mc = mcfg(cfg)
     url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
     think, effort, show = think_enabled(mc, m), mc["effort"], True
     params = profile_params(params)                 # a named profile may pre-set the system prompt + sampling
     msgs = []
+    tools = []
+    if hc.get("images"):
+        tools.append(IMAGE_TOOL)
+    from engine import audio as _audio
+    if _audio.kokoro_available():
+        tools.append(SPEAK_TOOL)
     # the history is the code editor's: the same file per project, so a chat continues in either place
     from harness import chats as store
     root = os.getcwd()
@@ -1794,6 +1881,7 @@ def chat(cfg, system="", params=None):
 
     print(B(T("Chat with {name}.").format(name=m["name"])) +
           DIM(" /think on|off  /effort <lvl>  /show  /system <text>  /image <path> <question>"))
+    print(DIM("  /draw <prompt>  /speak <text>   " + T("(or just ask — the model calls them on its own)")))
     print(DIM("  /clear  /save  /retry  /exit   " + T("multi-line input:") + ' """ … """'))
     print(DIM("  /history  /open <N>  /rename <N> <title>  /delete <N>  /new   " +
               T("(shared with the code editor)")))
@@ -1855,6 +1943,44 @@ def chat(cfg, system="", params=None):
             with open(fn, "w") as f:
                 for x in msgs: f.write(f"## {x['role']}\n\n{x['content'] if isinstance(x['content'], str) else '[image]'}\n\n")
             print(DIM(T("Saved:") + f" {fn}")); continue
+        # manual modality tags: the same generate_image/speak paths the model can call on its own, forced
+        # by hand instead of inferred from the words — offering to install the (small, local) tool first
+        # when it is missing, never a model download without saying so
+        if s.startswith("/draw") or s.startswith("/speak"):
+            tag, _, rest = s.partition(" ")
+            text = rest.strip()
+            if not text:
+                print(R(T("Usage:") + f" {tag} <" + (T("prompt") if tag == "/draw" else T("text")) + ">")); continue
+            if tag == "/draw":
+                from engine import images as _images
+                if not _images.tool_path(DATA):
+                    if input(Y(T("Image generation is not installed (mflux). Install it now? [y/N] "))
+                             ).strip().lower() not in ("y", "yes", "д", "да"):
+                        continue
+                    if not setup_images():
+                        continue
+                    hc2 = health(cfg)
+                    if hc2 and hc2.get("images") and IMAGE_TOOL not in tools:
+                        tools.append(IMAGE_TOOL)
+                print(DIM(T("Generating an image…")))
+                print(DIM(_tool_generate_image(cfg, {"prompt": text})))
+            else:
+                from engine import audio as _audio2
+                if not _audio2.kokoro_available():
+                    if input(Y(T("Text-to-speech is not installed (Kokoro). Install it now? [y/N] "))
+                             ).strip().lower() not in ("y", "yes", "д", "да"):
+                        continue
+                    if not setup_audio():
+                        continue
+                    if SPEAK_TOOL not in tools:
+                        tools.append(SPEAK_TOOL)
+                print(DIM(T("Speaking…")))
+                print(DIM(_tool_speak({"text": text})))
+            continue
+        if s.startswith("/video") or s.startswith("/music"):
+            # honest, not a stub pretending to work: no video or music backend is wired into this engine yet
+            print(Y(T("Video and music generation are not implemented in this engine yet.")))
+            continue
         resend = s == "/retry"
         if resend:                                   # re-send the last question (after an interrupted/looping answer)
             if msgs and msgs[-1]["role"] == "assistant":
@@ -1873,39 +1999,82 @@ def chat(cfg, system="", params=None):
                 content = [{"type": "image_url", "image_url": {"url": attached[0]}},
                            {"type": "text", "text": question}]
             msgs.append({"role": "user", "content": content})
-        payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
-                   "messages": ([{"role": "system", "content": system}] if system else []) + msgs,
-                   "chat_template_kwargs": {"enable_thinking": think, **({"reasoning_effort": effort} if effort else {})},
-                   **params}
-        req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        answer, reasoning, in_think, t0, first, usage = [], [], False, time.time(), None, None
-        stop_reason = None
-        try:
-            with urllib.request.urlopen(req, timeout=3600) as r:
-                for raw in r:
-                    raw = raw.strip()
-                    if not raw.startswith(b"data:") or raw == b"data: [DONE]": continue
-                    ev = json.loads(raw[5:])
-                    usage = ev.get("usage") or usage
-                    if ev.get("error"): print(R(ev["error"].get("message"))); break
-                    for ch in ev.get("choices", []):
-                        stop_reason = ch.get("stop_reason") or stop_reason
-                        d = ch.get("delta", {})
-                        if d.get("reasoning_content"):
-                            first = first or time.time()
-                            reasoning.append(d["reasoning_content"])
-                            if show:
-                                if not in_think: print(DIM("💭 "), end=""); in_think = True
-                                print(DIM(d["reasoning_content"]), end="", flush=True)
-                        if d.get("content"):
-                            first = first or time.time()
-                            if in_think: print("\n"); in_think = False
-                            if not answer: print(G("› "), end="")
-                            answer.append(d["content"]); print(d["content"], end="", flush=True)
-        except KeyboardInterrupt:
-            print(Y("\n[" + T("interrupted") + "]"))
-        except Exception as e:
-            print(R("\n" + T("Error:") + f" {e}")); msgs.pop(); continue
+        ok = True
+        turn_start = len(msgs) - 1          # this turn's user message; a failed turn discards from here on,
+                                            # not just the one message a bare .pop() would — earlier tool
+                                            # rounds in the same turn may already have appended assistant/tool
+                                            # messages, and leaving an assistant tool_calls message with no
+                                            # matching tool reply corrupts every later request in this chat
+        for tool_turn in range(MAX_CHAT_TOOL_TURNS + 1):
+            payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
+                       "messages": ([{"role": "system", "content": system}] if system else []) + msgs,
+                       "chat_template_kwargs": {"enable_thinking": think,
+                                                **({"reasoning_effort": effort} if effort else {})},
+                       **params}
+            if tools:
+                payload["tools"] = tools
+            req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                         headers={"Content-Type": "application/json"})
+            answer, reasoning, in_think, t0, first, usage = [], [], False, time.time(), None, None
+            stop_reason, calls = None, []
+            try:
+                with urllib.request.urlopen(req, timeout=3600) as r:
+                    for raw in r:
+                        raw = raw.strip()
+                        if not raw.startswith(b"data:") or raw == b"data: [DONE]": continue
+                        ev = json.loads(raw[5:])
+                        usage = ev.get("usage") or usage
+                        if ev.get("error"): print(R(ev["error"].get("message"))); break
+                        for ch in ev.get("choices", []):
+                            stop_reason = ch.get("stop_reason") or stop_reason
+                            d = ch.get("delta", {})
+                            if d.get("reasoning_content"):
+                                first = first or time.time()
+                                reasoning.append(d["reasoning_content"])
+                                if show:
+                                    if not in_think: print(DIM("💭 "), end=""); in_think = True
+                                    print(DIM(d["reasoning_content"]), end="", flush=True)
+                            if d.get("content"):
+                                first = first or time.time()
+                                if in_think: print("\n"); in_think = False
+                                if not answer: print(G("› "), end="")
+                                answer.append(d["content"]); print(d["content"], end="", flush=True)
+                            calls += d.get("tool_calls") or []
+            except KeyboardInterrupt:
+                print(Y("\n[" + T("interrupted") + "]"))
+                break
+            except Exception as e:
+                print(R("\n" + T("Error:") + f" {e}")); del msgs[turn_start:]; ok = False
+                break
+            if not calls:
+                break
+            if tool_turn >= MAX_CHAT_TOOL_TURNS:
+                print(Y("\n[" + T("too many tool calls in a row") + "]")); del msgs[turn_start:]; ok = False
+                break
+            # the model asked for a tool: run it here (image/speech, already installed and gated by `tools`
+            # above) and hand the result back so it can continue, instead of printing it as prose
+            print()
+            tool_calls = [{"id": c.get("id") or f"call_{tool_turn}_{i}", "type": "function", "function": c["function"]}
+                          for i, c in enumerate(calls)]
+            msgs.append({"role": "assistant", "content": "".join(answer), "tool_calls": tool_calls})
+            for c in tool_calls:
+                name = c["function"]["name"]
+                try:
+                    targs = json.loads(c["function"].get("arguments") or "{}")
+                except ValueError:
+                    targs = {}
+                if not isinstance(targs, dict):
+                    targs = {}
+                print(DIM(T(TOOL_LABEL.get(name, name))))
+                if name == "generate_image":
+                    result = _tool_generate_image(cfg, targs)
+                elif name == "speak":
+                    result = _tool_speak(targs)
+                else:
+                    result = f"error: unknown tool {name}"
+                msgs.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+        if not ok:
+            continue
         print()
         note = reply_note(stop_reason)
         if note:
