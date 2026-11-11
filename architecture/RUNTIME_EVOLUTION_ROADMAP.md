@@ -47,11 +47,11 @@ Keep MLX as the only tensor backend; fix what the engine does around it; draw th
 
 | # | Item | Why | Milestone |
 |---|---|---|---|
-| 1.1 | **A dtype guard in the suite**: every array a forward pass keeps (KV, recurrent state, logits) has the dtype its budget assumes | the defect above lived through 1 100 tests because none looked | one test per engine class; fails on a float32 cache |
+| 1.1 | ✅ done · **A dtype guard in the suite**: every array a forward pass keeps (KV, recurrent state, logits) has the dtype its budget assumes | the defect above lived through 1 100 tests because none looked | one test per engine class; fails on a float32 cache |
 | 1.2 | **Re-measure the published figures** (README "Why", `tests/perf_baseline.json`) on the 0.8B / 2B / 4B set | they predate the fix; the long-context table is now pessimistic by 2 – 2.7× | new baseline saved; README table and `docs/` updated in one pass |
 | 1.3 | **Same audit for the GGUF decoder** (`dense.py`): which arrays are float32 by intent (the residual stream, per its docstring) and which by accident | the same class of defect, different file | a table of dtypes per stage in the review; fixes only where measured |
-| 1.4 | **Declare the Engine protocol; one memory guard; one cache interface** | MODULAR_ARCHITECTURE.md steps 2 – 4 | each lands with the suite green and `./llm perf` within tolerance |
-| 1.5 | **Runtime seam for the native model** | MODULAR step 5; unblocks Stage 3 | greedy output identical; decode step within 1 % |
+| 1.4 | ✅ done · **Declare the Engine protocol; one memory guard; one cache interface** | MODULAR_ARCHITECTURE.md steps 2 – 4 | each lands with the suite green and `./llm perf` within tolerance |
+| 1.5 | ✅ done · **Runtime seam for the native model** | MODULAR step 5; unblocks Stage 3 | greedy output identical; decode step within 1 % |
 | 1.6 | **Continuous batching**: admit a request into a running batch instead of only at its start | today `batch.py` batches requests that arrive inside one window; a late one waits for the batch to finish | time-to-first-token for a request arriving mid-batch ≤ 2 decode steps + its own prefill |
 | 1.7 | **Prefill profile** by the method of `tests/layer_profile.py` (truncated forward, one eval) | prefill has no per-layer profile; "compute-bound" is asserted from one matmul benchmark | per-layer table at 1K and 4K; the share of time in GEMM named |
 | 1.8 | **Embedding under memory pressure keeps the conversation's restore points** | `_reserve` gives up snapshots first, and `embed` calls it — above the RAM limit an embedding request silently costs the next chat its prefix (seen as a test that fails only on a loaded machine) | `test_embeddings_leave_the_conversation_cache_alone` passes with the machine above the limit, or the trade is documented as intended |

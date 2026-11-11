@@ -133,10 +133,10 @@ the full unit suite, the nine integration tests on a real model, and `./llm perf
 | # | Step | Touches | Extra gate |
 |---|---|---|---|
 | 1 | Kernel registry and its first operation | `engine/kernels/`, `model.py` (one branch) | **done** — `tests/test_kernels.py` |
-| 2 | Declare the Engine protocol; make the server depend on it, not on three concrete classes | `server.py`, new `engine/protocol.py` | a fake engine serves the wire-format tests with no model |
-| 3 | One memory guard: lift `_reserve` / `_check_memory` / `_fit_output` out of `Engine` and `CompatEngine` | `generate.py`, `compat.py`, `memory.py` | `TestMemoryWatchdog` runs against both engines from one implementation |
-| 4 | One cache interface (`append`, `truncate`, `snapshot`, `restore`, `nbytes`, `dtype`) over the two `KVCache` classes and `SSMCache` | `model.py`, `dense.py`, `batch.py`, `prefix_store.py` | bit-exact prefix reuse test; cache `dtype` asserted float16 |
-| 5 | Runtime seam for the native model: `MlxHybridRuntime` wraps `model.py`; `Engine.generate` calls it | `generate.py`, new `engine/runtime/` | greedy output identical before/after on three prompts; decode step within 1 % |
+| 2 | Declare the Engine protocol; make the server depend on it, not on three concrete classes | `server.py`, new `engine/protocol.py` | **done** — `tests/test_protocol.py`; it found that every chat on the GGUF and mlx-lm backends answered 500 |
+| 3 | One memory guard: lift `_reserve` / `_check_memory` / `_fit_output` out of `Engine` and `CompatEngine` | `generate.py`, `compat.py`, `memory.py` | **done** — `memory.reserve / check / fit_output`; both engines call them |
+| 4 | One cache interface (`append`, `truncate`, `snapshot`, `restore`, `nbytes`, `dtype`) over the two `KVCache` classes and `SSMCache` | `model.py`, `dense.py`, `batch.py`, `prefix_store.py` | **done** — `engine/cache.py`, one `KVCache`; every cache both engines keep is asserted float16 |
+| 5 | Runtime seam for the native model: `MlxHybridRuntime` wraps `model.py`; `Engine.generate` calls it | `generate.py`, new `engine/session.py`, `engine/runtime.py` | **done** — 14 generation cases token-identical before and after (greedy, sampled, speculation, prefix reuse, stop strings, JSON, reasoning); decode step 5.14 → 5.20 ms; the loop also runs on a plain-Python runtime (`tests/test_session.py`) |
 | 6 | Same for `dense.py` and mlx-lm, retiring the duplicated loop in `CompatEngine` | `compat.py`, `gguf_engine.py` | GGUF parity tests against llama.cpp unchanged |
 | 7 | Move `gated_delta` and `ptq1` kernels behind the registry | `gated_delta.py`, `ptq1.py` | `bench_kernels` rows for each, equal to their current figures |
 
