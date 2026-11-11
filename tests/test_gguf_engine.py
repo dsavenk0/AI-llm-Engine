@@ -328,6 +328,27 @@ class TestMixtureOfExperts(Base):
     def test_experts_stay_quantized_and_match(self):
         self.check("llama", "Q8_0")
 
+    def test_a_prompt_through_streamed_experts_uses_the_grouped_kernel_and_matches(self):
+        """From 64 (token, expert) pairs up the eager path sorts them by expert and runs one matrix product per
+        expert. The streamed experts renumber the experts into pool slots, so they have to sort again, by slot:
+        passing `sorted_indices=False` instead ran one vector product per pair — slow for a prompt — and
+        rounded differently. With every expert resident the two are now identical, at any prompt length; with a
+        smaller pool the groups are smaller and the kernel rounds differently, to well under a logit's spacing."""
+        import mlx.core as mx
+        import numpy as np
+        from engine import dense
+        path = os.path.join(self.dir, "llama-Q8_0-1.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        eager, _, _ = dense.build(path, stream_experts=False)
+        full, _, _ = dense.build(path, stream_experts=True, expert_cache=S.N_EXPERT)
+        small, _, _ = dense.build(path, stream_experts=True, expert_cache=2)
+        for n in (4, 31, 37, 87):                                        # 8 … 174 pairs: both sides of the 64 mark
+            ids = mx.array([list(range(3, 3 + n))])
+            want = np.asarray(eager(ids, eager.make_cache()).astype(mx.float32))
+            np.testing.assert_array_equal(np.asarray(full(ids, full.make_cache()).astype(mx.float32)), want, f"{n} tokens")
+            got = np.asarray(small(ids, small.make_cache()).astype(mx.float32))
+            self.assertLess(float(np.abs(got - want).max()), 0.01 * float(np.ptp(want)), f"{n} tokens, pool of 2")
+
     def test_streamed_experts_match_eager_and_the_reference_with_real_eviction(self):
         """`stream_experts=True` decodes experts on demand into a small LRU cache instead of all at once —
         correctness must not depend on which experts happen to be resident. Stepping one token at a time

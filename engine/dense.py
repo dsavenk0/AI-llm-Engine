@@ -204,12 +204,26 @@ class StreamedExperts:
 
     def __call__(self, x, idx, sorted_idx):
         self._ensure(idx)
-        remap = np.vectorize(lambda g: self.resident[int(g)])(np.asarray(idx)).astype(np.int32)
-        local = mx.array(remap)
+        idx_np = np.asarray(idx)
+        table = np.zeros(self.n_exp, np.int32)
+        for g, slot in self.resident.items():
+            table[g] = slot
+        remap = table[idx_np]
+        if sorted_idx and remap.ndim == 1 and np.any(remap[1:] < remap[:-1]):
+            # A prompt arrives sorted by the experts' own numbers, and `sorted_indices=True` — the grouped
+            # kernel, one matrix product per expert — needs the indices ascending *as the pool numbers them*,
+            # which they no longer are. Sort by slot, run, and put the rows back. (Passing False instead ran
+            # one vector product per (token, expert) pair, which is slow for a prompt and rounds differently.)
+            perm = np.argsort(remap, kind="stable")
+            y = self._gather(x[mx.array(perm)], mx.array(remap[perm]), True)
+            return y[mx.array(np.argsort(perm))]
+        return self._gather(x, mx.array(remap), bool(sorted_idx) and remap.ndim == 1)
+
+    def _gather(self, x, local, srt):
         if self.bits:
             return mx.gather_qmm(x, self.w, self.scales, self.biases, rhs_indices=local, transpose=True,
-                                 group_size=32, bits=self.bits, sorted_indices=False)
-        return mx.gather_mm(x, self.w.swapaxes(-1, -2), rhs_indices=local, sorted_indices=False)
+                                 group_size=32, bits=self.bits, sorted_indices=srt)
+        return mx.gather_mm(x, self.w.swapaxes(-1, -2), rhs_indices=local, sorted_indices=srt)
 
     @property
     def nbytes(self):
