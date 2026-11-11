@@ -3,6 +3,7 @@
 llm — manager for local MLX models running on the bundled engine (engine/).
 
   ./llm                      interactive menu
+  ./llm help [<command>]     the full, current command list (this is a fixed, older summary)
 
  Run & chat
   ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
@@ -43,6 +44,8 @@ llm — manager for local MLX models running on the bundled engine (engine/).
 The manager itself is stdlib-only; the engine runs from ./.venv.
 Language: English by default, Russian via LLM_LANG=ru, the settings menu or a ru system locale.
 """
+import collections
+import difflib
 import glob
 import http.client
 import json
@@ -3858,6 +3861,240 @@ def convert_cmd(cfg, args):
     return subprocess.run([VENV_PY, "-m", "engine.convert", src, out], cwd=BASE).returncode == 0
 
 
+# ───────────────────────────── command registry: help, --help, completion ─────────────────────────────
+# One list `main()`'s own dispatch, `help_cmd` and the two completion generators all read, so a command
+# documented here can't drift from what actually runs it (a test asserts the two lists match). `summary` and
+# `usage` are reference text in English only, like the top-of-file module docstring they summarize — not
+# run through T(), which here would mean inventing dozens of Russian translations rather than reusing the
+# project's own words; the surrounding chrome (labels, hints, the "did you mean" message) does go through T().
+Command = collections.namedtuple("Command", "name group summary usage flags")
+COMMANDS = [
+    Command("run", "Run & chat", "Select a model (download if only an org/name), start the engine, then "
+            "chat — or answer one prompt and exit.", "./llm run <model|org/name|profile> [prompt]", ()),
+    Command("open", "Run & chat", "New Terminal window: start the engine and open a chat.", "./llm open", ()),
+    Command("up", "Run & chat", "Start the engine, chat and the menu, in this terminal.", "./llm up", ()),
+    Command("chat", "Run & chat", "Chat with the model that is already running.", "./llm chat", ()),
+    Command("agent", "Run & chat", "Terminal coding agent (files, search, edits, shell) in a folder.",
+            "./llm agent [dir]", ()),
+    Command("conduct", "Run & chat", "Orchestrator: recognise attached files (OCR/Whisper/docs) and route "
+            "the task by role.", './llm conduct ["<task>"|board|set|unset] [--file F …]',
+            ("--file", "--json")),
+    Command("ui", "Run & chat", "Native code editor with the assistant (a module of LLMBar.app).",
+            "./llm ui [dir]", ("--choose",)),
+    Command("menu", "Run & chat", "Interactive menu (also: ./llm with no arguments).", "./llm menu", ()),
+
+    Command("lab", "Model Lab", "Per-tensor inspection, activation capture, and one-tensor reversible "
+            "weight patches — see docs/model-lab/compatibility.md.",
+            "./llm lab inspect|capture|wsp --model <model> [--tensor <name>|--prompt <text> --layers 0,2,5"
+            "|wsp patches create|list|apply|rollback ...] [--json]",
+            ("--model", "--tensor", "--prompt", "--layers", "--delta", "--std", "--seed", "--patch",
+             "--note", "--json")),
+
+    Command("models", "Models", "List models found locally.", "./llm models", ("--json", "--names")),
+    Command("use", "Models", "Select the active model by list number or name (restarts a running engine).",
+            "./llm use <#|name>", ()),
+    Command("search", "Models", "Search MLX models on Hugging Face (or ModelScope).",
+            "./llm search <query> [--json] [--source modelscope]", ("--json", "--source")),
+    Command("pull", "Models", "Download a model (resumable) into the Hugging Face cache.",
+            "./llm pull <org/name>", ("--progress",)),
+    Command("fetch", "Models", "Add a model from a source you provide: a .gguf/archive URL, or a magnet "
+            "(needs aria2c).", "./llm fetch <url|magnet> [name]", ("--progress",)),
+    Command("show", "Models", "A model's card: format, route, size, context, capabilities.",
+            "./llm show [<#|name>]", ("--json",)),
+    Command("ps", "Models", "The model loaded right now.", "./llm ps", ("--json",)),
+    Command("create", "Models", "A named profile: a base model with its own system prompt and sampling.",
+            './llm create <name> --from <model> [--system "…"] [--param k=v]',
+            ("--from", "--system", "--param", "--rm")),
+    Command("rm", "Models", "Delete a downloaded model from disk.", "./llm rm <#|name> [--yes]", ("--yes", "-y")),
+    Command("convert", "Models", "Export a GGUF as an MLX folder (config + f16 safetensors + tokenizer).",
+            "./llm convert <model.gguf> [out_dir]", ()),
+    Command("inspect", "Models", "What is inside a model, from its headers: layers, storage types, bits per "
+            "weight, biggest tensors.", "./llm inspect [<#|name>] [--json] [--top N]", ("--json", "--top")),
+    Command("connect", "Models", "Register the model in Continue, Kilo Code, opencode or Cline.",
+            "./llm connect [client]", ()),
+    Command("image", "Models", "Draw a picture from a text description with the local image model (mflux).",
+            './llm image "<prompt>" [--model] [--size] [--steps] [--seed] [--out]',
+            ("--model", "--size", "--steps", "--seed", "--out")),
+
+    Command("transcribe", "Audio & documents", "On-device speech-to-text with Whisper (MLX).",
+            "./llm transcribe <audio> [--model <hf-repo>] [--json]", ("--model", "--json")),
+    Command("say", "Audio & documents", "On-device text-to-speech with Kokoro (MLX): plays it and saves a WAV.",
+            './llm say "<text>" [--voice v] [--speed 1.0] [--out file.wav] [--no-play]',
+            ("--voice", "--speed", "--lang", "--out", "--no-play")),
+    Command("read", "Audio & documents", "Extract text from a document (PDF/DOCX/PPTX/HTML/text, OCR for "
+            "scans) to attach as a source.", './llm read <file> [--query "…"] [--budget N] [--json]',
+            ("--query", "--budget", "--json")),
+
+    Command("start", "Engine & service", "Start the engine with the selected model.", "./llm start", ()),
+    Command("stop", "Engine & service", "Stop the engine.", "./llm stop", ()),
+    Command("restart", "Engine & service", "Restart the engine.", "./llm restart", ()),
+    Command("status", "Engine & service", "The engine's state, model and memory.", "./llm status", ()),
+    Command("bench", "Engine & service", "A quick generation speed check.", "./llm bench", ()),
+    Command("logs", "Engine & service", "Tail the engine's log.", "./llm logs", ()),
+    Command("free", "Engine & service", "Quit vMLX / oMLX / Ollama to free memory.", "./llm free", ()),
+    Command("service", "Engine & service", "Optional background service (launchd): up after login, restarts "
+            "on a crash.", "./llm service install|uninstall|status", ()),
+
+    Command("setup", "Setup & maintenance", "Install the engine's environment, or an optional module.",
+            "./llm setup [--compat|--ocr|--audio|--gguf|--images]",
+            ("--compat", "--ocr", "--audio", "--gguf", "--images")),
+    Command("update", "Setup & maintenance", "Is there a newer release on GitHub? (--check only reports; "
+            "else downloads and opens the .dmg.)", "./llm update [--check]", ("--check", "--json")),
+    Command("check", "Setup & maintenance", "Is everything there to run the engine? (Python, libraries, "
+            "network, disk, models.)", "./llm check [--json]", ("--json",)),
+    Command("test", "Setup & maintenance", "Run the unit and integration test suite.", "./llm test", ()),
+    Command("perf", "Setup & maintenance", "Performance suite vs the saved baseline.",
+            "./llm perf [--save] [--long-context]", ("--save", "--long-context")),
+    Command("eval", "Setup & maintenance", "Accuracy suite (math / code / sanity) vs the saved baseline.",
+            "./llm eval [--save] [--suite list|gsm8k,mmlu,…]", ("--save", "--suite", "--limit", "--allow-code")),
+    Command("calibrate", "Setup & maintenance", "Find the largest context that actually prefills on this Mac.",
+            "./llm calibrate [--apply]", ("--apply",)),
+    Command("web", "Setup & maintenance", "Web search + the top pages as one JSON line (what the voice chat "
+            "uses).", './llm web search "<query>" [--n 4] [--read 2]', ("--n", "--read")),
+
+    Command("fav", "Advanced", "Star a model (favourites lead every list and model menu).",
+            "./llm fav [<#|name>] [--on|--off|--next]", ("--on", "--off", "--next")),
+    Command("vision", "Advanced", "Switch image input on/off for the selected model (restarts the engine).",
+            "./llm vision <on|off>", ()),
+    Command("steer", "Advanced", "Apply an activation edit (and fetch its base model); `steer off` removes it.",
+            "./llm steer [repo|folder] [--alpha A]", ("--alpha",)),
+    Command("serve", "Advanced", "Run the engine in the foreground (for launchd; used by `service install`).",
+            "./llm serve", ()),
+    Command("kilo", "Advanced", "Shortcut for `./llm connect kilo`.", "./llm kilo", ()),
+
+    Command("help", "Advanced", "Show this command list, or one command's usage and flags.",
+            "./llm help [<command>]", ()),
+    Command("completion", "Advanced", "Print a Zsh or Bash completion script, or installation instructions.",
+            "./llm completion [zsh|bash]", ()),
+]
+COMMAND_GROUPS = ("Run & chat", "Model Lab", "Models", "Audio & documents", "Engine & service",
+                 "Setup & maintenance", "Advanced")
+# commands whose first positional argument is a model name — offered by shell completion via `models --names`
+MODEL_ARG_COMMANDS = ("use", "rm", "show", "run", "fav")
+
+
+def _suggest_command(name):
+    """A friendly "did you mean" line for a mistyped command name, or "" when nothing is close enough."""
+    close = difflib.get_close_matches(name, [c.name for c in COMMANDS], n=3, cutoff=0.5)
+    return T("Did you mean: {names}?").format(names=", ".join(close)) if close else ""
+
+
+def help_cmd(args):
+    """`./llm help [<command>]` — the full command list grouped like the quick-start banner, or one
+    command's usage line and known flags. `./llm <command> --help` is the same, handled in main()."""
+    name = (args[0] if args else "").lstrip("-")
+    if not name:
+        print(B("llm") + " — " + T("manager for local MLX models running on the bundled engine."))
+        for group in COMMAND_GROUPS:
+            cmds = [c for c in COMMANDS if c.group == group]
+            width = max(len(c.usage) for c in cmds)
+            print(B("\n " + group))
+            for c in cmds:
+                print(f"  {c.usage.ljust(width)}  {c.summary}")
+        print(DIM("\n" + T("./llm help <command> shows its flags · ./llm completion zsh|bash for tab completion")))
+        return True
+    cmd = next((c for c in COMMANDS if c.name == name), None)
+    if cmd is None:
+        print(R(T("No such command: '{name}'.").format(name=name)))
+        hint = _suggest_command(name)
+        if hint:
+            print(hint)
+        return False
+    print(B(cmd.usage))
+    print("  " + cmd.summary)
+    if cmd.flags:
+        print(DIM("  " + T("Flags:") + " " + ", ".join(cmd.flags)))
+    return True
+
+
+def _zsh_completion():
+    """A #compdef zsh completion function generated from COMMANDS: command names with descriptions, each
+    command's own flags, and installed model names (`llm models --names`) for the commands that take one."""
+    esc = lambda s: s.replace("\\", "\\\\").replace("'", "'\\''").replace(":", "\\:")      # noqa: E731
+    cmds = "\n".join(f"        '{c.name}:{esc(c.summary)}'" for c in COMMANDS)
+    cases = "\n".join(f"        {c.name}) _values 'option' {' '.join(c.flags)} ;;" for c in COMMANDS if c.flags)
+    model_cmds = " ".join(MODEL_ARG_COMMANDS)
+    return f"""#compdef llm
+# Generated by `./llm completion zsh` from llm.py's own command list. Install with:
+#   source <(./llm completion zsh)
+_llm() {{
+    local -a cmds
+    cmds=(
+{cmds}
+    )
+    if (( CURRENT == 2 )); then
+        _describe 'command' cmds
+        return
+    fi
+    local cmd=$words[2]
+    if (( CURRENT == 3 )) && [[ " {model_cmds} " == *" $cmd "* ]]; then
+        _values 'model' ${{(f)"$(./llm models --names 2>/dev/null)"}}
+        return
+    fi
+    if [[ $cmd == create && $words[CURRENT-1] == --from ]]; then
+        _values 'model' ${{(f)"$(./llm models --names 2>/dev/null)"}}
+        return
+    fi
+    case "$cmd" in
+{cases}
+    esac
+}}
+_llm "$@"
+"""
+
+
+def _bash_completion():
+    """The Bash counterpart of `_zsh_completion`, same source data, `compgen`-based."""
+    all_cmds = " ".join(c.name for c in COMMANDS)
+    model_cmds = " ".join(MODEL_ARG_COMMANDS)
+    cases = "\n".join(f'            {c.name}) opts="{" ".join(c.flags)}" ;;' for c in COMMANDS if c.flags)
+    return f"""# Generated by `./llm completion bash` from llm.py's own command list. Install with:
+#   source <(./llm completion bash)
+_llm_completions() {{
+    local cur cmd opts
+    COMPREPLY=()
+    cur="${{COMP_WORDS[COMP_CWORD]}}"
+    if [[ $COMP_CWORD -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "{all_cmds}" -- "$cur"))
+        return
+    fi
+    cmd="${{COMP_WORDS[1]}}"
+    if [[ " {model_cmds} " == *" $cmd "* && $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=($(compgen -W "$(./llm models --names 2>/dev/null)" -- "$cur"))
+        return
+    fi
+    if [[ $cmd == create && "${{COMP_WORDS[COMP_CWORD-1]}}" == --from ]]; then
+        COMPREPLY=($(compgen -W "$(./llm models --names 2>/dev/null)" -- "$cur"))
+        return
+    fi
+    opts=""
+    case "$cmd" in
+{cases}
+    esac
+    [[ -n "$opts" ]] && COMPREPLY=($(compgen -W "$opts" -- "$cur"))
+}}
+complete -F _llm_completions llm ./llm
+"""
+
+
+def completion_cmd(args):
+    """`./llm completion zsh|bash` prints the generated script (nothing else, so `source <(…)` works);
+    with no shell, prints the install instructions for both instead."""
+    shell = (args[0] if args else "").lstrip("-").lower()
+    if shell == "zsh":
+        print(_zsh_completion(), end="")
+        return True
+    if shell == "bash":
+        print(_bash_completion(), end="")
+        return True
+    if shell:
+        print(R(T("Unknown shell: '{shell}' (zsh or bash).").format(shell=shell)))
+        return False
+    print(T("Zsh:  source <(./llm completion zsh)    — add that line to ~/.zshrc to keep it"))
+    print(T("Bash: source <(./llm completion bash)   — add that line to ~/.bash_profile to keep it"))
+    return True
+
+
 def main():
     cmd, arg = (sys.argv[1:] + ["", ""])[:2]
     cfg, tty = load_cfg(), sys.stdin.isatty()
@@ -3907,8 +4144,20 @@ def main():
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),
         "fetch": lambda: fetch_cmd(cfg, sys.argv[2:]), "": menu, "menu": menu,
+        "help": lambda: help_cmd(sys.argv[2:]), "--help": lambda: help_cmd(sys.argv[2:]),
+        "-h": lambda: help_cmd(sys.argv[2:]), "completion": lambda: completion_cmd(sys.argv[2:]),
     }
+    # "./llm <command> --help": show that command's own help instead of running it — checked before the
+    # normal dispatch so the real handler (which may start the engine, delete a model…) never runs.
+    if cmd in actions and cmd not in ("help", "--help", "-h") and any(a in ("--help", "-h") for a in sys.argv[2:]):
+        sys.exit(1 if help_cmd([cmd]) is False else 0)
     if cmd not in actions:
+        if cmd:
+            print(R(T("Unknown command: '{cmd}'.").format(cmd=cmd)))
+            hint = _suggest_command(cmd)
+            if hint:
+                print(hint)
+            print(DIM(T("./llm help lists every command.")))
         print(__doc__); sys.exit(2)
     ok = actions[cmd]()
     sys.exit(1 if ok is False else 0)

@@ -316,6 +316,9 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 
 ```
 ./llm                      interactive menu
+./llm help [<command>]     every command, grouped; one command's usage and flags
+./llm <command> --help     the same, for one command, before running it
+./llm completion zsh|bash  a tab-completion script: source <(./llm completion zsh)
 ./llm open | up            new window with chat | start + chat + menu in this terminal
 ./llm start|stop|restart|status|chat|bench|logs
 ./llm service install      optional background service (launchd): the API is up after login, restarts on a crash

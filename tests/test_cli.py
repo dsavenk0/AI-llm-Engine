@@ -626,6 +626,98 @@ def _dispatch_names():
     return set()
 
 
+class TestHelp(unittest.TestCase):
+    """`./llm help`, contextual `--help`, typo suggestions and shell completion — all read from one
+    registry (`llm.COMMANDS`), which a consistency test ties to the real dispatch table."""
+
+    def setUp(self):
+        # a few tests below call the real llm.main(), which reads the live ~/.llm/config.json and may call
+        # set_lang() — pin the translation table to empty (English) for this class and restore it after, so
+        # a Russian system config here can't flip every later test's expected-English assertions
+        self._tr = llm._TR
+        llm._TR = {}
+
+    def tearDown(self):
+        llm._TR = self._tr
+
+    def capture(self, fn, *a):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rv = fn(*a)
+        return rv, buf.getvalue()
+
+    def test_every_dispatch_command_is_registered(self):
+        # "", "--help" and "-h" are aliases ("" == menu, the other two == help), not commands of their own
+        real = _dispatch_names() - {"", "--help", "-h"}
+        self.assertTrue(real)                      # the parse itself must have found something
+        self.assertEqual(real, {c.name for c in llm.COMMANDS})
+
+    def test_help_lists_every_command_with_its_usage(self):
+        rv, out = self.capture(llm.help_cmd, [])
+        self.assertTrue(rv)
+        for c in llm.COMMANDS:
+            self.assertIn(c.usage, out)
+
+    def test_help_for_one_command_shows_its_flags(self):
+        rv, out = self.capture(llm.help_cmd, ["say"])
+        self.assertTrue(rv)
+        self.assertIn("--voice", out)
+        self.assertIn("--no-play", out)
+
+    def test_help_for_an_unknown_command_suggests_a_close_match(self):
+        rv, out = self.capture(llm.help_cmd, ["staart"])
+        self.assertFalse(rv)
+        self.assertIn("start", out)
+
+    def test_contextual_help_does_not_run_the_real_command(self):
+        import contextlib
+        import io
+        from unittest import mock
+        with mock.patch.object(sys, "argv", ["llm", "start", "--help"]), \
+             mock.patch.object(llm, "start", side_effect=AssertionError("the real command must not run")) as m, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                llm.main()
+            self.assertEqual(cm.exception.code, 0)
+        m.assert_not_called()
+
+    def test_misspelled_top_level_command_suggests_a_close_match(self):
+        import contextlib
+        import io
+        from unittest import mock
+        buf = io.StringIO()
+        with mock.patch.object(sys, "argv", ["llm", "staart"]), contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                llm.main()
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("start", buf.getvalue())
+
+    def test_completion_scripts_name_every_command(self):
+        zsh = llm._zsh_completion()
+        bash = llm._bash_completion()
+        self.assertTrue(zsh.startswith("#compdef llm"))
+        self.assertIn("complete -F", bash)
+        for c in llm.COMMANDS:
+            self.assertIn(f"'{c.name}:", zsh)
+            self.assertIn(c.name, bash)
+
+    def test_models_names_lists_installed_models_plainly(self):
+        """`./llm models --names` — the plain, jq-free list the completion scripts shell out to."""
+        import contextlib
+        import io
+        from unittest import mock
+        buf = io.StringIO()
+        with mock.patch.object(sys, "argv", ["llm", "models", "--names"]), \
+             mock.patch.object(llm, "scan_models", return_value=[{"name": "demo-a"}, {"name": "demo-b"}]), \
+             contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                llm.main()
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue().strip().splitlines(), ["demo-a", "demo-b"])
+
+
 class TestConductBoard(unittest.TestCase):
     """`./llm conduct board` — the CLI wrapper around harness.conductor.read_board."""
 
