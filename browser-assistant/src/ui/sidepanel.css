@@ -16,7 +16,10 @@ html, body { height: 100%; }
 body { display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font-size: 13.5px; }
 button { border-color: var(--line); background: var(--field); border-radius: 8px; }
 button.primary { color: var(--accent-ink); }
-select { background: var(--field); border-color: var(--line); }
+/* our own chevron: the system one sits flush against the edge of a rounded field */
+select { -webkit-appearance: none; appearance: none; background-color: var(--field); border-color: var(--line);
+  padding: 7px 34px 7px 12px; background-repeat: no-repeat; background-position: right 12px center; background-size: 12px 8px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1.5l5 5 5-5' fill='none' stroke='%237f97a5' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/></svg>"); }
 .spacer { flex: 1; }
 .small { font-size: 11.5px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
