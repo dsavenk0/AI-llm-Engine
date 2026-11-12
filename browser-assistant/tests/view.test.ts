@@ -62,3 +62,11 @@ test("inside LLMBar the notice compares with the version the app ships, not with
   assert.match(updateNotice(s, "0.1.0.264", "safari", 1), /Restart Safari and add it again/);    // a temporary extension
   assert.equal(updateNotice(s, "0.1.0.300", "safari", 1), "");
 });
+
+test("in Chrome a newer folder copy is announced as an update in progress, not as a Safari step", async () => {
+  const { updateNotice } = await import("../src/ui/view");
+  const s: any = { protocol: 1, extension: { versions: { chromium: "0.1.0.267" }, folder: "/x" } };
+  const n = updateNotice(s, "0.1.0.266", "chromium", 1);
+  assert.match(n, /Updating to version 0\.1\.0\.267/);
+  assert.doesNotMatch(n, /Safari/);
+});

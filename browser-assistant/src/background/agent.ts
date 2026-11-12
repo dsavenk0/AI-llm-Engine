@@ -69,6 +69,12 @@ export class AgentRunner {
     };
   }
 
+  /** Whether a task is running on any tab (an update waits for it). */
+  anyActive(): boolean {
+    for (const t of this.tasks.values()) if (!TERMINAL.has(t.state)) return true;
+    return false;
+  }
+
   active(tabId: number): boolean {
     const t = this.tasks.get(tabId);
     return !!t && !TERMINAL.has(t.state);
@@ -95,8 +101,10 @@ export class AgentRunner {
   async start(tabId: number, goal: string, autonomy: Autonomy = "ask", see = false): Promise<AgentView> {
     if (this.active(tabId)) throw new Error("a task is already running on this tab");
     const tab = await this.d.tab(tabId);
+    if (tab && !tab.url) throw new Error("I cannot see this tab's address yet — allow LLMBar on this site (send again "
+      + "and choose Allow), or reload the extension if it was just updated");
     const origin = tab ? originOf(tab.url) : "";
-    if (!origin) throw new Error("the agent works only on http and https pages");
+    if (!origin) throw new Error("the agent works only on web pages (http and https), not on the browser's own pages");
     const t: Task = { id: this.d.id(), bind: { tabId, origin }, goal: goal.trim().slice(0, 2000), state: "requested", steps: [],
                       history: [], stepsLeft: autonomy === "auto" ? MAX_STEPS_AUTO : MAX_STEPS, failures: 0, autonomy, see, abort: new AbortController(), requestId: this.d.id(), waiter: null };
     if (!t.goal) throw new Error("say what to do");

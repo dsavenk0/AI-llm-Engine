@@ -62,9 +62,10 @@ export function updateNotice(s: Snapshot, mine: string, browser: string, protoco
       : "";
   }
   const latest = s.extension.versions[browser];
-  return newer(latest, mine)
-    ? `Version ${latest} of this extension is installed on this Mac (this is ${mine}). Restart Safari and add it again from ${s.extension.folder}/${browser}.`
-    : "";
+  if (!newer(latest, mine)) return "";
+  return browser === "chromium"
+    ? `Updating to version ${latest} (this is ${mine})… If it does not reload by itself, press ↻ on the extension in chrome://extensions.`
+    : `Version ${latest} of this extension is installed on this Mac (this is ${mine}). Restart Safari and add it again from ${s.extension.folder}/${browser}.`;
 }
 
 /** Only what the engine measured; a figure that is absent is not shown. */

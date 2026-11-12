@@ -48,7 +48,36 @@ type StateEvent = Extract<UiEvent, { kind: "state" }>;
 let last: StateEvent = { kind: "state", state: null, connected: false, problem: "connecting" };
 let stream: AbortController | null = null;
 
+// ───────────── updating itself ─────────────
+// A browser loads an unpacked (Chrome) or temporary (Safari) extension from its folder only when it is loaded.
+// LLMBar's update puts newer files in that folder, and the service reports their version: then the extension
+// reloads itself from the folder — once per version, and never while an answer or a task is running. Inside
+// LLMBar.app (Safari) the extension comes with the app, so this does not apply.
+const MINE = api.runtime.getManifest().version;
+let reloading = false;
+
+async function maybeReload(s: Snapshot | null): Promise<void> {
+  if (!s || appInfo || reloading) return;
+  const folder = s.extension.versions[browserName === "chromium" ? "chromium" : "safari"];
+  if (!folder || !newerVersion(folder, MINE)) return;
+  if (running.size || runner.anyActive()) return;            // after the current answer or task, not in the middle
+  const done = (await api.storage.local.get("reloadedFor")).reloadedFor;
+  if (done === folder) return;                               // tried once for this version: do not loop
+  reloading = true;
+  await api.storage.local.set({ reloadedFor: folder });
+  api.runtime.reload();
+}
+
+function newerVersion(a: string, b: string): boolean {
+  const x = a.split(".").map(Number), y = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  }
+  return false;
+}
+
 function broadcast(ev: StateEvent): void {
+  void maybeReload(ev.state).catch(() => undefined);
   if (appInfo) ev = { ...ev, app: appInfo };
   last = ev;
   for (const p of listeners) send(p, ev);
