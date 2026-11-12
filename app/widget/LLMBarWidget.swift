@@ -99,12 +99,14 @@ struct OrbProvider: TimelineProvider {
                 completion(Timeline(entries: [entry], policy: .after(next)))
                 return
             }
-            // While the model is on: a slow animation, one frame every 10 s for two minutes (a widget cannot run
-            // a continuous one; it can be given frames in advance). Then the timeline is rebuilt with fresh numbers.
+            // While the model is on: a slow animation. A widget cannot run a continuous one, but it can be given
+            // frames in advance, and the system animates the change from one frame to the next (macOS 14+): one
+            // every 4 s for two minutes, each turning the orb a little further. Then the timeline is rebuilt with
+            // fresh numbers.
             var frames: [OrbEntry] = []
-            for i in 0..<12 {
+            for i in 0..<30 {
                 var f = entry
-                f = OrbEntry(date: Date().addingTimeInterval(Double(i) * 10), model: entry.model, running: true,
+                f = OrbEntry(date: Date().addingTimeInterval(Double(i) * 4), model: entry.model, running: true,
                              russian: entry.russian, asleep: false, favorite: entry.favorite, cycles: entry.cycles,
                              phase: Double(i) * 0.45,
                              gpu: entry.gpu, ramUsed: entry.ramUsed, ramTotal: entry.ramTotal)
@@ -160,6 +162,22 @@ struct StaticOrb: View {
     }
 }
 
+/// The orb's motion while the model is on: each timeline frame turns it a little further and alternately swells
+/// and settles; the system animates between frames, so on the desktop it slowly revolves and breathes. Off, the
+/// orb stands still and a little dimmer.
+struct OrbMotion: ViewModifier {
+    let active: Bool
+    let phase: Double
+    func body(content: Content) -> some View {
+        let step = Int((phase / 0.45).rounded())
+        content
+            .rotationEffect(.degrees(active ? phase * 20 : 0))
+            .scaleEffect(active ? (step % 2 == 0 ? 1.0 : 1.06) : 1.0)
+            .opacity(active ? 1 : 0.72)
+            .animation(.easeInOut(duration: 3.6), value: phase)
+    }
+}
+
 struct OrbWidgetView: View {
     @Environment(\.widgetFamily) private var family
     @Environment(\.widgetRenderingMode) private var rendering
@@ -199,7 +217,8 @@ struct OrbWidgetView: View {
         if entry.active {
             HStack(spacing: 4) {
                 gauge("GPU", entry.gpu, "\(Int((entry.gpu * 100).rounded()))%", tint: cyan)          // one side …
-                StaticOrb(reduced: reduced, phase: entry.phase).scaleEffect(1.15).frame(maxHeight: .infinity)
+                StaticOrb(reduced: reduced, phase: entry.phase).modifier(OrbMotion(active: true, phase: entry.phase))
+                    .scaleEffect(1.15).frame(maxHeight: .infinity)
                 gauge("RAM", entry.ramTotal > 0 ? entry.ramUsed / entry.ramTotal : 0,                // … and the other
                       String(format: "%.1f GB", entry.ramUsed / 1e9), tint: mint)
             }
@@ -269,7 +288,8 @@ struct OrbWidgetView: View {
                 }
             } else {
                 ZStack {
-                    StaticOrb(reduced: reduced)
+                    StaticOrb(reduced: reduced, phase: entry.active ? entry.phase : 0)
+                        .modifier(OrbMotion(active: entry.active, phase: entry.phase))
                     VStack {
                         Spacer()
                         Text("LLM VOICE")
