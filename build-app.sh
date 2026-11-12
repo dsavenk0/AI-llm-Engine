@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 FINAL="$ROOT/LLMBar.app"
-VERSION="${VERSION:-1.0}"
+VERSION="${VERSION:-1.1}"
 INSTALL=0
 OFFLINE=0
 for arg in "$@"; do

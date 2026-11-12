@@ -2,42 +2,40 @@
 
 ![AI-llm-Engine](docs/banner.png)
 
-**A language model that runs on your own Mac.** No cloud, no subscription, no account: you download a model
-once and it answers from your laptop — offline, on a plane, with nothing leaving the machine.
+**Private AI for your whole Mac — chat, voice, code and your browser, on one local model.** No cloud, no
+subscription, no account: download a model once and it works offline, with nothing ever leaving the machine.
 
 ### [⬇ Download LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg) · [Русская версия](README.ru.md)
 
-<sub>**On the first launch macOS will refuse to open it** — “Apple could not verify that this file is free of
-malware”. The app is signed, but ad hoc: Apple only vouches for apps notarized under a paid developer account.
-Press **Done**, open **System Settings ▸ Privacy & Security**, scroll down and press **Open Anyway** — or in
-Terminal: `xattr -dr com.apple.quarantine /Applications/LLMBar.app`. You do this once.</sub>
+<sub>**First launch:** the app is signed ad hoc, not notarized, so macOS blocks it once. Press **Done**, then
+**System Settings ▸ Privacy & Security ▸ Open Anyway** — or `xattr -dr com.apple.quarantine /Applications/LLMBar.app`.</sub>
 
-Open the app, pick a model from the list, and it downloads and starts. What you get:
+**What sets it apart**
 
-- **A chat in the menu bar.** Click the small icon, type or speak, and hear the answer read back.
-- **A code editor with an assistant** that reads your project and proposes edits you approve or reject.
-- **Your own private API.** Continue, Kilo Code, opencode — anything that talks to OpenAI, Ollama or Claude can
-  point at `http://localhost:8090` instead of the internet.
-- **Documents, scans and recordings.** Attach a PDF, a photo of a page or a voice memo: it is read on the Mac
-  itself and handed to the model.
-- **It can look things up.** Ask about today's news, the weather or a price and it searches the web and reads the
-  pages as clean text — DuckDuckGo with no key, or your own SearxNG. On in the voice chat, off by default in the
-  coding agent, and private addresses are always refused.
-
-**Why this one rather than another local runner**
-
-- **It does not freeze a 16 GB Mac.** It watches the memory of the whole machine, not only its own: before a
-  request it frees what it can, shortens the answer to what will fit and says so plainly, instead of swapping
-  to disk and locking the laptop up.
-- **It is small.** The app is 10 MB, the engine behind it about 310 MB — not a 2 GB install.
-- **It is quick on the models that fit.** On a MacBook Air M5 with 16 GB: 115 tokens a second on a small model,
-  79 on a 2B, 35 on a 4B — close to the ceiling the memory bus itself sets on this Mac.
-- **It opens models others cannot.** Ternary JANG / Prism bundles (a 27B model in 7.6 GB) run here; ordinary
-  GGUF and MLX models run too, and it tells you *before* the download whether a model will actually start.
-- **It works without the app at all.** One command-line tool does everything: `./llm run`, `./llm serve`,
-  `./llm read`.
-
-The measurements behind those numbers, with the conditions they were taken under, are in **[Why](#why)**.
+- **🌐 An AI agent in your browser that never phones home.** A side panel in Safari or Chrome reads the page,
+  answers about it, or clicks, types and navigates for you while you watch — and stops for your approval before
+  anything that pays, orders, sends or deletes. Cloud browser agents send every page you open to a server; this one
+  sends it nowhere. [More](docs/safari-assistant/README.md)
+- **🧠 Runs models other local apps cannot.** A 27B model in **7.6 GB** (ternary JANG / Prism bundles, on its own
+  Metal kernels); **Mixture-of-Experts models bigger than your RAM**, with experts read from the SSD on demand;
+  GGUF without llama.cpp. And it tells you **before the download** whether a model will start on your Mac.
+- **🛡 It does not freeze a 16 GB Mac.** It guards the memory of the *whole machine*, not just its own process,
+  and puts voice and the browser ahead of background agents in one queue. Under pressure it trims the answer and
+  hands memory back — instead of swapping and locking the laptop up.
+- **⚡ Fast where it counts.** On a MacBook Air M5 (16 GB): **115 tok/s** on a small model, **79** on a 2B, **35** on
+  a 4B — 64 – 70 % of what the memory bus physically allows — and **×4.4 faster code edits** through speculation.
+  Against vMLX on the same 27B: **+12 – 37 % decode**, **4 s** cold start instead of 19 s. [Measured](#why)
+- **🎙 Talk to it — in English, Russian, Spanish and more.** A voice chat that listens, answers aloud, looks things
+  up on the web, draws pictures on request (optional module), and follows you when you switch languages
+  mid-conversation.
+- **📎 Understands your files on the Mac itself.** PDFs, scans, photos and voice memos are read on-device (Apple
+  Vision OCR, Whisper), and the **Conductor** splits a task across your installed models — a fast one reads, a
+  senior one writes.
+- **🔌 A private drop-in API.** OpenAI, Ollama and Anthropic formats on one port (`localhost:8090`): point
+  Continue, Kilo Code, opencode or Cline at it. **JSON that always parses**, embeddings, and up to **2.5× throughput**
+  when several apps ask at once.
+- **🪶 Small.** An **11 MB** app and a ~310 MB engine — not a 2 GB install — and one command line (`./llm`) that does
+  everything the app does.
 
 <p align="center">
   <img src="docs/assets/tile-engine.png" width="396" alt="Menu-bar engine: status, token ledger, memory">
@@ -45,6 +43,8 @@ The measurements behind those numbers, with the conditions they were taken under
   <br>
   <img src="docs/assets/tile-voice.png" width="396" alt="Voice chat">
   <img src="docs/assets/tile-models.png" width="396" alt="Models: installed, hub search and download">
+  <br>
+  <img src="docs/assets/tile-browser.png" width="396" alt="Browser assistant: a side panel that acts on the page and asks before a risky step">
 </p>
 
 ## Why
@@ -275,7 +275,7 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 
 ```sh
 ./build-app.sh && open LLMBar.app      # ONE app: panel + editor + voice chat + widget (engine + CLI bundled)
-./build-dmg.sh                         # docs/LLMBar-1.0.dmg — drag-to-Applications installer
+./build-dmg.sh                         # docs/LLMBar-1.1.dmg — drag-to-Applications installer
 ```
 
 > **Prebuilt download:** [LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg) (direct download of the latest release).

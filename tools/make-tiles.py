@@ -25,6 +25,7 @@ TILES = [
     ("screenshot-editor-ide.png", "tile-editor.png"),
     ("screenshot-voice.png", "tile-voice.png"),
     ("screenshot-models.png", "tile-models.png"),
+    ("screenshot-browser.png", "tile-browser.png"),
 ]
 
 

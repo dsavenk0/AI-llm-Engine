@@ -2,9 +2,11 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
-## Unreleased
+## 1.1.0 — 12 November
 
 ### Added
+- **The desktop widget's orb slowly revolves and breathes while the model is on**, on both sizes (a widget cannot
+  animate continuously; it now gets a frame every few seconds and the system eases between them).
 - **The browser assistant tells builds apart, and installs into Chrome from Tools too.** Each build has its own
   version (`0.1.0.<n>`, the commit in its name), shown in the side panel and in the Tools rows; after an LLMBar
   update the panel says when Safari still runs the previous extension. Tools has a row per browser — Safari and

@@ -69,7 +69,7 @@ from engine import family, gguf  # noqa: E402  (stdlib only: no MLX needed to ro
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 HOME = os.path.expanduser("~")
-VERSION = "1.0"                                             # the 1.0 line; keep in step with build-app.sh's default
+VERSION = "1.1"                                             # the 1.1 line; keep in step with build-app.sh's default
 GITHUB_REPO = "dsavenk0/AI-llm-Engine"                     # where `./llm update` looks for a newer release
 BASE = os.path.dirname(os.path.abspath(__file__))          # code (repo or LLMBar.app/Contents/Resources/llm)
 DATA = os.environ.get("LLM_HOME") or BASE                   # state + .venv (LLMBar.app: ~/Library/Application Support/LLMBar)
