@@ -84,8 +84,9 @@ def build(req, context_tokens, max_tokens):
         raise PromptError("the question is longer than 4000 characters")
     page = req.get("page") or {}
     selection = req.get("selection") or ""
-    if not (page.get("text") or selection):
-        raise PromptError("nothing was shared from the page — select text or allow the page to be read")
+    if not (page.get("text") or selection) and task != "ask":
+        raise PromptError("the page has no text the extension can read (it may be drawn on a canvas or sit inside "
+                          "another site's frame) — select some text, or ask a question instead")
     instruction = TASKS[task].format(lang=(req.get("lang") or "English")[:40],
                                      tone=req.get("tone") if req.get("tone") in TONES else TONES[0])
 
@@ -102,6 +103,9 @@ def build(req, context_tokens, max_tokens):
     parts = [f"Page: {title}\nURL: {url}"]
     if body:
         parts.append(f"<page>\n{body}\n</page>")
+    elif not sel:
+        parts.append("(The page's text could not be read. Answer from the title and address if that is enough; "
+                     "otherwise say you cannot see the page's content.)")
     if sel:
         parts.append(f"<selection>\n{sel}\n</selection>")
     request = instruction + (f"\n\nThe user's request: {question}" if question else "")

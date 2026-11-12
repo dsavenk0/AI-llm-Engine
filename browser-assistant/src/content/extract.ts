@@ -20,13 +20,16 @@ export function extractPage(maxChars: number): Extracted {
   const BLOCK = /^(P|DIV|SECTION|ARTICLE|MAIN|HEADER|H[1-6]|LI|UL|OL|DL|DT|DD|TR|TABLE|BLOCKQUOTE|PRE|FIGCAPTION|BR|HR)$/;
   const hidden = (el: Element): boolean => {
     if (el.getAttribute("aria-hidden") === "true" || (el as HTMLElement).hidden) return true;
+    // a `display: contents` wrapper draws no box of its own, so checkVisibility() calls it invisible — yet
+    // everything inside it is on screen. Skipping it skipped whole pages built from such wrappers.
+    if (getComputedStyle(el).display === "contents") return false;
     const check = (el as Element & { checkVisibility?: () => boolean }).checkVisibility;
     if (typeof check === "function") return !check.call(el);
     const st = getComputedStyle(el);
     return st.display === "none" || st.visibility === "hidden";
   };
-  const root = document.querySelector("main, article, [role='main']") || document.body;
-  const out: string[] = [];
+  const main = document.querySelector("main, article, [role='main']");
+  let out: string[] = [];
   let size = 0;
   let truncated = false;
   const add = (s: string): void => {
@@ -61,11 +64,28 @@ export function extractPage(maxChars: number): Extracted {
       if (alt) add(`[image: ${alt}]`);
       return;
     }
+    // web components keep their text in an open shadow root, which childNodes does not reach
+    const shadow = (el as HTMLElement).shadowRoot;
+    if (shadow) for (const child of Array.from(shadow.childNodes)) walk(child);
     for (const child of Array.from(el.childNodes)) walk(child);
     if (block) add("\n");
   };
-  if (root) walk(root);
-  const text = out.join("").replace(/[ \t]+\n/g, "\n").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const read = (root: Element | null): void => { out = []; size = 0; truncated = false; if (root) walk(root); };
+  read(main || document.body);
+  // an app shell's <main> can be nearly empty while the content sits elsewhere: then read the whole body
+  if (main && out.join("").trim().length < 200) read(document.body);
+  // frames from the same site (a reader, an embedded document) are part of what the person sees
+  for (const f of Array.from(document.querySelectorAll("iframe"))) {
+    try {
+      const body = (f as HTMLIFrameElement).contentDocument?.body;
+      if (body && !hidden(f)) { add("\n"); walk(body); }
+    } catch {
+      // another site's frame: not readable, by design
+    }
+  }
+  let joined = out.join("");
+  if (!joined.trim()) joined = (document.body?.innerText || "").slice(0, maxChars);       // the last resort
+  const text = joined.replace(/[ \t]+\n/g, "\n").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const sel = (window.getSelection()?.toString() || "").trim();
   return { title: document.title || "", url: location.href, selection: sel.slice(0, maxChars), text, truncated };
 }
