@@ -85,7 +85,8 @@ export type UiRequest =
       selectionOnly?: boolean; selection?: string; screenshot?: boolean }
   | { kind: "cancel" }
   | { kind: "watch"; tabId: number }
-  | { kind: "undock" };                        // the docked panel (Safari) closes itself          // the side panel follows the active tab of its window
+  | { kind: "undock" }
+  | { kind: "reload" };                        // the person chose to load the newer version now                        // the docked panel (Safari) closes itself          // the side panel follows the active tab of its window
 
 export type Command =
   | { op: "start" } | { op: "stop" } | { op: "load" } | { op: "unload" }

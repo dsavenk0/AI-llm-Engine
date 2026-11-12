@@ -10,8 +10,31 @@ import { Command, PROTOCOL, ServiceError, Snapshot, Task, UiEvent, UiRequest } f
 import { isActive, renderAgent } from "./agent-view";
 import { Answer, el, metricsText, modelLabel, problemText, statusLine, updateNotice } from "./view";
 
-const port = api.runtime.connect({ name: "sidepanel" });
-const post = (m: UiRequest): void => port.postMessage(m);
+// The background script is a service worker that Chrome puts to sleep after ~30 s without events — while you read,
+// switch tabs or minimise the window. That breaks this port; the panel then reconnects on its own and asks for
+// the state and the tab again, keeping the conversation on screen, instead of falling silent.
+let port = connect();
+function connect() {
+  const p = api.runtime.connect({ name: "sidepanel" });
+  p.onMessage.addListener((ev: UiEvent) => onEvent(ev));
+  p.onDisconnect.addListener(() => {
+    setTimeout(() => {
+      port = connect();
+      port.postMessage({ kind: "subscribe" });
+      if (tabId !== null) port.postMessage({ kind: "watch", tabId });
+    }, 250);
+  });
+  return p;
+}
+const post = (m: UiRequest): void => {
+  try {
+    port.postMessage(m);
+  } catch {
+    port = connect();                         // disconnected in between: once more on a fresh port
+    port.postMessage({ kind: "subscribe" });
+    port.postMessage(m);
+  }
+};
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
 const threads = $("threads"), input = $<HTMLTextAreaElement>("input"), send = $<HTMLButtonElement>("send");
@@ -406,6 +429,13 @@ function renderState(ev: Extract<UiEvent, { kind: "state" }>): void {
   const notice = updateNotice(state, MINE, browserName === "chromium" ? "chromium" : "safari", PROTOCOL, ev.app);
   $("update").hidden = !notice;
   $("update").textContent = notice;
+  if (notice && browserName === "chromium" && !ev.app) {
+    // the update waits for this click: reloading on its own would close the panel mid-conversation
+    const now = el("button", { type: "button", class: "primary", textContent: "Update now" });
+    now.style.marginLeft = "8px";
+    now.addEventListener("click", () => { if (!busy()) post({ kind: "reload" }); });
+    $("update").append(now);
+  }
   picker.replaceChildren(...state.models.map((m) => el("option", {
     value: m.path, textContent: modelLabel(m), disabled: !m.supported, selected: m.path === state!.default })));
   const opBusy = state.engine.operation !== null;
@@ -437,7 +467,7 @@ function conflict(error: ServiceError, cmd: Command): void {
 }
 
 // ───────────── the background's side ─────────────
-port.onMessage.addListener((ev: UiEvent) => {
+function onEvent(ev: UiEvent): void {
   if (ev.kind === "state") renderState(ev);
   else if (ev.kind === "agent") {
     if (ev.view) renderTask(ev.view);
@@ -461,7 +491,7 @@ port.onMessage.addListener((ev: UiEvent) => {
     else if (tabId !== null) thread(tabId).root.append(el("div", { class: "msg note bad" }, ev.message));
     syncButtons();
   } else if (ev.kind === "command-result" && !ev.ok && ev.error) conflict(ev.error, ev.command);
-});
+}
 
 api.tabs.onUpdated.addListener((id, change) => {
   if (id === tabId && change.url) currentUrl = change.url;     // a new page in the same tab

@@ -62,6 +62,9 @@ async function maybeReload(s: Snapshot | null): Promise<void> {
   const folder = s.extension.versions[browserName === "chromium" ? "chromium" : "safari"];
   if (!folder || !newerVersion(folder, MINE)) return;
   if (running.size || runner.anyActive()) return;            // after the current answer or task, not in the middle
+  // A reload closes the side panel and its conversation: while one is open, wait — it shows that an update is
+  // ready and reloads on the person's click (kind "reload"); with no panel open the update happens by itself.
+  if (sidePanels().length) return;
   const done = (await api.storage.local.get("reloadedFor")).reloadedFor;
   if (done === folder) return;                               // tried once for this version: do not loop
   reloading = true;
@@ -363,6 +366,10 @@ api.runtime.onConnect.addListener((port: Port) => {
       else if (msg.kind === "agent-cancel") runner.cancel(t);
       else if (msg.kind === "agent-resume") runner.resume(t);
       else runner.reply(t, msg.text);
+      return;
+    }
+    if (msg.kind === "reload") {
+      api.runtime.reload();                                    // the person pressed "Update now" in the panel
       return;
     }
     if (msg.kind === "undock") {

@@ -64,7 +64,7 @@ export function updateNotice(s: Snapshot, mine: string, browser: string, protoco
   const latest = s.extension.versions[browser];
   if (!newer(latest, mine)) return "";
   return browser === "chromium"
-    ? `Updating to version ${latest} (this is ${mine})… If it does not reload by itself, press ↻ on the extension in chrome://extensions.`
+    ? `Version ${latest} is ready (this is ${mine}).`
     : `Version ${latest} of this extension is installed on this Mac (this is ${mine}). Restart Safari and add it again from ${s.extension.folder}/${browser}.`;
 }
 

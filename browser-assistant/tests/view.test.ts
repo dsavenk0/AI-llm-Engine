@@ -67,6 +67,6 @@ test("in Chrome a newer folder copy is announced as an update in progress, not a
   const { updateNotice } = await import("../src/ui/view");
   const s: any = { protocol: 1, extension: { versions: { chromium: "0.1.0.267" }, folder: "/x" } };
   const n = updateNotice(s, "0.1.0.266", "chromium", 1);
-  assert.match(n, /Updating to version 0\.1\.0\.267/);
+  assert.match(n, /Version 0\.1\.0\.267 is ready/);
   assert.doesNotMatch(n, /Safari/);
 });
