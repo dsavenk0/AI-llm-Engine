@@ -148,16 +148,122 @@ G, R, Y, CY = (lambda s: c("32", s)), (lambda s: c("31", s)), (lambda s: c("33",
 MINT = lambda s: c("1;38;2;77;242;194", s)  # the app's accent color (LLMBar, docs/banner.png)
 
 
+def _rgb(r, g, b, bg=False):
+    """An SGR colour: 24-bit where the terminal says it can, else the nearest of the 256-colour cube."""
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") or os.environ.get("TERM_PROGRAM") in (
+            "iTerm.app", "WezTerm", "ghostty", "vscode"):
+        return f"{48 if bg else 38};2;{r};{g};{b}"
+    q = lambda v: max(0, min(5, round(v / 255 * 5)))
+    return f"{48 if bg else 38};5;{16 + 36 * q(r) + 6 * q(g) + q(b)}"
+
+
+# "LLM" in the ANSI Shadow style: solid blocks, and box-drawing strokes for the shadow they cast
+_LOGO = [
+    "██╗     ██╗     ███╗   ███╗",
+    "██║     ██║     ████╗ ████║",
+    "██║     ██║     ██╔████╔██║",
+    "██║     ██║     ██║╚██╔╝██║",
+    "███████╗███████╗██║ ╚═╝ ██║",
+    "╚══════╝╚══════╝╚═╝     ╚═╝",
+]
+
+
+# LLMBar's icon — "Ai>_" in a dark window with a glowing frame — in a 5×7 pixel font
+_GLYPHS = {
+    "A": [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+    "i": ["..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###."],
+    ">": ["#....", ".#...", "..#..", "...#.", "..#..", ".#...", "#...."],
+    "_": [".....", ".....", ".....", ".....", ".....", ".....", "#####"],
+}
+
+
+def _icon():
+    """The app icon as a pixel grid (colours, or None outside the rounded frame)."""
+    frame, inside, ink, cursor = (0, 229, 255), (8, 24, 31), (77, 242, 194), (0, 229, 255)
+    w, h = 32, 16
+    grid = [[inside] * w for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            corner = (x in (0, w - 1)) and (y in (0, h - 1))
+            if corner:
+                grid[y][x] = None                                             # rounded corners
+            elif x in (0, w - 1) or y in (0, h - 1):
+                grid[y][x] = frame
+    for n, ch in enumerate("Ai>_"):
+        for gy, row in enumerate(_GLYPHS[ch]):
+            for gx, bit in enumerate(row):
+                if bit == "#":
+                    grid[4 + gy][4 + n * 6 + gx] = cursor if ch == "_" else ink
+    return grid
+
+
+def _pixel_lines(grid):
+    """Rows of ▀ characters: the top pixel is the foreground, the bottom one the background."""
+    out = []
+    for y in range(0, len(grid), 2):
+        line = ""
+        for x in range(len(grid[0])):
+            top, bot = grid[y][x], grid[y + 1][x] if y + 1 < len(grid) else None
+            if top is None and bot is None:
+                line += " "
+            elif bot is None:
+                line += f"\033[{_rgb(*top)}m▀\033[0m"
+            elif top is None:
+                line += f"\033[{_rgb(*bot)}m▄\033[0m"
+            else:
+                line += f"\033[{_rgb(*top)};{_rgb(*bot, bg=True)}m▀\033[0m"
+        out.append(line)
+    return out
+
+
+_TIPS = [
+    "./llm read report.pdf — ask about a PDF, a scan or a voice memo; it is read on this Mac",
+    "./llm search qwen — find a model and see before the download whether it will run here",
+    "./llm conduct \"add tests\" --file spec.pdf — split a task across your models",
+    "./llm assistant setup — the assistant in Safari and Chrome, a side panel beside the page",
+    "./llm perf — measure this Mac against the memory bus it is limited by",
+    "./llm serve — OpenAI, Ollama and Anthropic APIs on localhost:8090 for your editor",
+    "./llm help <command> — every command, with examples",
+]
+
+
 def print_banner():
-    """One-time welcome banner for the interactive menu (skipped when not a TTY)."""
+    """The welcome of the interactive menu: "LLM" in shadowed block letters, LLMBar's orb beside it, a greeting
+    for the time of day and a tip. A plain line when the terminal is not a TTY, has no colour, or is narrow."""
     if not TTY:
         return
-    title, sub = "  Ai>_   AI-llm-Engine", "  " + T("local MLX engine — fast, minimal, yours")
-    width = max(len(title), len(sub)) + 1
-    print(MINT("  ╭" + "─" * width + "╮"))
-    print(MINT("  │") + B(title.ljust(width)) + MINT("│"))
-    print(MINT("  │") + DIM(sub.ljust(width)) + MINT("│"))
-    print(MINT("  ╰" + "─" * width + "╯"))
+    import random
+    import shutil as _sh
+    hour = time.localtime().tm_hour
+    hello = T("Good night") if hour < 5 else T("Good morning") if hour < 12 else \
+        T("Good afternoon") if hour < 18 else T("Good evening")
+    tip = T(random.choice(_TIPS))
+    cols = _sh.get_terminal_size((80, 24)).columns
+    if os.environ.get("NO_COLOR") or cols < 64:
+        print(MINT("  Ai>_  ") + B("AI-llm-Engine") + DIM(f"  v{VERSION} · " + T("your models, your Mac, no cloud")))
+        print(DIM(f"  {hello}. " + T("Tip:") + f" {tip}"))
+        return
+    icon = _pixel_lines(_icon())                                              # 8 rows, 32 columns
+    top, bottom = (0, 229, 255), (77, 242, 194)                               # cyan to mint, as in LLMBar
+    shade = _rgb(23, 92, 104)
+    rows = []
+    for i, row in enumerate(_LOGO):
+        t = i / (len(_LOGO) - 1)
+        col = _rgb(*(int(a + (b - a) * t) for a, b in zip(top, bottom)))
+        rows.append("".join(f"\033[1;{col}m█\033[0m" if ch == "█" else
+                            (f"\033[{shade}m{ch}\033[0m" if ch != " " else " ") for ch in row))
+    width = len(_LOGO[0])
+    show_icon = cols >= 2 + width + 5 + 32
+    print()
+    # the letters (6 rows) centred on the icon (8 rows)
+    for i in range(len(icon) if show_icon else len(rows)):
+        k = i - 1 if show_icon else i
+        left = rows[k] if 0 <= k < len(rows) else " " * width
+        print("  " + left + ("     " + icon[i] if show_icon else ""))
+    print()
+    print("  " + B(f"{hello}.") + DIM(f"  AI-llm-Engine v{VERSION} · " + T("your models, your Mac, no cloud.")))
+    print("  " + DIM(T("Tip:") + " " + tip))
+    print()
 
 
 # ───────────────────────────── i18n ─────────────────────────────

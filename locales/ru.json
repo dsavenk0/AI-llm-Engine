@@ -24,7 +24,6 @@
   "Ctrl+C to go back": "Ctrl+C — назад",
   "Models": "Модели",
   "selected": "выбрана",
-  "local MLX engine — fast, minimal, yours": "локальный движок MLX — быстрый, минималистичный, твой",
   "✗ Load timed out.": "✗ Таймаут загрузки.",
   "✗ Load timed out, process stopped.": "✗ Таймаут загрузки, процесс остановлен.",
   "Nothing is running.": "Ничего не запущено.",
@@ -412,5 +411,19 @@
   "Chrome, Edge, Brave, Arc and other Chromium browsers — two steps:": "Chrome, Edge, Brave, Arc и другие браузеры на Chromium — два шага:",
   "  1. Open chrome://extensions (edge://extensions in Edge), turn on “Developer mode”, press “Load unpacked” and choose:": "  1. Откройте chrome://extensions (в Edge — edge://extensions), включите «Режим разработчика», нажмите «Загрузить распакованное» и выберите:",
   "Pairing set up for:": "Подключение настроено для:",
-  "  2. Click the extension's toolbar button: the side panel opens and connects by itself.": "  2. Нажмите кнопку расширения на панели инструментов: откроется боковая панель и подключится сама."
+  "  2. Click the extension's toolbar button: the side panel opens and connects by itself.": "  2. Нажмите кнопку расширения на панели инструментов: откроется боковая панель и подключится сама.",
+  "./llm read report.pdf — ask about a PDF, a scan or a voice memo; it is read on this Mac": "./llm read report.pdf — спросите о PDF, скане или голосовой заметке; всё читается на этом Mac",
+  "./llm search qwen — find a model and see before the download whether it will run here": "./llm search qwen — найдите модель и узнайте до скачивания, запустится ли она здесь",
+  "./llm conduct \"add tests\" --file spec.pdf — split a task across your models": "./llm conduct \"добавь тесты\" --file spec.pdf — разделите задачу между вашими моделями",
+  "./llm assistant setup — the assistant in Safari and Chrome, a side panel beside the page": "./llm assistant setup — ассистент в Safari и Chrome: боковая панель рядом со страницей",
+  "./llm perf — measure this Mac against the memory bus it is limited by": "./llm perf — замерьте этот Mac относительно шины памяти, которая его ограничивает",
+  "./llm serve — OpenAI, Ollama and Anthropic APIs on localhost:8090 for your editor": "./llm serve — API в форматах OpenAI, Ollama и Anthropic на localhost:8090 для вашего редактора",
+  "./llm help <command> — every command, with examples": "./llm help <команда> — все команды с примерами",
+  "Good night": "Доброй ночи",
+  "Good morning": "Доброе утро",
+  "Good afternoon": "Добрый день",
+  "Good evening": "Добрый вечер",
+  "Tip:": "Совет:",
+  "your models, your Mac, no cloud.": "ваши модели, ваш Mac, без облака.",
+  "your models, your Mac, no cloud": "ваши модели, ваш Mac, без облака"
 }
