@@ -1671,7 +1671,11 @@ final class VoiceModule: NSObject {
             let f = screen.visibleFrame
             w.setFrameOrigin(NSPoint(x: f.midX - w.frame.width / 2, y: f.minY + f.height * 0.15))
         }
+        // minimised to the Dock, the window would stay there: makeKeyAndOrderFront does not bring it back, so a
+        // tap on the widget woke the app with nothing to show for it
+        if w.isMiniaturized { w.deminiaturize(nil) }
         w.makeKeyAndOrderFront(nil)
+        w.orderFrontRegardless()                     // in front even if macOS has not let the app activate yet
         NSApp.activate(ignoringOtherApps: true)
         if listen, voice.state == .idle || voice.turns.isEmpty { voice.begin() }
     }

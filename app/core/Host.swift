@@ -74,12 +74,28 @@ enum AppHost {
 
     /// True once any llmbar:// link was handled — a launch that came from a link does not also pop the panel open.
     static var openedByLink = false
+    static var launched = false
+    private static var pending: [URL] = []
+
+    /// Called once the app has finished launching: runs the links that arrived during the launch. True if any did.
+    @discardableResult
+    static func flushPendingLinks() -> Bool {
+        launched = true
+        let links = pending
+        pending = []
+        links.forEach { handle($0) }
+        return !links.isEmpty
+    }
 
     /// `llmbar://voice` · `llmbar://editor?root=/path` · `llmbar://cli` · `llmbar://toggle`.
     /// Opening a module this way also starts loading the model, so it is ready when the window is.
     static func handle(_ url: URL) {
         guard url.scheme == "llmbar" || url.scheme == "llmvoice" else { return }
         openedByLink = true
+        // macOS delivers the link that launched the app before the app has finished launching: the panel does not
+        // exist yet, so acting now opened nothing — and the launch, seeing a link, did not open the panel either.
+        // Such links wait until the launch is done (flushPendingLinks).
+        if !launched { pending.append(url); return }
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let q = { (name: String) in query.first { $0.name == name }?.value }
         var what = url.host ?? ""

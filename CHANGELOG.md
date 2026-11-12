@@ -99,6 +99,8 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   the real forward), `tests/bench_batch.py`.
 
 ### Fixed
+- **A tap on the widget now shows LLMBar.** When LLMBar was not running, the widget started it but its window never
+  appeared, so it looked as if nothing happened; it now opens. A voice chat minimised to the Dock is brought back too.
 - The request timeout started when the engine lock was acquired, so waiting for the model ate it. It now starts
   at the first token check.
 - `tools/make-tiles.py` trims the dead field around each screenshot and puts them on one canvas, so the README

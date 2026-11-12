@@ -1778,6 +1778,21 @@ struct ToolsTab: View {
                         e.openVoice()
                     }
                 }
+                // Optional and independent of this app: the browser extension talks to its own small service, so
+                // it keeps working with LLMBar closed. Each row installs what is missing and takes the person to
+                // the one step the browser keeps for them (BrowserAssistantSetup.swift).
+                tool("safari", L("Browser assistant · Safari", "Браузерный ассистент · Safari"),
+                     L("Enables it in Safari", "Включит в Safari")
+                     + (BrowserAssistantSetup.bundledVersion.map { " · v\($0)" } ?? "")) {
+                    BrowserAssistantSetup.run()
+                }
+                if let browser = BrowserAssistantSetup.chromium {
+                    tool("globe", L("Browser assistant · \(browser.name)", "Браузерный ассистент · \(browser.name)"),
+                         L("Prepares the install", "Подготовит установку")
+                         + (BrowserAssistantSetup.chromiumVersion.map { " · v\($0)" } ?? "")) {
+                        BrowserAssistantSetup.runChromium()
+                    }
+                }
                 // an inline list, like the model settings: a Menu in this style lost the row's padding and chevron
                 Button(action: { connectOpen.toggle() }) {
                     HStack(spacing: 10) {
@@ -1817,23 +1832,6 @@ struct ToolsTab: View {
                      L("Inspect tensors, capture activations, weight patches",
                        "Инспекция тензоров, захват активаций, патчи весов")) {
                     CLI.terminal("./llm lab")
-                }
-                // Optional and independent of this app: the Safari extension talks to its own small service,
-                // so it keeps working with LLMBar closed. This installs what is missing and opens Safari on the
-                // extension's switch — the one step Safari keeps for the person (BrowserAssistantSetup.swift).
-                tool("safari", L("Browser Assistant · Safari", "Браузерный ассистент · Safari"),
-                     L("The local model reads and acts on the page · enables it in Safari",
-                       "Локальная модель читает страницу и действует · включит в Safari")
-                     + (BrowserAssistantSetup.bundledVersion.map { " · v\($0)" } ?? "")) {
-                    BrowserAssistantSetup.run()
-                }
-                if let browser = BrowserAssistantSetup.chromium {
-                    tool("globe", L("Browser Assistant · \(browser.name)", "Браузерный ассистент · \(browser.name)"),
-                         L("The same assistant as a side panel in \(browser.name) · prepares the install",
-                           "Тот же ассистент боковой панелью в \(browser.name) · подготовит установку")
-                         + (BrowserAssistantSetup.chromiumVersion.map { " · v\($0)" } ?? "")) {
-                        BrowserAssistantSetup.runChromium()
-                    }
                 }
             }
         }
@@ -2216,7 +2214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // LLMBar opens expanded: a menu-bar app with no visible sign it started is easy to take for "nothing
         // happened" (and the icon may sit under the notch). A launch from a link brings its own window instead.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self, !AppHost.openedByLink, !self.uiVisible else { return }
+            guard let self else { return }
+            if AppHost.flushPendingLinks() { return }              // launched by the widget: do what it asked
+            guard !AppHost.openedByLink, !self.uiVisible else { return }
             self.reveal()
         }
         // slow poll for the status icon; full sampling only while the UI is visible
@@ -2356,6 +2356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         engine.loadConfig()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()      // opened from the widget the app may not be active yet: show it anyway
         startFastSampling()
     }
 
@@ -2372,6 +2373,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        // a module window minimised to the Dock counts as not visible: bring it back rather than showing the panel
+        let minimised = NSApp.windows.filter { $0.isMiniaturized }
+        if !minimised.isEmpty {
+            minimised.forEach { $0.deminiaturize(nil) }
+            NSApp.activate(ignoringOtherApps: true)
+            return false
+        }
         if hasVisibleWindows { return true }                       // a module window is up: just bring it forward
         reveal()
         return false
