@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import prompts
+from . import agent, prompts
 
 PROTOCOL = 1
 PORT = 8093
@@ -433,6 +433,79 @@ class Assistant:
         g.cancel()
         return {"cancelled": True}
 
+    def _complete(self, g, health, messages, max_tokens):
+        """The text of one non-streamed-to-the-client completion that asks for a JSON object, as one string.
+        `g` is registered, so it can be cancelled like any generation."""
+        body = {"model": health.get("model"), "messages": messages, "stream": True, "max_tokens": max_tokens,
+                "temperature": 0.2, "response_format": {"type": "json_object"},
+                "chat_template_kwargs": {"enable_thinking": False}}
+        try:
+            g.sock, resp = self.control.open_chat(body)
+        except OSError as e:
+            raise Conflict("engine_error", f"the engine did not answer: {e}") from None
+        if resp.status != 200:
+            try:
+                msg = json.loads(resp.read() or b"{}").get("error", {}).get("message")
+            except ValueError:
+                msg = None
+            raise Conflict("engine_error", msg or f"the engine answered {resp.status}")
+        out = []
+        try:
+            for chunk in _sse_lines(resp):
+                for ch in chunk.get("choices") or []:
+                    piece = (ch.get("delta") or {}).get("content")
+                    if piece:
+                        out.append(piece)
+        except (OSError, http.client.HTTPException):
+            if not g.cancelled:
+                raise Conflict("engine_error", "the connection to the engine was lost") from None
+        finally:
+            if g.sock is not None:
+                g.sock.close()
+                g.sock = None
+        return "".join(out)
+
+    def agent_step(self, req):
+        """One step of the browser agent: the model's next action for this page and goal, validated. The
+        extension decides whether it may run and asks the person; nothing here touches a browser."""
+        import re
+        session = str(req.get("session") or "")[:64]
+        if not session:
+            raise Conflict("bad_request", "a session id is needed")
+        h = self.control.health()
+        if not h:
+            raise Conflict("engine_offline", "the engine is not running — start it first")
+        try:
+            messages, snap = agent.build_messages(req.get("goal"), req.get("snapshot"), req.get("history"))
+        except agent.AgentError as e:
+            raise Conflict("bad_request", str(e)) from None
+        g = Generation(session)
+        rid = req.get("request_id")
+        if isinstance(rid, str) and re.match(r"^[a-z0-9-]{8,40}$", rid):
+            g.id = rid                        # the caller can name it, so it can cancel before the answer comes
+        with self.lock:
+            self.gens[g.id] = g
+        self.refresh()
+        try:
+            problem = ""
+            for attempt in (1, 2):
+                text = self._complete(g, h, messages, 500)
+                if g.cancelled:
+                    raise Conflict("cancelled", "stopped")
+                try:
+                    return {"action": agent.validate(agent.parse_action(text), snap), "attempts": attempt}
+                except agent.AgentError as e:
+                    problem = str(e)
+                    messages = messages + [
+                        {"role": "assistant", "content": text[:1500]},
+                        {"role": "user", "content": f"That was not usable: {problem}. Reply with one valid JSON "
+                                                    f"action, using only refs from the list."}]
+            raise Conflict("bad_action", f"the model did not give a usable action: {problem}")
+        finally:
+            with self.lock:
+                self.gens.pop(g.id, None)
+            self.refresh()
+
     def chat(self, req, emit):
         """Run one task. `emit(event)` sends one event to the client and returns False once it has gone."""
         session = str(req.get("session") or "")[:64]
@@ -502,6 +575,21 @@ class Assistant:
             with self.lock:
                 self.gens.pop(g.id, None)
             self.refresh()
+
+
+def _sse_lines(resp):
+    """The decoded JSON of each `data:` line of a streamed response, until [DONE]."""
+    for raw in resp:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            return
+        try:
+            yield json.loads(data)
+        except ValueError:
+            continue
 
 
 def _engine_error(status, body, what):
@@ -659,6 +747,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                                      body.get("expected_default"), confirm))
             if path.startswith("/v1/assistant/generations/") and path.endswith("/cancel"):
                 return self._json(200, a.cancel(path.split("/")[-2], session))
+            if path == "/v1/assistant/agent/step":
+                return self._json(200, a.agent_step(body))
             if path == "/v1/assistant/chat":
                 started = []
 
@@ -677,7 +767,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         except Conflict as e:
             code = {"model_in_use": 409, "busy": 409, "stale": 409, "not_yours": 403, "engine_offline": 503,
-                    "unknown_model": 404}.get(e.code, 400)
+                    "unknown_model": 404, "bad_action": 422, "cancelled": 409, "engine_error": 502}.get(e.code, 400)
             return self._error(code, e.code, e.message, **e.extra,
                                **({"state": a.snapshot()} if e.code in ("stale", "model_in_use", "busy") else {}))
         self._error(404, "not_found", "unknown path")
