@@ -1952,9 +1952,7 @@ struct ContentView: View {
                 Text(L("Tools", "Тулзы")).tag(4)
             }.pickerStyle(.segmented).labelsHidden()
             // `showsIndicators: false` only hides the scroller: with the system set to "Show scroll bars:
-            // Always" the legacy scroller still reserves its ~15pt gutter, which pushes every card left and
-            // leaves the panel visibly off-centre (23pt of margin on the left against 37pt on the right).
-            // .scrollIndicators(.never) gives the width back.
+            // Always" the legacy scroller still reserves its gutter; .scrollIndicators(.never) gives it back.
             ScrollView {
                 Group {
                     switch tab {
@@ -1996,7 +1994,10 @@ struct ContentView: View {
             }
             .padding(.bottom, 4)
         }
-        .padding(16)
+        // 12pt at the sides: the tab bar cannot shrink below ~367pt with the Russian labels, and with 16pt sides
+        // (360pt for the column) it widened the column on its own — the cards stayed 360pt at the leading edge,
+        // 23px from the left of the panel and 37px from the right. With 368pt everything fits and sits centred.
+        .padding(.horizontal, 12).padding(.vertical, 16)
         .frame(width: 392)
         .background(background)
         .environment(\.colorScheme, lightTheme ? .light : .dark)
