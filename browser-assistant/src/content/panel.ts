@@ -26,12 +26,12 @@ function open(): void {
   const copy = el("button", { type: "button", textContent: "Copy" });
   const close = el("button", { type: "button", textContent: "✕", title: "Close" });
   close.setAttribute("aria-label", "Close");
-  const bar = el("div", { class: "bar" }, el("span", { class: "title" }, "Local assistant"), stop, copy, close);
+  const bar = el("div", { class: "bar" }, el("span", { class: "title" }, "LLMBar Assistant"), stop, copy, close);
   const agentRoot = el("div", { class: "agent" });
   agentRoot.hidden = true;
   const panel = el("div", { class: "panel" }, bar, agentRoot, answer.root);
   panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-label", "Local assistant answer");
+  panel.setAttribute("aria-label", "LLMBar Assistant answer");
   root.append(style, panel);
   document.documentElement.append(host);
 

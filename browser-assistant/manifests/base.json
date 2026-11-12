@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "AI-llm-Engine Assistant",
-  "short_name": "Local assistant",
+  "name": "LLMBar Assistant",
+  "short_name": "LLMBar Assistant",
   "version": "0.1.0",
   "description": "Ask the model running on your own Mac about the page you are reading, or let it click, type and navigate while you watch — anything that submits, pays or sends waits for your approval. Nothing leaves the machine.",
   "action": {

@@ -28,6 +28,7 @@ select { -webkit-appearance: none; appearance: none; background-color: var(--fie
 /* header */
 .top { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .logo { border-radius: 6px; }
+body.browser-titled .logo, body.browser-titled .brand { display: none; }
 .brand { font-weight: 700; letter-spacing: .01em; white-space: nowrap; flex: none; }
 .top .spacer { min-width: 4px; }
 .brand span { color: var(--accent); font-weight: 600; }

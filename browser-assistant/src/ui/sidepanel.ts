@@ -362,6 +362,8 @@ if (foot) {
   const v = el("span", { class: "ver", textContent: ` · v${MINE}`, title: MANIFEST.version_name || MINE });
   foot.append(v);
 }
+// Chrome's own side panel already shows the extension's icon and name above this page: ours would repeat it
+if (!EMBEDDED) document.body.classList.add("browser-titled");
 if (EMBEDDED) {
   $("undock").hidden = false;
   $("undock").addEventListener("click", () => post({ kind: "undock" }));
