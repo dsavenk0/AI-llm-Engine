@@ -62,7 +62,16 @@ body.browser-titled .logo, body.browser-titled .brand { display: none; }
 .msg.user { align-self: flex-end; max-width: 88%; background: var(--raise); border: 1px solid var(--line);
   border-radius: 14px 14px 4px 14px; padding: 8px 12px; white-space: pre-wrap; }
 .msg.user .kind { font-family: var(--mono); margin-bottom: 2px; }
+/* the model's answer is a message like the person's own: a bubble on the left, theirs on the right. What it
+   shared and how it reasoned stay outside the bubble, quieter; the answer itself is inside. */
+.msg.assistant { align-self: flex-start; max-width: 92%; }
 .msg.assistant .answer { border: 0; padding: 0; max-height: none; overflow: visible; }
+.msg.assistant .answer .shared { margin: 0 2px 6px; }
+.msg.assistant .answer .think { margin: 0 2px 6px; }
+.msg.assistant .answer .body { background: var(--field); border: 1px solid var(--line); border-radius: 14px 14px 14px 4px;
+  padding: 8px 12px; line-height: 1.5; }
+.msg.assistant .answer .body:empty { display: none; }
+.msg.assistant .answer .note { margin: 6px 2px 0; }
 .msg.note { font-size: 12px; }
 .agent-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--field); }
 .activity-now { font: 600 12px/1.3 var(--mono); color: var(--dim); margin-bottom: 6px; }
