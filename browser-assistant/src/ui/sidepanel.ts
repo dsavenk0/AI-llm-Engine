@@ -210,7 +210,7 @@ async function ask(task: Task, question?: string): Promise<void> {
   answer = { a, tab: tabId };
   const lang = navigator.language.startsWith("ru") ? "Russian" : "English";
   post({ kind: "ask", tabId, task, question, lang, thinking: $<HTMLInputElement>("thinking").checked,
-         screenshot: seeing() || (canSee() && wantsToSee(question)) });
+         screenshot: seeing() || wantsToSee(question) });
   syncButtons();
   scroll();
 }
@@ -273,7 +273,7 @@ function canSee(): boolean {
 }
 
 function seeing(): boolean {
-  return see.getAttribute("aria-pressed") === "true" && canSee();
+  return see.getAttribute("aria-pressed") === "true";
 }
 
 see.addEventListener("click", async (e) => {
@@ -301,9 +301,10 @@ function syncButtons(): void {
   const working = busy();
   const ready = state?.engine.state === "ready";
   stop.hidden = !working;
-  see.disabled = !canSee();
+  see.disabled = false;
   see.title = canSee() ? (mode.value === "ask" ? "Attach a screenshot of the page to the question"
-    : "Let the model see a screenshot of the page at every step") : "The loaded model cannot see images";
+    : "Let the model see a screenshot of the page at every step")
+    : "This model cannot see: the screenshot and the page's pictures are described to it in words (Apple Vision)";
   send.hidden = working;
   send.disabled = !state;                       // off is fine: sending starts the model
   input.placeholder = !state ? "Not connected — open ⚙︎ settings"
@@ -315,7 +316,7 @@ function syncButtons(): void {
 function submit(): void {
   const text = input.value.trim();
   if (send.disabled || busy()) return;
-  const capture = seeing() || (mode.value === "ask" && canSee() && wantsToSee(text));
+  const capture = seeing() || (mode.value === "ask" && wantsToSee(text));
   if (mode.value === "ask") withAccess(() => whenReady(() => void ask(text ? "ask" : "summarize", text || undefined)), capture);
   else if (text) withAccess(() => whenReady(() => act(text)), capture);
   else return;

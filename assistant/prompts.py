@@ -138,6 +138,8 @@ def build(req, context_tokens, max_tokens):
     if sel and task != "ask":
         request += "\nWork on the selection; use the page only as background."
     pictures = images_of(req)
+    if req.get("described"):
+        parts.append(str(req["described"])[:20000])
     if pictures:
         extra = len(pictures) - (1 if req.get("image") else 0)
         parts.append(("A screenshot of the visible part of the page is attached" if req.get("image") else "")
@@ -153,5 +155,5 @@ def build(req, context_tokens, max_tokens):
     shared = {"title": bool(title), "url": url,
               "page_chars": len(body), "page_chars_total": body_n, "page_truncated": body_cut,
               "selection_chars": len(sel), "selection_chars_total": sel_n, "selection_truncated": sel_cut,
-              "screenshot": bool(req.get("image")), "pictures": len(pictures)}
+              "screenshot": bool(req.get("image")), "pictures": len(pictures), "described": bool(req.get("described"))}
     return messages, shared

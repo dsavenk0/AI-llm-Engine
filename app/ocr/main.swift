@@ -3,6 +3,8 @@
 // scanned PDFs and image files; without it those are reported as "needs OCR" instead.
 //
 //   ocr <file.pdf | image> [more files…] [--lang en,ru]   →  recognised text on stdout
+//   ocr --describe <image> [more images…]                 →  one JSON line per image: {"text", "labels"} —
+//        what a model that cannot see is told about a picture (the browser assistant, assistant/describe.py)
 import Foundation
 import Vision
 import PDFKit
@@ -52,7 +54,30 @@ func ocr(_ path: String, _ langs: [String]) -> String {
     return ""
 }
 
+/// What is in a picture, as words: Vision's scene labels above a confidence floor, most likely first.
+func labels(_ cg: CGImage) -> [String] {
+    let req = VNClassifyImageRequest()
+    do { try VNImageRequestHandler(cgImage: cg, options: [:]).perform([req]) } catch { return [] }
+    return (req.results ?? []).filter { $0.confidence >= 0.3 }
+        .sorted { $0.confidence > $1.confidence }.prefix(8)
+        .map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
+}
+
 var args = Array(CommandLine.arguments.dropFirst())
+if let i = args.firstIndex(of: "--describe") {
+    args.remove(at: i)
+    for path in args {
+        var out: [String: Any] = ["text": "", "labels": [String]()]
+        if let cg = imageFile(path) {
+            out["text"] = recognize(cg, [])
+            out["labels"] = labels(cg)
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: out), let line = String(data: data, encoding: .utf8) {
+            print(line)
+        }
+    }
+    exit(0)
+}
 var langs: [String] = []
 if let i = args.firstIndex(of: "--lang"), i + 1 < args.count {
     langs = args[i + 1].split(separator: ",").map(String.init)

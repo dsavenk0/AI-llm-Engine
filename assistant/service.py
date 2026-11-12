@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import agent, prompts
+from . import agent, describe, prompts
 
 PROTOCOL = 1
 PORT = 8093
@@ -531,8 +531,14 @@ class Assistant:
             raise Conflict("engine_offline", "the engine is not running — start it first")
         max_tokens = max(64, min(int(req.get("max_tokens") or 1024), 4096))
         if (req.get("image") or req.get("images")) and not h.get("vision"):
-            raise Conflict("no_vision", "the loaded model cannot see images — pick a model with vision to ask about "
-                                        "a screenshot")
+            # a model without eyes gets the pictures in words: Apple Vision's labels and the text it read
+            try:
+                pics = prompts.images_of(req)
+            except prompts.PromptError as e:
+                raise Conflict("bad_request", str(e)) from None
+            words = describe.as_text(describe.describe(pics), bool(req.get("image")))
+            req = {k: v for k, v in req.items() if k not in ("image", "images")}
+            req["described"] = words
         try:
             messages, shared = prompts.build(dict(req, can_see=bool(h.get("vision"))), int(h.get("context") or 4096),
                                              max_tokens)
