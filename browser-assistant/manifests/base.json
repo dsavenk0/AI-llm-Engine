@@ -3,11 +3,12 @@
   "name": "AI-llm-Engine Assistant",
   "short_name": "Local assistant",
   "version": "0.1.0",
-  "description": "Ask the model running on your own Mac about the page you are reading. Nothing leaves the machine.",
+  "description": "Ask the model running on your own Mac about the page you are reading, and let it click, fill and navigate for you — each step only after you approve it. Nothing leaves the machine.",
   "action": { "default_title": "Local assistant", "default_popup": "popup.html" },
   "options_ui": { "page": "options.html", "open_in_tab": true },
   "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
   "host_permissions": ["http://127.0.0.1/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "icons": { "48": "icons/icon-48.png", "96": "icons/icon-96.png", "128": "icons/icon-128.png" },
   "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:*" }
 }

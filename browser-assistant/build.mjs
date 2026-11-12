@@ -12,7 +12,7 @@ const common = { bundle: true, format: "esm", target: "es2022", logLevel: "warni
 if (process.argv.includes("--tests")) {
   const out = join(root, "dist", "tests");
   rmSync(out, { recursive: true, force: true });
-  await build({ ...common, platform: "node", outdir: out, outExtension: { ".js": ".mjs" },
+  await build({ ...common, platform: "node", outdir: out, outExtension: { ".js": ".mjs" }, external: ["jsdom"],
     entryPoints: readdirSync(join(root, "tests")).filter((f) => f.endsWith(".test.ts")).map((f) => join(root, "tests", f)) });
 } else {
   const version = read("package.json").version;
@@ -24,12 +24,13 @@ if (process.argv.includes("--tests")) {
       background: join(root, "src/background/main.ts"), popup: join(root, "src/ui/popup.ts"),
       options: join(root, "src/ui/options.ts") } });
     // the panel is injected with scripting.executeScript({files}), which runs classic scripts
-    await build({ ...common, format: "iife", outdir: out, entryPoints: { panel: join(root, "src/content/panel.ts") } });
+    await build({ ...common, format: "iife", outdir: out, entryPoints: {
+      panel: join(root, "src/content/panel.ts"), "agent-page": join(root, "src/content/agent-page.ts") } });
     writeFileSync(join(out, "manifest.json"),
       JSON.stringify({ ...read("manifests/base.json"), ...read(`manifests/${browser}.json`), version }, null, 2) + "\n");
     for (const page of ["popup.html", "options.html"]) cpSync(join(root, "src/ui", page), join(out, page));
     writeFileSync(join(out, "popup.css"), readFileSync(join(root, "src/ui/base.css"), "utf8")
-      + readFileSync(join(root, "src/ui/popup.css"), "utf8"));
+      + readFileSync(join(root, "src/ui/popup.css"), "utf8") + readFileSync(join(root, "src/ui/agent.css"), "utf8"));
     cpSync(join(root, "icons"), join(out, "icons"), { recursive: true });
     console.log(`built dist/${browser} (v${version})`);
   }

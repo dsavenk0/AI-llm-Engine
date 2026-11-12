@@ -51,4 +51,23 @@ $("forget").addEventListener("click", async () => {
   token.value = "";
   say("Token removed from this browser.", true);
 });
+async function showActivity(): Promise<void> {
+  const list = $("activity");
+  const log = ((await api.storage.local.get("audit")).audit as { t: number; origin: string; kind: string; what: string; ok?: boolean }[] | undefined) || [];
+  list.replaceChildren();
+  if (!log.length) {
+    const li = document.createElement("li");
+    li.textContent = "Nothing yet.";
+    list.append(li);
+    return;
+  }
+  for (const e of log.slice(-60).reverse()) {
+    const li = document.createElement("li");
+    li.className = e.ok === false ? "bad" : "";
+    li.textContent = `${new Date(e.t).toLocaleTimeString()} · ${e.origin.replace(/^https?:\/\//, "")} · ${e.kind}: ${e.what}`;
+    list.append(li);
+  }
+}
+$("clear-log").addEventListener("click", async () => { await api.storage.local.set({ audit: [] }); await showActivity(); });
+void showActivity();
 void load();

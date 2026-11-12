@@ -5,6 +5,13 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **Browser Assistant can click, fill and navigate — each step only after you approve it.** Give the Safari
+  extension a goal; it reads the page, the local model proposes one action, and a card on the page says
+  exactly what will happen, built from the element itself rather than from the model's words. Passwords, card
+  numbers and one-time codes are never typed, CAPTCHAs are never touched, nothing is run that the model or the
+  page supplies, and a step is refused if the page moved, the element changed or something covers it. Eight steps
+  at most; Stop ends it at once; a local log (no page text, no typed values) shows what was done. Tested
+  against a simulated page and a fake browser, not yet in Safari itself.
 - **Browser Assistant (Safari, optional).** An extension that asks the model on your Mac about the page you
   are reading — a question, a summary, or Explain / Translate / Rewrite on selected text — and controls the
   model from the browser: pick it, load it, unload it, stop an answer, with LLMBar and the terminal closed.

@@ -6,6 +6,9 @@ import { api, browserName, Port } from "../browser-adapters/api";
 import { Client, ServiceFailure, Settings } from "../core/client";
 import { ChatEvent, Command, DEFAULT_SERVICE, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { extractPage, Extracted } from "../content/extract";
+import { AgentRunner } from "./agent";
+import { bridge } from "./agent-bridge";
+import { AgentView, AuditEntry } from "../core/agent-types";
 
 const MAX_PAGE_CHARS = 200_000;      // what is read from a page; the service cuts it to the model's context
 const BOOT = Math.random().toString(36).slice(2, 8);
@@ -147,6 +150,52 @@ async function cancel(port: Port): Promise<void> {
   run.abort.abort();
 }
 
+// ───────────── the browser agent ─────────────
+const portTab = new Map<Port, number>();           // which tab a popup or panel is about
+
+async function audit(entry: AuditEntry): Promise<void> {
+  try {
+    const cur = ((await api.storage.local.get("audit")).audit as AuditEntry[] | undefined) || [];
+    cur.push(entry);
+    await api.storage.local.set({ audit: cur.slice(-200) });          // metadata only: never page text, never a typed value
+  } catch {
+    // a log that cannot be written must not stop the task
+  }
+}
+
+async function tabInfo(id: number): Promise<{ url: string; loading: boolean } | null> {
+  try {
+    const t = await api.tabs.get(id);
+    return { url: t.url || "", loading: t.status === "loading" };
+  } catch {
+    return null;
+  }
+}
+
+const runner = new AgentRunner({
+  page: bridge,
+  step: async (req, signal) => new Client(await settings()).agentStep(req, signal),
+  cancelStep: async (id, session) => new Client(await settings()).cancel(id, session),
+  tab: tabInfo,
+  navigate: async (tabId, url) => { await api.tabs.update(tabId, { url }); },
+  settle: async (tabId) => {
+    await new Promise((r) => setTimeout(r, 250));                      // the status may not have flipped to loading yet
+    for (let i = 0; i < 50; i++) {
+      const t = await tabInfo(tabId);
+      if (!t || !t.loading) return;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  },
+  notify: (tabId: number, view: AgentView | null) => {
+    for (const [port, tab] of portTab) if (tab === tabId) send(port, { kind: "agent", view });
+  },
+  audit: (e) => { void audit(e); },
+  session: (tabId) => `${browserName}-${tabId}-${BOOT}`,
+  id: () => crypto.randomUUID(),
+});
+
+api.tabs.onRemoved.addListener((id) => runner.cancel(id));             // a closed tab ends its task
+
 // ───────────── the context menu and the in-page panel ─────────────
 interface Pending { task: Task; selection?: string; selectionOnly: boolean }
 const pending = new Map<number, Pending>();
@@ -182,9 +231,37 @@ api.runtime.onConnect.addListener((port: Port) => {
   if (port.name !== "popup" && port.name !== "panel" && port.name !== "options") return;
   const tabId = port.sender?.tab?.id;
   port.onMessage.addListener(async (msg: UiRequest) => {
+    // which tab the agent messages of this port are about: a panel lives in one; a popup is about the active one
+    const agentTab = async (): Promise<number | undefined> =>
+      tabId ?? portTab.get(port) ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
+    if (msg.kind === "agent-start") {
+      portTab.set(port, msg.tabId);
+      try {
+        send(port, { kind: "agent", view: await runner.start(msg.tabId, msg.goal) });
+        await bridge.showPanel(msg.tabId).catch(() => undefined);
+      } catch (e) {
+        send(port, { kind: "fatal", message: e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
+    if (msg.kind === "agent-approve" || msg.kind === "agent-reject" || msg.kind === "agent-cancel" || msg.kind === "agent-resume" || msg.kind === "agent-reply") {
+      const t = await agentTab();
+      if (t === undefined) return;
+      if (msg.kind === "agent-approve") runner.approve(t);
+      else if (msg.kind === "agent-reject") runner.reject(t);
+      else if (msg.kind === "agent-cancel") runner.cancel(t);
+      else if (msg.kind === "agent-resume") runner.resume(t);
+      else runner.reply(t, msg.text);
+      return;
+    }
     if (msg.kind === "subscribe") {
       listeners.add(port);
       send(port, last);
+      const t = tabId ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
+      if (t !== undefined) {
+        portTab.set(port, t);
+        send(port, { kind: "agent", view: runner.view(t) });
+      }
       if (!stream) void follow();
       else if (!last.connected) restartStream();
       if (port.name === "panel" && tabId !== undefined && pending.has(tabId)) {
@@ -206,6 +283,7 @@ api.runtime.onConnect.addListener((port: Port) => {
   });
   port.onDisconnect.addListener(() => {
     listeners.delete(port);
+    portTab.delete(port);                // a page navigating away drops its panel's port: that does not stop the agent
     void cancel(port);                 // a closed popup must not leave the model generating for nobody
     if (!listeners.size && stream) {
       stream.abort();

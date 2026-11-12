@@ -28,6 +28,11 @@
 <p id="result" role="status"></p>
 <p>The token stays in this browser's extension storage. It lets the extension talk to the local model and start
 or stop the engine — nothing else on your Mac. Pages you visit never see it.</p>
+<h2 style="margin-top:28px">What the agent did</h2>
+<p>A local record of the agent's steps: what was proposed, approved, refused and done, and on which site. It holds no
+page text and no typed values, stays in this browser, and keeps the last 200 entries.</p>
+<div class="row"><button id="clear-log" type="button">Clear</button></div>
+<ol id="activity" class="activity" aria-label="Recent agent activity"></ol>
 <script type="module" src="options.js"></script>
 </body>
 </html>

@@ -49,6 +49,45 @@ you ask, not before, and the answer says how much of it was sent to the model.
 **The context menu** on selected text — Explain, Summarize, Translate, Rewrite — answers in a small panel
 on the page. *Summarize this page* is in the page's own context menu.
 
+## Doing things on a page: click, fill, navigate
+
+Type a goal in the popup (“open the pricing page and find the cheapest plan”) and press **Do it**. The agent
+works one step at a time: it reads the page, the model proposes one action, and a card in the panel on the page
+says exactly what will happen. **Nothing is clicked, typed or opened until you press Approve** — every step asks.
+
+| The agent can | Before it does |
+|---|---|
+| click a button, link, checkbox… | shows the element as the *page* names it, where a link goes, and why the click is risky |
+| fill a field (up to six at once) | shows each field and the exact text; says when it replaces text that is there |
+| open an address | shows the address and whether it leaves this site, is unencrypted or is on your network |
+| look for an element that is not in the list | reads only — no question asked |
+| ask you something | stops until you answer (also after you decline a step) |
+
+What it will never do, whatever the model says: type into a **password, card number or one-time-code** field;
+touch a **CAPTCHA**; open `javascript:`, `data:`, `file:` or an address with a login in it; steer the browser
+to this assistant or the engine; run code, a selector or markup supplied by the model or the page — it passes
+the page agent short references (“e12”) and nothing else.
+
+How a step is kept honest:
+
+* The card is built from the **live element**, not from the model's description, so a model (or a page)
+  cannot call a “Delete account” button “Details”.
+* A reference works only for the page reading that issued it. If the page was read again, the address changed,
+  the element left, changed its name or role, is hidden, disabled or covered by something else, the step is
+  refused and the agent looks again.
+* A step runs only on the tab and the address it was proposed for; if the page moves while you decide,
+  nothing happens.
+* At most 8 steps per task, and two failed steps in a row end it. **Stop** (or closing the panel, or closing
+  the tab) ends it at once, including a question the model is still being asked.
+* Text from the page — names, labels, what is on screen — reaches the model as data between fences, with an
+  instruction to ignore anything in it that looks like an order. This lowers the risk of a page steering the
+  model; it does not remove it, which is why every step is approved by you.
+
+The site must be one the extension may read: the page you started on (the extension's toolbar button grants
+it for that tab), and any site the task moves to once you press **Allow** in the popup. **What the agent did**,
+in the extension's settings, keeps the last 200 steps — what was proposed, approved, refused and done, and on
+which site, never page text and never a typed value.
+
 ## What it can and cannot see
 
 * It reads a page only when you ask about it, and only the tab you are looking at (`activeTab`). It has no
@@ -69,13 +108,15 @@ on the page. *Summarize this page* is in the page's own context menu.
 | Extension: popup, settings, context menu, in-page panel | implemented; type-checked and bundled; logic unit-tested (14 tests) |
 | **Extension running inside Safari** | **not tested** — no browser was driven; first run is on your Mac |
 | Selected-text actions, page Q&A, streaming, cancel | implemented (see the line above) |
+| Browser actions: click, fill, fill form, navigate, find; approval card; audit log | implemented; **tested without a browser** — the page agent in jsdom (fake layout), the conductor with a fake page, tab and service, the policy rules, the service endpoint over HTTP (51 + 18 tests). **Not driven in Safari or Chrome** |
+| Per-site access for the agent after it leaves the page it started on | implemented through `permissions.request` from the popup; **whether Safari grants it that way is unverified** — if not, the popup says to allow the site in Safari ▸ Settings ▸ Websites |
+| Sites with the page in iframes, shadow DOM, canvas | **not covered**: the agent sees the top document's ordinary elements only |
 | Model picker, load / unload / stop, conflict confirmation | implemented (same) |
 | LLMBar ▸ Tools ▸ Browser Assistant | implemented; the app type-checks, was not rebuilt or run |
 | Update of the extension's files when LLMBar updates | implemented, tested |
 | Chrome / Chromium build | builds from the same source (`dist/chromium`); **never loaded in Chrome** |
 | Permanent Safari install (containing app, signing) | planned — needs Xcode and a Developer ID |
 | Native messaging | planned, with the containing app |
-| Browser actions (click, fill, navigate) with approvals | planned (Phase 2) |
 | Google Sheets, Excel Online | planned (Phases 3 – 4) — need OAuth client registrations |
 | Email assistant (Gmail, Outlook Web) | planned (Phase 5) |
 | Mailbox access through Gmail API / Microsoft Graph | planned (Phase 6) — needs OAuth client registrations |

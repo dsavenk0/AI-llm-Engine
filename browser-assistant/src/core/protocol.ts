@@ -72,8 +72,13 @@ export interface ServiceError {
 }
 
 // What the UI pages and the in-page panel say to the background, and what it says back.
+import { AgentView } from "./agent-types";
+
 export type UiRequest =
   | { kind: "subscribe" }
+  | { kind: "agent-start"; tabId: number; goal: string }
+  | { kind: "agent-approve" } | { kind: "agent-reject" } | { kind: "agent-cancel" } | { kind: "agent-resume" }
+  | { kind: "agent-reply"; text: string }
   | { kind: "command"; command: Command; confirm?: boolean }
   | { kind: "ask"; tabId: number; task: Task; question?: string; lang?: string; tone?: string; thinking?: boolean;
       selectionOnly?: boolean; selection?: string }
@@ -88,4 +93,5 @@ export type UiEvent =
   | { kind: "command-result"; ok: boolean; error?: ServiceError; command: Command }
   | { kind: "chat"; event: ChatEvent }
   | { kind: "page"; title: string; url: string; chars: number }
+  | { kind: "agent"; view: AgentView | null }
   | { kind: "fatal"; message: string };

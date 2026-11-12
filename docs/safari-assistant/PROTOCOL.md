@@ -105,6 +105,43 @@ data, and they are cut to the model's context. A refusal before the stream start
 
 `shared` is exactly what reached the model. A client that disconnects stops its generation on the engine.
 
+## The browser agent
+
+`POST /v1/assistant/agent/step` asks the model for the **next single action** on a page. The service does
+not touch a browser and decides nothing about safety: the extension checks the proposal against the live
+element and asks the person (`docs/safari-assistant/README.md`, "Doing things on a page").
+
+```json
+{"session": "safari-12-ab12cd", "goal": "open the pricing page", "request_id": "…uuid…",
+ "snapshot": {"url": "https://…", "title": "…", "text": "…", "captcha": false, "truncated": false,
+              "elements": [{"ref": "e1", "tag": "a", "role": "link", "name": "Pricing", "href": "https://…/pricing",
+                            "type": "", "value": "", "placeholder": "", "disabled": false, "checked": false,
+                            "required": false, "options": [], "dup": 0, "sensitive": false, "blocked": false}]},
+ "history": [{"summary": "click link “Home”", "result": "the page changed"}]}
+```
+
+The snapshot is cut to a known shape and size before it is used (150 elements, bounded strings; unknown
+keys dropped; a sensitive field's value is never put in the prompt). The reply is one validated action:
+
+```json
+{"action": {"action": "click", "ref": "e1", "why": "…"}, "attempts": 1}
+```
+
+| `action` | Fields | Validated as |
+|---|---|---|
+| `click` | `ref` | the ref was in the list shown to the model |
+| `fill` | `ref`, `value` | a ref from the list; text of at most 2000 characters |
+| `fill_form` | `fields: [{ref, value}]` | 1 – 6 fields, no ref twice |
+| `navigate` | `url` | `http(s)://host…`, no credentials |
+| `find` | `query` | non-empty; read-only |
+| `ask_user` | `question` | non-empty |
+| `done` | `answer` | text |
+
+The model is asked for a JSON object (`response_format`, so the engine constrains the answer); one that is not
+usable gets one retry with the reason. Two unusable replies are `422 bad_action` — the step fails rather than
+guesses. `request_id` (lowercase letters, digits and dashes, 8 – 40) lets the caller cancel the step with
+`POST /v1/assistant/generations/<request_id>/cancel` before the answer arrives (`409 cancelled` for the step).
+
 ## What the engine gained
 
 `POST /v1/engine/sleep` `{"force": false}` — unload the weights, keep the server; 409 `model_in_use` while

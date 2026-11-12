@@ -10,8 +10,9 @@
     "test": "node build.mjs --tests && node --test \"dist/tests/*.test.mjs\""
   },
   "devDependencies": {
+    "@types/node": "22.15.3",
     "esbuild": "0.28.2",
-    "typescript": "7.0.2",
-    "@types/node": "22.15.3"
+    "jsdom": "^31.0.0",
+    "typescript": "7.0.2"
   }
 }

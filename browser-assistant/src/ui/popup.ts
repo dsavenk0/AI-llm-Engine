@@ -2,6 +2,8 @@
 
 import { api } from "../browser-adapters/api";
 import { Command, ServiceError, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
+import { AgentView } from "../core/agent-types";
+import { isActive, stateLine } from "./agent-view";
 import { browserName } from "../browser-adapters/api";
 import { PROTOCOL } from "../core/protocol";
 import { Answer, el, metricsText, modelLabel, problemText, statusLine, updateNotice } from "./view";
@@ -90,8 +92,47 @@ function conflict(error: ServiceError, command: Command): void {
   }
 }
 
+// ───────────── the agent: start, stop, and the one thing only a click here can do — allow a site ─────────────
+const goal = $<HTMLTextAreaElement>("goal"), goBtn = $<HTMLButtonElement>("agent-go"), stopAgent = $<HTMLButtonElement>("agent-stop");
+const allow = $<HTMLButtonElement>("agent-allow"), agentState = $("agent-state");
+let agentView: AgentView | null = null;
+
+function renderAgentBlock(): void {
+  const active = isActive(agentView);
+  goBtn.disabled = active || state?.engine.state !== "ready";
+  goal.disabled = active;
+  stopAgent.hidden = !active;
+  agentState.textContent = agentView ? stateLine(agentView) + (agentView.state === "approval_required" ? " — in the panel on the page" : "") : "";
+  const origin = agentView && agentView.state === "waiting_for_access" ? agentView.needsAccess : undefined;
+  allow.hidden = !origin;
+  if (origin) allow.textContent = `Allow ${origin.replace(/^https?:\/\//, "")}`;
+}
+
+goBtn.addEventListener("click", async () => {
+  const text = goal.value.trim();
+  if (!text) return;
+  const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+  if (!tab || tab.id === undefined) return;
+  post({ kind: "agent-start", tabId: tab.id, goal: text });
+});
+stopAgent.addEventListener("click", () => post({ kind: "agent-cancel" }));
+allow.addEventListener("click", async () => {
+  const origin = agentView?.needsAccess;
+  if (!origin) return;
+  let granted = false;
+  try {
+    granted = await api.permissions.request({ origins: [origin + "/*"] });      // needs this click: it is the user gesture
+  } catch {
+    granted = false;
+  }
+  if (granted) post({ kind: "agent-resume" });
+  else agentState.textContent = `Safari or Chrome did not grant access. Allow the extension for ${origin} in the browser's own settings (Safari ▸ Settings ▸ Websites), then press Continue.`;
+  if (!granted) { allow.textContent = "Continue"; allow.onclick = () => post({ kind: "agent-resume" }); }
+});
+
 port.onMessage.addListener((ev: UiEvent) => {
-  if (ev.kind === "state") render(ev);
+  if (ev.kind === "agent") { agentView = ev.view; renderAgentBlock(); return; }
+  if (ev.kind === "state") { render(ev); renderAgentBlock(); }
   else if (ev.kind === "command-result" && !ev.ok && ev.error) conflict(ev.error, ev.command);
   else if (ev.kind === "page") pageLine.textContent = `${ev.title || ev.url}`;
   else if (ev.kind === "fatal") {

@@ -30,7 +30,14 @@ export interface BrowserApi {
   };
   tabs: {
     query(q: { active?: boolean; currentWindow?: boolean }): Promise<Tab[]>;
-    get(id: number): Promise<Tab>;
+    get(id: number): Promise<Tab & { status?: string }>;
+    update(id: number, props: { url?: string }): Promise<Tab>;
+    onUpdated: Event<(id: number, change: { status?: string; url?: string }, tab: Tab) => void>;
+    onRemoved: Event<(id: number) => void>;
+  };
+  permissions: {
+    contains(p: { origins: string[] }): Promise<boolean>;
+    request(p: { origins: string[] }): Promise<boolean>;
   };
   scripting: {
     executeScript(details: { target: { tabId: number }; func?: (...a: any[]) => unknown; files?: string[];

@@ -1,0 +1,17 @@
+.agent { margin-bottom: 8px; }
+.agent[hidden] { display: none; }
+.agent-goal { margin-bottom: 4px; overflow-wrap: anywhere; }
+.agent-state { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+.agent-steps { margin: 4px 0 8px 18px; padding: 0; font-size: 12px; color: var(--dim); }
+.agent-steps .bad { color: var(--bad); }
+.agent-ask { margin: 6px 0; overflow-wrap: anywhere; }
+.agent-reply { display: flex; gap: 6px; }
+.agent-stop { margin-top: 8px; }
+.approval { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0; background: var(--field); }
+.approval.high { border-color: var(--bad); }
+.approval-title { font-weight: 600; margin-bottom: 4px; }
+.approval-line { font-size: 12px; overflow-wrap: anywhere; }
+.approval-reasons { margin: 6px 0 0 0; padding-left: 16px; font-size: 12px; color: var(--bad); }
+.approval-buttons { display: flex; gap: 6px; margin-top: 8px; }
+.activity { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--dim); padding-left: 18px; }
+.activity .bad { color: var(--bad); }

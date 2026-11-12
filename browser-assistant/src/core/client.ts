@@ -1,6 +1,7 @@
 // The assistant service's client. Used by the background script only: no page and no content script ever
 // holds the token or talks to the service.
 
+import { Action, PageSnapshot } from "./agent-types";
 import { ChatEvent, PageContext, ServiceError, Snapshot, Task } from "./protocol";
 import { readSse } from "./sse";
 
@@ -85,6 +86,19 @@ export class Client {
       return;
     }
     await readSse(r.body, (ev) => onEvent(ev as ChatEvent));
+  }
+
+  /** The model's next action for this page and goal. `requestId` names the call so it can be cancelled. */
+  async agentStep(req: { session: string; goal: string; snapshot: PageSnapshot; history: { summary: string; result: string }[];
+    requestId: string }, signal: AbortSignal): Promise<{ action: Action; attempts: number }> {
+    const r = await fetch(this.url("/v1/assistant/agent/step"), {
+      method: "POST", headers: this.headers(), signal,
+      body: JSON.stringify({ session: req.session, goal: req.goal, snapshot: req.snapshot, history: req.history,
+                             request_id: req.requestId }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new ServiceFailure(r.status, data.error || { code: "http_" + r.status, message: `the service answered ${r.status}` });
+    return data;
   }
 
   async cancel(id: string, session: string): Promise<void> {

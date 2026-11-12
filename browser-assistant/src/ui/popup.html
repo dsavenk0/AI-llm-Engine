@@ -36,6 +36,16 @@
     <div class="row"><label style="margin:0"><input id="thinking" type="checkbox"> Let the model reason first (slower)</label></div>
   </section>
   <section id="answer-slot" aria-label="Answer"></section>
+  <section id="agent" aria-label="Do something on this page">
+    <label for="goal">Do something on this page — each click, entry and navigation waits for your approval</label>
+    <textarea id="goal" rows="2" placeholder="For example: open the pricing page and find the cheapest plan"></textarea>
+    <div class="row">
+      <button id="agent-go" type="button" class="primary">Do it</button>
+      <button id="agent-stop" type="button" class="danger" hidden>Stop</button>
+      <button id="agent-allow" type="button" hidden></button>
+      <span id="agent-state" class="dim"></span>
+    </div>
+  </section>
 </div>
 <footer>
   <span class="dim">Runs on this Mac. Nothing is sent to a cloud.</span><span class="spacer"></span>
