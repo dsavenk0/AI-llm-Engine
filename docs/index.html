@@ -732,12 +732,12 @@ GET  /api/ps        GET  /api/version</code></pre>
             <div class="arch-icon-wrap icon-magenta">
               <span class="arch-icon">🛡</span>
             </div>
-            <h3 class="arch-title" data-i18n="feat5_title">Adaptive RAM Guard</h3>
+            <h3 class="arch-title" data-i18n="feat5_title">Adaptive RAM Guard and One Queue</h3>
             <p class="arch-desc" data-i18n="feat5_desc">
-              Computes safe context length dynamically. Caps prefill chunk sizes (1024 → 256 → 128) and enforces an 88% system memory ceiling so other apps run smoothly.
+              Computes a safe context dynamically and shrinks prefill chunks (1024 → 256 → 128) under an 88% system ceiling. Under pressure memory comes back in one order — freed buffers, restore points, then the conversation, saved to the SSD first — and one priority queue puts voice and the browser ahead of chats, and chats ahead of background agents.
             </p>
             <div class="arch-code-snippet">
-              <code>adaptive_chunking: 1024 → 256 → 128 under load</code>
+              <code>buffers → restore points → conversation (SSD) · interactive › normal › background</code>
             </div>
           </div>
 
