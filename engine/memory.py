@@ -230,7 +230,7 @@ class Manager:
             "reclaimable_gb": {"buffers": round(br.get("mlx_cache", 0) / GiB, 3),
                                "restore_points": round(br.get("snapshots", 0) / GiB, 3),
                                "conversation": round((br.get("kv", 0) + br.get("ssm", 0)) / GiB, 3)},
-            "ssd_prefix_gb": round(store.total_bytes() / GiB, 2) if store else None,
+            "ssd_prefix_gb": round(store.total_bytes / GiB, 2) if store else None,     # a property of PrefixStore
             "given_up": dict(self.given_up),
         }
 

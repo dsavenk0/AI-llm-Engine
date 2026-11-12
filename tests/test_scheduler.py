@@ -200,6 +200,16 @@ class TestMemoryManager(unittest.TestCase):
         self.assertEqual(r["reclaimable_gb"]["conversation"], 0.25)
         self.assertIsNone(r["ssd_prefix_gb"])
 
+    def test_report_reads_the_real_ssd_prefix_store(self):
+        # the defect this test was written for: report() called PrefixStore.total_bytes, a property, so every
+        # /health of an engine with the SSD cache on answered 500 and `llm start` never saw the engine come up
+        import tempfile
+        from engine.prefix_store import PrefixStore
+        host, mgr, _, patch = self.make([2**30])
+        host.store = PrefixStore(tempfile.mkdtemp(), 2**30, log=lambda *a: None)
+        with patch:
+            self.assertEqual(mgr.report()["ssd_prefix_gb"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
