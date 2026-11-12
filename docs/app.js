@@ -759,6 +759,20 @@
   // Initialize
   applyTheme(currentTheme);
   applyLanguage(currentLang);
+
+  // Keep the version in the site header in sync with the latest published GitHub release.
+  const releaseVersion = document.querySelector('.nav-version');
+  if (releaseVersion) {
+    fetch('https://api.github.com/repos/dsavenk0/AI-llm-Engine/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json' }
+    })
+      .then(response => response.ok ? response.json() : null)
+      .then(release => {
+        const tag = release && typeof release.tag_name === 'string' ? release.tag_name.trim() : '';
+        if (tag) releaseVersion.textContent = tag.startsWith('v') ? tag : `v${tag}`;
+      })
+      .catch(() => {}); // Keep the checked-in version visible if GitHub is unavailable.
+  }
 })();
 
 

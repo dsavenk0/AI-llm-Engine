@@ -12,6 +12,7 @@ DMG_HEIGHT=440
 STAGE="$(mktemp -d "$ROOT/.dmg-stage.XXXXXX")"
 RW_DMG="$ROOT/.LLMBar-rw.dmg"
 DEVICE=""
+MOUNT_NAME=""
 
 cleanup() {
   if [[ -n "$DEVICE" ]]; then hdiutil detach "$DEVICE" -quiet 2>/dev/null || true; fi
@@ -55,12 +56,16 @@ APP_MB="$(du -sm "$APP" | cut -f1)"
 hdiutil create -quiet -size "$((APP_MB + 60))m" -fs HFS+ -volname "$VOL_NAME" -format UDRW "$RW_DMG" -srcfolder "$STAGE"
 
 echo "▸ Arranging icons in Finder…"
-DEVICE="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG" | awk '/\/dev\/disk/ {print $1; exit}')"
+ATTACH_OUTPUT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG")"
+DEVICE="$(awk '/\/dev\/disk/ {print $1; exit}' <<<"$ATTACH_OUTPUT")"
+MOUNT_PATH="$(awk 'match($0, /\/Volumes\/.*/) {print substr($0, RSTART + 9); exit}' <<<"$ATTACH_OUTPUT")"
+MOUNT_NAME="${MOUNT_PATH##*/}"
 [[ -n "$DEVICE" ]] || { echo "Could not mount the DMG." >&2; exit 1; }
+[[ -n "$MOUNT_NAME" ]] || { echo "Could not find the mounted DMG volume." >&2; exit 1; }
 
 osascript <<APPLESCRIPT
 tell application "Finder"
-  tell disk "$VOL_NAME"
+  tell disk "$MOUNT_NAME"
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
