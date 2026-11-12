@@ -21,7 +21,7 @@ export async function captureWithPictures(tabId: number, rects: { x: number; y: 
   const pictures: string[] = [];
   const g = globalThis as unknown as { OffscreenCanvas?: typeof OffscreenCanvas; createImageBitmap?: typeof createImageBitmap };
   if (rects.length && g.OffscreenCanvas && g.createImageBitmap) {
-    const bmp = await g.createImageBitmap(await (await fetch(raw)).blob());
+    const bmp = await g.createImageBitmap(dataUrlToBlob(raw));
     // the capture's own scale: normally the page's pixel ratio, measured from the image in case zoom differs
     const scale = dpr > 0 ? dpr : 1;
     for (const r of rects) {
@@ -36,6 +36,17 @@ export async function captureWithPictures(tabId: number, rects: { x: number; y: 
     bmp.close();
   }
   return { screenshot: await shrink(raw), pictures };
+}
+
+/** A data URL as a Blob, decoded here: the extension's own CSP allows network requests to 127.0.0.1 only, so
+ *  `fetch("data:…")` is refused ("Failed to fetch") — which made every screenshot fail in a real browser. */
+function dataUrlToBlob(url: string): Blob {
+  const comma = url.indexOf(",");
+  const type = /^data:([^;,]+)/.exec(url)?.[1] || "image/jpeg";
+  const bin = atob(url.slice(comma + 1));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
 }
 
 const PICTURE_MAX = 1024;         // the longest side of a picture cut from the page
@@ -64,7 +75,7 @@ async function captureRaw(tabId: number): Promise<string> {
 async function shrink(dataUrl: string): Promise<string> {
   const g = globalThis as unknown as { OffscreenCanvas?: typeof OffscreenCanvas; createImageBitmap?: typeof createImageBitmap };
   if (!g.OffscreenCanvas || !g.createImageBitmap) return dataUrl;           // no canvas here: send it as taken
-  const bmp = await g.createImageBitmap(await (await fetch(dataUrl)).blob());
+  const bmp = await g.createImageBitmap(dataUrlToBlob(dataUrl));
   if (bmp.width <= MAX_WIDTH) { bmp.close(); return dataUrl; }
   const w = MAX_WIDTH, h = Math.round(bmp.height * (MAX_WIDTH / bmp.width));
   const canvas = new g.OffscreenCanvas(w, h);

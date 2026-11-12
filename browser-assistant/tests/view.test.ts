@@ -70,3 +70,9 @@ test("in Chrome a newer folder copy is announced as an update in progress, not a
   assert.match(n, /Version 0\.1\.0\.267 is ready/);
   assert.doesNotMatch(n, /Safari/);
 });
+
+test("the capture code never fetches a data: URL (the extension's CSP refuses it)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../../src/background/capture.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /fetch\((raw|dataUrl)\)/);
+});
