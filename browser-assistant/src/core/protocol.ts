@@ -92,7 +92,8 @@ export type Command =
   | { op: "default"; path: string; expected: string };
 
 export type UiEvent =
-  | { kind: "state"; state: Snapshot | null; connected: boolean; problem?: string }
+  | { kind: "state"; state: Snapshot | null; connected: boolean; problem?: string;
+      app?: { version: string } }                // inside LLMBar (Safari): the extension version the app now ships
   | { kind: "command-result"; ok: boolean; error?: ServiceError; command: Command }
   | { kind: "chat"; event: ChatEvent }
   | { kind: "page"; title: string; url: string; chars: number }

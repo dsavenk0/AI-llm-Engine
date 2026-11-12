@@ -142,6 +142,9 @@ SAFARI_EXT="$APP/Contents/PlugIns/LLMBar Assistant.appex"
 ASSISTANT_HOME="$HOME/Library/Application Support/AI-llm-Engine"
 if [ -f "$ROOT/browser-assistant/dist/safari/manifest.json" ]; then
   mkdir -p "$SAFARI_EXT/Contents/MacOS" "$SAFARI_EXT/Contents/Resources"
+  # the extension's own build version (x.y.z.<commits>), so Safari and LLMBar can tell one build from the next
+  EXT_VERSION="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["version"])' "$ROOT/browser-assistant/dist/safari/manifest.json")"
+  EXT_SHORT="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("version_name") or m["version"])' "$ROOT/browser-assistant/dist/safari/manifest.json")"
   if swiftc -O -parse-as-library -application-extension -target "$(uname -m)-apple-macos13.0" \
        -framework SafariServices -Xlinker -e -Xlinker _NSExtensionMain \
        -o "$SAFARI_EXT/Contents/MacOS/LLMBarAssistant" "$ROOT/app/safari/SafariExtensionHandler.swift" 2>"$TMP/safari.log"; then
@@ -154,8 +157,9 @@ if [ -f "$ROOT/browser-assistant/dist/safari/manifest.json" ]; then
   <key>CFBundleName</key><string>LLMBar Assistant</string>
   <key>CFBundleDisplayName</key><string>LLMBar Assistant</string>
   <key>CFBundleIdentifier</key><string>local.llm-engine.llmbar.safari</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$EXT_VERSION</string>
+  <key>CFBundleShortVersionString</key><string>${EXT_VERSION%.*}</string>
+  <key>LLMExtensionBuild</key><string>$EXT_SHORT</string>
   <key>CFBundlePackageType</key><string>XPC!</string>
   <key>CFBundleExecutable</key><string>LLMBarAssistant</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

@@ -411,5 +411,6 @@
   "⇄ streams experts from the SSD": "⇄ эксперты читаются с SSD",
   "Chrome, Edge, Brave, Arc and other Chromium browsers — two steps:": "Chrome, Edge, Brave, Arc и другие браузеры на Chromium — два шага:",
   "  1. Open chrome://extensions (edge://extensions in Edge), turn on “Developer mode”, press “Load unpacked” and choose:": "  1. Откройте chrome://extensions (в Edge — edge://extensions), включите «Режим разработчика», нажмите «Загрузить распакованное» и выберите:",
-  "  2. Click the extension's toolbar button: the side panel opens; its ⚙︎ settings take the token.": "  2. Нажмите кнопку расширения на панели инструментов: откроется боковая панель; токен вставляется в её настройках ⚙︎."
+  "Pairing set up for:": "Подключение настроено для:",
+  "  2. Click the extension's toolbar button: the side panel opens and connects by itself.": "  2. Нажмите кнопку расширения на панели инструментов: откроется боковая панель и подключится сама."
 }

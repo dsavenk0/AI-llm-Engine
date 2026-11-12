@@ -8,7 +8,8 @@
     "default_path": "sidepanel.html"
   },
   "extra_permissions": [
-    "sidePanel"
+    "sidePanel",
+    "nativeMessaging"
   ],
   "web_accessible_resources": [
     {
@@ -23,5 +24,6 @@
       ],
       "use_dynamic_url": true
     }
-  ]
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmusPZZ7eiMNMO1vqjQmsGwKrgAQqOf6tQSDXNkuw/bC5w9xkDOcA3Ed44i/09KrrkDpypSdHATKqpXwldksJM98u944bf2Hzju42Fw5zc3aA7tyGpw1Xmtyuuv0+76Bke+KDb7kainmwCFDr+D9w4AEXfu5ttTR05nsxq3geakgHxjle/YqnsOA//HIzVrKIM3GbWeoEmNPqD074s24I0YkSqdACbsPEdRFb57PVRjADOnEH+tqkikMPZXOd2861KCGM1yVhiFgqlFw78TSh/ENd3QxA8gq7QBFtXTIy2Upd3I/g4okRC1ohPLRpIsUlkOJ85vtpLfZ4wAJp7wFCkwIDAQAB"
 }

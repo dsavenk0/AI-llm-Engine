@@ -53,3 +53,12 @@ test("a model that is unsupported or may not fit says so in the picker", () => {
   assert.equal(modelLabel(m), "★ big — MLX 8-bit · 7.5 GB · mlx-lm · may not fit");
   assert.match(modelLabel({ ...m, supported: false }), /unsupported$/);
 });
+
+test("inside LLMBar the notice compares with the version the app ships, not with the folder copy", async () => {
+  const { updateNotice } = await import("../src/ui/view");
+  const s: any = { protocol: 1, extension: { versions: { safari: "0.1.0.300" }, folder: "/x" } };
+  assert.equal(updateNotice(s, "0.1.0.264", "safari", 1, { version: "0.1.0.264" }), "");   // the folder copy is ignored
+  assert.match(updateNotice(s, "0.1.0.264", "safari", 1, { version: "0.1.0.270" }), /Quit and reopen Safari/);
+  assert.match(updateNotice(s, "0.1.0.264", "safari", 1), /Restart Safari and add it again/);    // a temporary extension
+  assert.equal(updateNotice(s, "0.1.0.300", "safari", 1), "");
+});

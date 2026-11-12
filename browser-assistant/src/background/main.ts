@@ -22,13 +22,16 @@ async function settings(): Promise<Settings> {
   return { service: (s.service as string) || DEFAULT_SERVICE, token };
 }
 
-/** Inside LLMBar.app (Safari), the app's native handler hands over the pairing token, so the person never
- *  has to paste it. Anywhere else — Chrome, a temporary Safari extension — there is no handler and the
- *  settings page asks for it as before. */
+/** The pairing token without pasting: in Safari from the handler inside LLMBar.app, in a Chromium browser from
+ *  the native-messaging host `./llm assistant setup` registers (assistant/native_host.py). Where neither exists —
+ *  a temporary Safari extension — the settings page asks for it as before. */
+let appInfo: { version: string } | undefined;          // set once LLMBar's native handler has answered
+
 async function pairFromApp(): Promise<string> {
   if (!api.runtime.sendNativeMessage) return "";
   try {
-    const r = await api.runtime.sendNativeMessage("local.llm-engine.llmbar", { kind: "token" });
+    const r = await api.runtime.sendNativeMessage("local.llm_engine.assistant", { kind: "token" });
+    if (r && typeof r.version === "string" && r.version) appInfo = { version: r.version };
     if (r && r.ok && typeof r.token === "string" && r.token.length >= 24) {
       await api.storage.local.set({ token: r.token });
       return r.token;
@@ -46,6 +49,7 @@ let last: StateEvent = { kind: "state", state: null, connected: false, problem: 
 let stream: AbortController | null = null;
 
 function broadcast(ev: StateEvent): void {
+  if (appInfo) ev = { ...ev, app: appInfo };
   last = ev;
   for (const p of listeners) send(p, ev);
 }
@@ -63,6 +67,7 @@ async function follow(): Promise<void> {
   const ctl = new AbortController();
   stream = ctl;
   let delay = 500;
+  void pairFromApp();                  // also learns which extension version LLMBar ships now (after an update)
   while (!ctl.signal.aborted && listeners.size) {
     const s = await settings();
     if (!s.token) {

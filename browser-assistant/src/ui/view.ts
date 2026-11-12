@@ -49,11 +49,18 @@ export function newer(latest: string | undefined, mine: string): boolean {
 }
 
 /** What to tell the user when the service or the installed files are ahead of, or behind, this extension. */
-export function updateNotice(s: Snapshot, mine: string, browser: string, protocol: number): string {
+export function updateNotice(s: Snapshot, mine: string, browser: string, protocol: number,
+                             app?: { version: string }): string {
   if (s.protocol > protocol) {
     return `The engine was updated and this extension is too old for it. Add it again from ${s.extension.folder}/${browser}.`;
   }
   if (s.protocol < protocol) return "This extension is newer than the installed engine. Update LLMBar or the engine.";
+  if (app) {
+    // inside LLMBar the extension comes with the app: the only stale case is Safari still running the old one
+    return newer(app.version, mine)
+      ? `LLMBar was updated and brings version ${app.version} of this extension (this is ${mine}). Quit and reopen Safari to load it.`
+      : "";
+  }
   const latest = s.extension.versions[browser];
   return newer(latest, mine)
     ? `Version ${latest} of this extension is installed on this Mac (this is ${mine}). Restart Safari and add it again from ${s.extension.folder}/${browser}.`

@@ -27,9 +27,14 @@ with a free *Apple Development* certificate (sign in to Xcode with your Apple ID
 a temporary extension (Safari ▸ Settings ▸ Developer ▸ *Add Temporary Extension…*), which Safari forgets when it
 quits; paste the token it copied into the extension's settings.
 
-**Chrome, Edge, Brave, Arc and other Chromium browsers:** open `chrome://extensions` (`edge://extensions`),
-turn on *Developer mode*, press *Load unpacked* and choose the `chromium` folder next to the Safari one. Click
-the toolbar button: the side panel opens, and its ⚙︎ settings take the token.
+**Chrome, Edge, Brave, Arc, Vivaldi: Tools ▸ Browser Assistant · Chrome** (the row names the browser found on
+this Mac). Chrome installs an extension that is not from its store only by your hand, so the button prepares
+everything around that: the files in `…/browser-assistant/chromium`, the service, and a native-messaging host that
+lets the extension fetch the token by itself (`assistant/native_host.py`, registered for each installed Chromium
+browser). It opens the browser's extensions page, shows the folder in Finder and puts its path on the clipboard:
+turn on *Developer mode*, *Load unpacked*, ⌘⇧G, paste, Open. The extension's ID is fixed by a key in its manifest,
+so the host recognises it wherever the folder is. Each Tools row shows the version it installs (`0.1.0 (c51b127)`:
+the release, then the commit; the panel's foot shows the same).
 
 
 

@@ -1,7 +1,8 @@
 // The native half of the Safari extension that ships inside LLMBar.app (Contents/PlugIns/LLMBar Assistant.appex).
 // Safari loads the web extension from this bundle's Resources; this handler answers the one native message the
 // extension sends — "token" — with the pairing token of the local assistant service, so the extension connects
-// on its own instead of asking the person to paste it. It reads one file and answers nothing else.
+// on its own instead of asking the person to paste it, and with the version of the extension this copy of the app
+// ships: an extension Safari still runs from before an update can then say so. It reads one file, nothing else.
 
 import Foundation
 import SafariServices
@@ -19,14 +20,16 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     func beginRequest(with context: NSExtensionContext) {
         let item = context.inputItems.first as? NSExtensionItem
         let message = item?.userInfo?[SFExtensionMessageKey] as? [String: Any]
-        var reply: [String: Any] = ["ok": false]
+        // the version on disk now — after an LLMBar update, newer than the extension Safari may still be running
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        var reply: [String: Any] = ["ok": false, "version": version]
         if (message?["kind"] as? String) == "token" {
             if let data = FileManager.default.contents(atPath: Self.tokenFile),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let token = obj["token"] as? String, token.count >= 24 {
-                reply = ["ok": true, "token": token]
+                reply = ["ok": true, "token": token, "version": version]
             } else {
-                reply = ["ok": false, "error": "the assistant service has not been set up yet"]
+                reply = ["ok": false, "version": version, "error": "the assistant service has not been set up yet"]
             }
         }
         let response = NSExtensionItem()

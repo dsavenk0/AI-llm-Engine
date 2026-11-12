@@ -1821,10 +1821,19 @@ struct ToolsTab: View {
                 // Optional and independent of this app: the Safari extension talks to its own small service,
                 // so it keeps working with LLMBar closed. This installs what is missing and opens Safari on the
                 // extension's switch — the one step Safari keeps for the person (BrowserAssistantSetup.swift).
-                tool("safari", L("Browser Assistant", "Браузерный ассистент"),
-                     L("Safari extension: the local model reads and acts on the page · installs and opens Safari",
-                       "Расширение Safari: локальная модель читает страницу и действует · установит и откроет Safari")) {
+                tool("safari", L("Browser Assistant · Safari", "Браузерный ассистент · Safari"),
+                     L("The local model reads and acts on the page · enables it in Safari",
+                       "Локальная модель читает страницу и действует · включит в Safari")
+                     + (BrowserAssistantSetup.bundledVersion.map { " · v\($0)" } ?? "")) {
                     BrowserAssistantSetup.run()
+                }
+                if let browser = BrowserAssistantSetup.chromium {
+                    tool("globe", L("Browser Assistant · \(browser.name)", "Браузерный ассистент · \(browser.name)"),
+                         L("The same assistant as a side panel in \(browser.name) · prepares the install",
+                           "Тот же ассистент боковой панелью в \(browser.name) · подготовит установку")
+                         + (BrowserAssistantSetup.chromiumVersion.map { " · v\($0)" } ?? "")) {
+                        BrowserAssistantSetup.runChromium()
+                    }
                 }
             }
         }

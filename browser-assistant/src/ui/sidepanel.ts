@@ -20,7 +20,8 @@ const controls = $("controls"), note = $("note"), see = $<HTMLButtonElement>("se
 // in Safari (and a Chromium browser without a side panel) this page is docked into the tab in a frame
 const EMBEDDED = new URLSearchParams(location.search).has("docked");
 let lastBubble: HTMLElement | null = null;
-const MINE = (api.runtime as unknown as { getManifest(): { version: string } }).getManifest().version;
+const MANIFEST = (api.runtime as unknown as { getManifest(): { version: string; version_name?: string } }).getManifest();
+const MINE = MANIFEST.version;
 
 let state: Snapshot | null = null;
 let tabId: number | null = null;
@@ -273,6 +274,12 @@ $("theme").addEventListener("click", () => {
   applyTheme(theme);
   try { localStorage.setItem("theme", theme); } catch { /* not remembered: fine */ }
 });
+// which build this is, at the foot of the panel: "v0.1.0.264", the commit in its tooltip
+const foot = document.querySelector(".foot");
+if (foot) {
+  const v = el("span", { class: "ver", textContent: ` · v${MINE}`, title: MANIFEST.version_name || MINE });
+  foot.append(v);
+}
 if (EMBEDDED) {
   $("undock").hidden = false;
   $("undock").addEventListener("click", () => post({ kind: "undock" }));
@@ -311,7 +318,7 @@ function renderState(ev: Extract<UiEvent, { kind: "state" }>): void {
   $("model-name").textContent = state.model.name || (state.engine.state === "ready" ? "No model" : line.text);
   chip.title = line.text;
   $("metrics").textContent = metricsText(state);
-  const notice = updateNotice(state, MINE, browserName === "chromium" ? "chromium" : "safari", PROTOCOL);
+  const notice = updateNotice(state, MINE, browserName === "chromium" ? "chromium" : "safari", PROTOCOL, ev.app);
   $("update").hidden = !notice;
   $("update").textContent = notice;
   picker.replaceChildren(...state.models.map((m) => el("option", {
