@@ -9,13 +9,26 @@ missing member stops the server at start with its name rather than surfacing lat
 A member is REQUIRED when the server uses it for every backend, OPTIONAL when a backend may honestly not
 have the feature; the server asks `can(engine, name)` before using an optional one and answers the client
 plainly when it is absent.
+
+The other contracts between modules are written here too, and `check()` holds an engine to all that apply:
+
+    RUNTIME / RUNTIME_BATCH   what the decode loop (engine/session.py) and the batch loop (engine/batch.py)
+                              call on `engine.rt` — the seam a second runtime implements
+    LOOP_HOST                 what DecodeLoop reads from the engine that mixes it in
+    MEMORY                    the memory manager every engine carries (engine/memory.py `Manager`)
+    HEALTH                    the /health keys clients rely on (LLMBar, the browser assistant, the CLI)
+
+VERSION is bumped when a required member or a HEALTH / STATS key is added, removed or changes meaning; it is
+served in /health as `engine_protocol`, so a client can tell which contract it is talking to.
 """
 from typing import Any, Iterator, Protocol, runtime_checkable
+
+VERSION = 2          # 2: the scheduler owns the turn (no `lock`), engines carry `memory`; runtime/host/health contracts
 
 # attributes: identity and limits · state · prompt defaults
 ATTRIBUTES = (
     "backend", "max_context", "max_tokens", "model_bytes", "mem_limit",
-    "lock", "sleeping", "last_used", "model", "cache_tokens", "stats", "totals", "history", "store",
+    "memory", "sleeping", "last_used", "model", "cache_tokens", "stats", "totals", "history", "store",
     "wired_limit_advice_mb", "progress",
     "thinking", "thinking_default", "supports_thinking", "effort", "efforts", "sampling",
     "vision_allowed", "vision_capable",
@@ -44,7 +57,7 @@ class EngineBackend(Protocol):
     max_tokens: int
     model_bytes: int
     mem_limit: float
-    lock: Any                      # threading.Lock: one generation at a time; the server takes it
+    memory: Any                    # engine/memory.py Manager: the order memory is given back in, and the state
     sleeping: bool
     last_used: float
     model: Any                     # None while asleep
@@ -83,6 +96,33 @@ PARAMETERS = {
 }
 
 
+# ── the runtime seam (engine/session.py describes each call) ──
+RUNTIME = ("make_cache", "settle", "release", "peak_gb", "commit", "can_verify", "rewind",
+           "sampler", "sample", "flush", "read_token",
+           "prefill", "step", "verify", "greedy_tokens", "verify_token", "sample_at", "embed_media")
+RUNTIME_BATCH = ("batch_prefill", "batch_join", "batch_step", "greedy_row", "sample_row")
+
+# ── what DecodeLoop reads from its engine ──
+LOOP_HOST = ("rt", "tok", "eos", "vocab", "max_context", "max_tokens", "mem_limit", "think_frac", "speculative",
+             "draft_levels", "ngram_min", "cache", "cache_tokens", "snapshots", "store", "im_start", "progress",
+             "stats", "totals", "history",
+             "log", "ensure_awake", "_reserve", "_check_memory", "_fit_output", "_prefill", "_restore_or_reset",
+             "_detokenizer", "_think_closing")
+
+# ── the memory manager ──
+MEMORY = ("state", "reclaim", "relieve", "report")
+
+# ── /health: the keys clients read; more may be added, none of these removed or renamed without VERSION ──
+HEALTH = ("status", "model", "model_path", "state", "engine_protocol", "backend", "context", "max_tokens",
+          "thinking", "thinking_default", "thinking_supported", "effort", "efforts", "vision", "vision_capable",
+          "busy", "inflight", "max_queue", "shutting_down", "progress", "memory_gb", "system_ram_used",
+          "mem_limit", "memory_breakdown", "memory_manager", "scheduler", "cached_tokens", "requests", "last")
+
+
+def missing_members(obj, names, prefix=""):
+    return [prefix + n for n in names if not hasattr(obj, n)]
+
+
 def missing(engine):
     """What `engine` owes the protocol: attributes that are absent, methods that are not callable, and
     parameters a method does not accept (as "method(parameter)")."""
@@ -100,6 +140,17 @@ def missing(engine):
         if any(p.kind is p.VAR_KEYWORD for p in params.values()):
             continue
         out += [f"{name}({p})" for p in PARAMETERS.get(name, ()) if p not in params]
+    mem = getattr(engine, "memory", None)
+    if mem is not None:
+        out += missing_members(mem, MEMORY, "memory.")
+    from .session import DecodeLoop
+    if isinstance(engine, DecodeLoop):
+        out += missing_members(engine, LOOP_HOST)
+        rt = getattr(engine, "rt", None)
+        if rt is not None:                                  # None only while asleep
+            out += missing_members(rt, RUNTIME, "rt.")
+            if callable(getattr(engine, "generate_batch", None)):
+                out += missing_members(rt, RUNTIME_BATCH, "rt.")
     return out
 
 

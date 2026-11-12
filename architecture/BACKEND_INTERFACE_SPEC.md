@@ -108,9 +108,13 @@ Four classes satisfy that today: `Engine` (native), `CompatEngine` (mlx-lm), `GG
 decoder, subclass of `CompatEngine`), and the llama.cpp path, which sidesteps the question by being a
 separate server process (`engine/gguf_server.py`) behind the same HTTP API.
 
-The interface below is **read off the call sites**, not designed: it is every attribute and method
-`server.py` touches. Declaring it is Phase 2 work (see the roadmap); it is listed here so that a new
-backend knows what it owes.
+The interface below was **read off the call sites**, not designed: it is every attribute and method
+`server.py` touches. It is declared in `engine/protocol.py` (contract `VERSION` 2, served in `/health` as
+`engine_protocol`) and `protocol.check()` holds the engine to it when the server starts. The same file
+writes down the other contracts between modules — the runtime seam (`RUNTIME`, `RUNTIME_BATCH`), what the
+shared decode loop reads from its engine (`LOOP_HOST`), the memory manager (`MEMORY`) and the `/health`
+keys clients rely on (`HEALTH`) — and `tests/test_protocol.py` checks every engine and runtime against them.
+That file is authoritative; the listing below is its readable form.
 
 ### Required
 
@@ -124,7 +128,8 @@ class EngineBackend(Protocol):
     mem_limit: float                      # fraction of system RAM the whole machine may use
 
     # state
-    lock: threading.Lock                  # one generation at a time; the server takes it
+    memory: "memory.Manager"              # the order memory is given back in, and ok / tight / critical;
+                                          # whose turn it is belongs to the server's scheduler, not to an engine
     sleeping: bool
     last_used: float
     model: object | None                  # None while asleep
@@ -187,13 +192,12 @@ picks the *class*.
 
 ### Known deviations to close before a fifth backend is added
 
-* `Engine` and `CompatEngine` each carry their own copy of the memory guard (`_reserve`,
-  `_check_memory`, `_fit_output`), sleep/wake and the prefix-cache bookkeeping. These belong to the
-  Memory Manager (see MODULAR_ARCHITECTURE.md), not to a backend.
+* ~~`Engine` and `CompatEngine` each carry their own copy of the memory guard and the decode loop~~ —
+  closed: one guard (`memory.reserve / check / fit_output`), one release order (`memory.Manager`), one
+  loop (`session.DecodeLoop`). Sleep/wake is still per engine.
 * Backend choice is split between `llm.py` (which server process) and `compat.pick_backend` (which
   class). One function should own it and report *why* it chose, for `./llm models` and `/health` alike.
-* Two cache classes with different verbs: `model.KVCache.update / trim_to(n)` and
-  `dense.KVCache.update_and_fetch / trim(n)` (the second follows mlx-lm so `CompatEngine` can drive it).
+* ~~Two cache classes with different verbs~~ — closed: `engine/cache.py`.
 * `server.py` reads MLX memory counters directly for `/health` (`mx.get_active_memory()` …). Behind
   seam 3 these come from the runtime.
 
@@ -201,9 +205,12 @@ picks the *class*.
 
 ## 3. Runtime seam
 
-**Not built.** This is the interface a runtime that is *not* MLX would implement so that the Inference
-Core (the decode loop, the sampler, speculation, the prefix cache) can drive it unchanged. It is
-written now so that Stage 1 and 2 work stops adding MLX-specific calls above this line.
+**Built for the decode loop** (`protocol.RUNTIME`, `protocol.RUNTIME_BATCH`): `MlxHybridRuntime`
+(`engine/runtime.py`, the native model) and `MlxLmRuntime` (`engine/compat.py`, mlx-lm and GGUF models)
+implement it, and `engine/session.py` and `engine/batch.py` call nothing else — a test fails if they call
+a method the contract does not list. The listing below is the **target** a runtime that is not MLX would
+grow into (load/unload, opaque cache save/restore, memory reports); the calls actually made today are the
+`RUNTIME` names, described one by one in `engine/session.py`.
 
 The design choice that matters: the seam is at the **forward pass and the cache**, not at the tensor.
 An interface of `matmul / add / reshape` would re-create MLX badly and force every backend to be a

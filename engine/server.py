@@ -187,9 +187,8 @@ def worker(init):
     """
     global ENGINE
     ENGINE = protocol.check(init())      # a backend that owes the protocol something stops here, by name
-    mgr = getattr(ENGINE, "memory", None)
-    if mgr is not None:
-        SCHED.pressure = mgr.state
+    mgr = ENGINE.memory                  # the protocol requires it
+    SCHED.pressure = mgr.state
     READY.set()
     BATCHER.start()                      # no-op unless --batch-window is set; needs ENGINE for its lock
     # how often an idle engine looks at the clock: 20 s, or a quarter of a very short idle-sleep
@@ -201,7 +200,7 @@ def worker(init):
             idle = time.time() - ENGINE.last_used
             if ARGS.idle_sleep > 0 and not ENGINE.sleeping and idle > ARGS.idle_sleep * 60:
                 ENGINE.sleep()
-            elif mgr is not None and not ENGINE.sleeping and not SCHED.locked():
+            elif not ENGINE.sleeping and not SCHED.locked():
                 given = mgr.relieve()          # the Mac is past its limit and nothing is running: give back
                 if given:                      # what can go without unloading (the conversation → SSD first)
                     log(f"memory: idle under pressure, released {', '.join(given)}")
@@ -577,7 +576,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "moe_stream": ENGINE.moe_stats() if protocol.can(ENGINE, "moe_stats") else None,
                 "wired_limit_advice_mb": ENGINE.wired_limit_advice_mb,
                 "memory_breakdown": ENGINE.memory_breakdown(),
-                "memory_manager": ENGINE.memory.report() if getattr(ENGINE, "memory", None) else None,
+                "memory_manager": ENGINE.memory.report(),
+                "engine_protocol": protocol.VERSION,
                 "scheduler": SCHED.snapshot(),
                 "cached_tokens": len(ENGINE.cache_tokens),
                 "requests": ENGINE.stats["requests"], "last": ENGINE.stats["last"],

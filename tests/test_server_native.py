@@ -195,6 +195,8 @@ class TestNativeServer(unittest.TestCase):
                   "inflight", "max_queue"):
             self.assertIn(k, h)
         self.assertEqual((h["inflight"], h["max_queue"]), (0, 0))   # idle, no cap by default
+        from engine import protocol
+        self.assertEqual([k for k in protocol.HEALTH if k not in h], [])      # the keys clients rely on
 
     def test_health_reports_prefill_progress_while_a_long_prompt_is_processed(self):
         import threading

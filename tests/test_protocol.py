@@ -24,6 +24,13 @@ def quiet(*_a):
     pass
 
 
+class FakeMemory:
+    def state(self): ...
+    def reclaim(self, need=0, upto="restore_points"): ...
+    def relieve(self): ...
+    def report(self): ...
+
+
 class Whole:
     """A stand-in with every required member."""
     backend = "fake"
@@ -32,7 +39,7 @@ class Whole:
         for name in protocol.ATTRIBUTES:
             if name != "backend":
                 setattr(self, name, None)
-        self.lock = threading.Lock()
+        self.memory = FakeMemory()
 
     def build_prompt(self, messages, tools=None, thinking=None, effort=None, extra_kwargs=None): ...
     def encode(self, text, images): ...
@@ -69,6 +76,46 @@ class TestCheck(unittest.TestCase):
         class Open(Whole):
             def generate(self, ids, **kw): ...
         self.assertEqual(protocol.missing(Open()), [])                           # **kw takes anything
+
+    def test_the_memory_manager_is_held_to_its_contract(self):
+        e = Whole()
+        del FakeMemory.relieve
+        try:
+            self.assertEqual(protocol.missing(e), ["memory.relieve"])
+        finally:
+            FakeMemory.relieve = lambda self: None
+
+    def test_a_runtime_missing_a_seam_method_is_named(self):
+        from engine.session import DecodeLoop
+        from engine.runtime import MlxHybridRuntime
+
+        class Loop(Whole, DecodeLoop):
+            pass
+        e = Loop()
+        for name in protocol.LOOP_HOST:
+            if not hasattr(e, name):
+                setattr(e, name, None)
+        e.rt = object.__new__(MlxHybridRuntime)
+        self.assertEqual(protocol.missing(e), [])
+        e.rt = type("Partial", (), {n: None for n in protocol.RUNTIME if n != "rewind"})()
+        self.assertEqual(protocol.missing(e), ["rt.rewind"])
+        e.generate_batch = lambda reqs, on_piece=None: []           # batching needs the batch half too
+        self.assertEqual(protocol.missing(e), ["rt.rewind"] + [f"rt.{n}" for n in protocol.RUNTIME_BATCH])
+
+    def test_every_runtime_implements_the_seam(self):
+        from engine.compat import MlxLmRuntime
+        from engine.runtime import MlxHybridRuntime
+        for cls in (MlxHybridRuntime, MlxLmRuntime):
+            self.assertEqual([n for n in protocol.RUNTIME + protocol.RUNTIME_BATCH
+                              if not callable(getattr(cls, n, None))], [], cls.__name__)
+
+    def test_the_loop_documents_every_runtime_call_it_makes(self):
+        # every rt.<name> engine/session.py and engine/batch.py call is in RUNTIME / RUNTIME_BATCH
+        import re
+        calls = set()
+        for f in ("session.py", "batch.py"):
+            calls |= set(re.findall(r"\brt\.([a-z_]+)\(", open(os.path.join(ROOT, "engine", f)).read()))
+        self.assertEqual(calls - set(protocol.RUNTIME) - set(protocol.RUNTIME_BATCH), set())
 
     def test_optional_capabilities_are_asked_for_by_name(self):
         e = Whole()
@@ -205,6 +252,8 @@ class TestGGUFOverHTTP(unittest.TestCase):
     def test_health_names_the_backend(self):
         h = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.srv.port}/health", timeout=5).read())
         self.assertEqual(h["backend"], "gguf-mlx")
+        self.assertEqual([k for k in protocol.HEALTH if k not in h], [])          # the same contract as native
+        self.assertEqual(h["engine_protocol"], protocol.VERSION)
 
     def test_a_json_answer_is_constrained_on_this_backend_too(self):
         # random weights never close a JSON object in 16 tokens, so the honest outcome here is the server's

@@ -15,7 +15,6 @@
 import gc
 import json
 import os
-import threading
 import time
 from collections import deque
 
@@ -113,7 +112,6 @@ class CompatEngine(DecodeLoop):
         mx.set_cache_limit(int(cache_limit_mb) * 2**20)
 
         self.sleeping, self.last_used = False, time.time()
-        self.lock = threading.Lock()
         self.memory = memory.Manager(self, mx.clear_cache)   # what to give back under pressure, in order
         self.model = self.tok = self.rt = None
         self._load()
