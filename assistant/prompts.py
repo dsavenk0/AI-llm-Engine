@@ -63,11 +63,37 @@ def image_url(value):
     return value
 
 
+MAX_IMAGES = 4                 # the screenshot and up to three of the page's own pictures, cut from it
+MAX_IMAGES_BYTES = 6 * 2**20
+
+
+def images_of(req):
+    """Every picture a request carries — `image` (the screenshot) and `images` (pictures cut from the page) — as
+    validated data URLs, at most MAX_IMAGES and MAX_IMAGES_BYTES together."""
+    out = []
+    first = image_url(req.get("image"))
+    if first:
+        out.append(first)
+    more = req.get("images") or []
+    if not isinstance(more, list):
+        raise PromptError("images must be a list of data URLs")
+    for v in more:
+        v = image_url(v)
+        if v:
+            out.append(v)
+    if len(out) > MAX_IMAGES:
+        raise PromptError(f"at most {MAX_IMAGES} pictures go with one question")
+    if sum(len(v) for v in out) > MAX_IMAGES_BYTES:
+        raise PromptError("the pictures together are larger than 6 MB")
+    return out
+
+
 def with_image(text, image):
-    """A user message's content: the text alone, or the text and the screenshot (the engine's image_url part)."""
-    if not image:
+    """A user message's content: the text alone, or the text and the picture(s) (the engine's image_url parts)."""
+    images = [image] if isinstance(image, str) else list(image or [])
+    if not images:
         return text
-    return [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image}}]
+    return [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
 
 
 def build(req, context_tokens, max_tokens):
@@ -111,13 +137,21 @@ def build(req, context_tokens, max_tokens):
     request = instruction + (f"\n\nThe user's request: {question}" if question else "")
     if sel and task != "ask":
         request += "\nWork on the selection; use the page only as background."
-    image = image_url(req.get("image"))
-    if image:
-        parts.append("A screenshot of the visible part of the page is attached.")
+    pictures = images_of(req)
+    if pictures:
+        extra = len(pictures) - (1 if req.get("image") else 0)
+        parts.append(("A screenshot of the visible part of the page is attached" if req.get("image") else "")
+                     + (" and " if req.get("image") and extra else "")
+                     + (f"{extra} of the page's pictures, cut from it at full resolution" if extra else "")
+                     + ". Describe and use what you see in them.")
+    elif req.get("can_see"):
+        # the model can look but was given nothing to look at: say how, instead of "I am a text assistant"
+        parts.append("No picture of the page was attached. If the request is about what the page looks like or "
+                     "about its images, say that pressing the 📷 Screenshot button lets you see the page.")
     messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": with_image("\n\n".join(parts) + "\n\n" + request, image)}]
+                {"role": "user", "content": with_image("\n\n".join(parts) + "\n\n" + request, pictures)}]
     shared = {"title": bool(title), "url": url,
               "page_chars": len(body), "page_chars_total": body_n, "page_truncated": body_cut,
               "selection_chars": len(sel), "selection_chars_total": sel_n, "selection_truncated": sel_cut,
-              "screenshot": bool(image)}
+              "screenshot": bool(req.get("image")), "pictures": len(pictures)}
     return messages, shared

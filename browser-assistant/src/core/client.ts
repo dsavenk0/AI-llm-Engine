@@ -69,11 +69,12 @@ export class Client {
   /** One task about a page, streamed. Resolves when the answer ends, however it ends. */
   async chat(req: {
     session: string; task: Task; question?: string; page: PageContext; lang?: string; tone?: string;
-    thinking?: boolean; image?: string;
+    thinking?: boolean; image?: string; images?: string[];
   }, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
     const body = {
       session: req.session, task: req.task, question: req.question, lang: req.lang, tone: req.tone,
       thinking: req.thinking, selection: req.page.selection, image: req.image,
+      images: req.images && req.images.length ? req.images : undefined,
       page: { title: req.page.title, url: req.page.url, text: req.page.text },
     };
     const r = await fetch(this.url("/v1/assistant/chat"), {

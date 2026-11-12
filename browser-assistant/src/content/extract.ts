@@ -12,6 +12,8 @@ export interface Extracted {
   selection: string;
   text: string;
   truncated: boolean;
+  pictures: { x: number; y: number; w: number; h: number; alt: string }[];   // largest visible, in CSS pixels
+  dpr: number;
 }
 
 export function extractPage(maxChars: number): Extracted {
@@ -87,5 +89,20 @@ export function extractPage(maxChars: number): Extracted {
   if (!joined.trim()) joined = (document.body?.innerText || "").slice(0, maxChars);       // the last resort
   const text = joined.replace(/[ \t]+\n/g, "\n").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const sel = (window.getSelection()?.toString() || "").trim();
-  return { title: document.title || "", url: location.href, selection: sel.slice(0, maxChars), text, truncated };
+  // the pictures a person sees right now: images, canvases and video frames, at least 120×80 on screen, largest
+  // first — the background cuts them out of a full-resolution capture of the tab when a model is to see them
+  const vw = innerWidth, vh = innerHeight;
+  const pictures = Array.from(document.querySelectorAll("img, canvas, video, picture"))
+    .map((el) => {
+      const r = el.getBoundingClientRect();
+      const x = Math.max(0, r.left), y = Math.max(0, r.top);
+      const w = Math.min(vw, r.right) - x, h = Math.min(vh, r.bottom) - y;
+      return { x, y, w, h, alt: (el.getAttribute("alt") || el.getAttribute("aria-label") || "").slice(0, 120), el };
+    })
+    .filter((p) => p.w >= 120 && p.h >= 80 && !hidden(p.el))
+    .sort((a, b) => b.w * b.h - a.w * a.h)
+    .slice(0, 3)
+    .map(({ el, ...p }) => (void el, p));
+  return { title: document.title || "", url: location.href, selection: sel.slice(0, maxChars), text, truncated,
+           pictures, dpr: devicePixelRatio || 1 };
 }

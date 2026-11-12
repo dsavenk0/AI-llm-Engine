@@ -530,11 +530,12 @@ class Assistant:
         if not h:
             raise Conflict("engine_offline", "the engine is not running — start it first")
         max_tokens = max(64, min(int(req.get("max_tokens") or 1024), 4096))
-        if req.get("image") and not h.get("vision"):
+        if (req.get("image") or req.get("images")) and not h.get("vision"):
             raise Conflict("no_vision", "the loaded model cannot see images — pick a model with vision to ask about "
                                         "a screenshot")
         try:
-            messages, shared = prompts.build(req, int(h.get("context") or 4096), max_tokens)
+            messages, shared = prompts.build(dict(req, can_see=bool(h.get("vision"))), int(h.get("context") or 4096),
+                                             max_tokens)
         except prompts.PromptError as e:
             raise Conflict("bad_request", str(e)) from None
         g = Generation(session)

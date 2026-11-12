@@ -7,7 +7,7 @@ import { Client, ServiceFailure, Settings } from "../core/client";
 import { ChatEvent, Command, DEFAULT_SERVICE, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { extractPage, Extracted } from "../content/extract";
 import { AgentRunner } from "./agent";
-import { captureTab, CaptureError } from "./capture";
+import { captureTab, captureWithPictures, CaptureError } from "./capture";
 import { bridge, overlay } from "./agent-bridge";
 import { overlayFor } from "../core/activity";
 import { originOf } from "../core/policy";
@@ -180,9 +180,12 @@ async function ask(port: Port, req: Extract<UiRequest, { kind: "ask" }>): Promis
   if (req.selection && !page.selection) page.selection = req.selection;
   if (req.selectionOnly) page.text = "";
   let image: string | undefined;
+  let images: string[] = [];
   if (req.screenshot) {
     try {
-      image = await captureTab(req.tabId);
+      const shot = await captureWithPictures(req.tabId, page.pictures || [], page.dpr || 1);
+      image = shot.screenshot;
+      images = shot.pictures;                                  // the page's own pictures, at full resolution
       send(port, { kind: "shot", dataUrl: image });
     } catch (e) {
       send(port, { kind: "fatal", message: e instanceof CaptureError ? e.message : `No screenshot: ${String(e)}` });
@@ -194,7 +197,7 @@ async function ask(port: Port, req: Extract<UiRequest, { kind: "ask" }>): Promis
   running.set(port, run);
   try {
     await new Client(await settings()).chat({
-      session, task: req.task, question: req.question, lang: req.lang, tone: req.tone, thinking: req.thinking, image,
+      session, task: req.task, question: req.question, lang: req.lang, tone: req.tone, thinking: req.thinking, image, images,
       page: { title: page.title, url: page.url, text: page.text, selection: page.selection },
     }, (ev: ChatEvent) => {
       if (ev.type === "start") run.id = ev.id;

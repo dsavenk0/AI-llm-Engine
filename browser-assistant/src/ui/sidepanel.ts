@@ -6,6 +6,7 @@ import { api, browserName } from "../browser-adapters/api";
 import { AgentView, Autonomy } from "../core/agent-types";
 import { activityLabel } from "../core/activity";
 import { originOf } from "../core/policy";
+import { wantsToSee } from "../core/vision";
 import { Command, PROTOCOL, ServiceError, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { isActive, renderAgent } from "./agent-view";
 import { Answer, el, metricsText, modelLabel, problemText, statusLine, updateNotice } from "./view";
@@ -173,12 +174,13 @@ function learnUrl(id: number): void {
   api.tabs.get(id).then((t) => { if (id === tabId) currentUrl = t.url || ""; }).catch(() => undefined);
 }
 
-function withAccess(go: () => void): void {
+function withAccess(go: () => void, capture = false): void {
   const origin = originOf(currentUrl);
   if (!origin) { go(); return; }                          // a browser page: the background says it cannot be read
   let request: Promise<boolean>;
   try {
-    request = api.permissions.request({ origins: [origin + "/*"] });
+    // a picture of the tab needs every site (Chrome's rule for captureVisibleTab), asked in this same click
+    request = api.permissions.request({ origins: capture ? ["<all_urls>"] : [origin + "/*"] });
   } catch {
     go();                                                 // no permissions API here (Safari decides by itself)
     return;
@@ -208,7 +210,7 @@ async function ask(task: Task, question?: string): Promise<void> {
   answer = { a, tab: tabId };
   const lang = navigator.language.startsWith("ru") ? "Russian" : "English";
   post({ kind: "ask", tabId, task, question, lang, thinking: $<HTMLInputElement>("thinking").checked,
-         screenshot: seeing() });
+         screenshot: seeing() || (canSee() && wantsToSee(question)) });
   syncButtons();
   scroll();
 }
@@ -313,8 +315,9 @@ function syncButtons(): void {
 function submit(): void {
   const text = input.value.trim();
   if (send.disabled || busy()) return;
-  if (mode.value === "ask") withAccess(() => whenReady(() => void ask(text ? "ask" : "summarize", text || undefined)));
-  else if (text) withAccess(() => whenReady(() => act(text)));
+  const capture = seeing() || (mode.value === "ask" && canSee() && wantsToSee(text));
+  if (mode.value === "ask") withAccess(() => whenReady(() => void ask(text ? "ask" : "summarize", text || undefined)), capture);
+  else if (text) withAccess(() => whenReady(() => act(text)), capture);
   else return;
   input.value = "";
   autosize();

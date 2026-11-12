@@ -9,14 +9,15 @@ function read(html: string, max = 10000) {
   const dom = new JSDOM(`<!doctype html><html><head><title>T</title></head><body>${html}</body></html>`,
     { url: "https://site.example/page", pretendToBeVisual: true });
   const g = globalThis as any;
-  const saved = { document: g.document, window: g.window, Node: g.Node, getComputedStyle: g.getComputedStyle, location: g.location };
+  const saved = { document: g.document, window: g.window, Node: g.Node, getComputedStyle: g.getComputedStyle, location: g.location,
+                  innerWidth: g.innerWidth, innerHeight: g.innerHeight, devicePixelRatio: g.devicePixelRatio };
   const win = dom.window as any;
   win.Element.prototype.checkVisibility = function (this: Element) {
     const d = win.getComputedStyle(this).display;
     return d !== "none" && d !== "contents";
   };
   Object.assign(g, { document: win.document, window: win, Node: win.Node, getComputedStyle: win.getComputedStyle.bind(win),
-                     location: win.location });
+                     location: win.location, innerWidth: 1280, innerHeight: 800, devicePixelRatio: 2 });
   try {
     return extractPage(max);
   } finally {
@@ -39,4 +40,11 @@ test("hidden parts stay out, and scripts and navigation are skipped", () => {
   const r = read(`<nav>Home About</nav><p>Visible</p><p style="display:none">Secret</p><script>var x=1</script>`);
   assert.match(r.text, /Visible/);
   assert.doesNotMatch(r.text, /Secret|Home About|var x/);
+});
+
+test("the largest visible pictures are reported for cutting out, small ones are not", () => {
+  const dom = `<img alt="big" style="width:600px;height:400px"><img alt="tiny" style="width:20px;height:20px">`;
+  const r = read(dom);
+  assert.equal(r.dpr, 2);
+  assert.ok(Array.isArray(r.pictures));
 });
