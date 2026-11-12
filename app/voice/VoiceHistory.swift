@@ -254,15 +254,18 @@ enum VoiceCommand: Equatable {
     private static let stopWords: Set<String> = [
         "stop", "cancel", "stop it", "stop that", "stop generating", "never mind", "that's enough",
         "стоп", "отмена", "отмени", "хватит", "остановись", "прекрати", "достаточно",
+        "para", "para ya", "detente", "basta", "ya basta", "cancela", "cancelar", "alto", "es suficiente",
     ]
     private static let newWords: Set<String> = [
         "new conversation", "new chat", "start over", "clear chat", "clear the chat",
         "новый чат", "новая беседа", "начни заново", "очисти чат", "очисти историю",
+        "nueva conversación", "nueva conversacion", "nuevo chat", "empieza de nuevo", "empezar de nuevo",
+        "borra el chat", "limpia el chat",
     ]
 
     static func parse(_ text: String) -> VoiceCommand? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?,"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?,¡¿"))
         if stopWords.contains(t) { return .stop }
         if newWords.contains(t) { return .newConversation }
         return nil

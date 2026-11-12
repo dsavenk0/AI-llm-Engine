@@ -256,8 +256,16 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// The recognition-language choice that means "whatever I speak": Whisper detects the language of each
+    /// utterance (Russian, Spanish, English… in one conversation) — the system recogniser hears one language only.
+    static let anyLanguage = "auto"
+
+    /// Whisper writes the text when it is switched on, or when "any language" is chosen.
+    private var transcribeWithWhisper: Bool { whisperASR || localeID == Voice.anyLanguage }
+
     private var recognizerLocale: Locale {
-        Locale(identifier: localeID.isEmpty ? (Locale.preferredLanguages.first ?? "en-US") : localeID)
+        // "any language": the system recogniser only marks where the utterance ends; Whisper writes the words
+        Locale(identifier: localeID.isEmpty || localeID == Voice.anyLanguage ? (Locale.preferredLanguages.first ?? "en-US") : localeID)
     }
 
     /// Eases `level` toward its target so the orb never jumps.
@@ -632,7 +640,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let format = input.outputFormat(forBus: 0)
         var recordFile: AVAudioFile? = nil          // captured strongly by the tap; flushed when the tap is removed
         recordURL = nil
-        if whisperASR, !bargeIn {
+        if transcribeWithWhisper, !bargeIn {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("llmbar-utterance.wav")
             try? FileManager.default.removeItem(at: url)
             recordFile = try? AVAudioFile(forWriting: url, settings: format.settings)
@@ -745,7 +753,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let recorded = recordURL; recordURL = nil
         stopCapture()
         let appleText = heard.trimmingCharacters(in: .whitespacesAndNewlines)
-        if whisperASR, let recorded {                 // transcribe the recording; fall back to the live text
+        if transcribeWithWhisper, let recorded {                 // transcribe the recording; fall back to the live text
             state = .thinking
             heard = ""
             Task { await self.commitWithWhisper(recorded, fallback: appleText) }
@@ -1416,11 +1424,13 @@ struct VoiceView: View {
                 Toggle("Keep on top", isOn: $voice.keepOnTop)
                 Picker("Recognition language", selection: $voice.localeID) {
                     Text("System language").tag("")
+                    Text("Any language — Whisper detects it").tag(Voice.anyLanguage)
                     Text("English").tag("en-US")
                     Text("Русский").tag("ru-RU")
                     Text("Deutsch").tag("de-DE")
                     Text("Français").tag("fr-FR")
-                    Text("Español").tag("es-ES")
+                    Text("Español (España)").tag("es-ES")
+                    Text("Español (Latinoamérica)").tag("es-MX")
                     Text("中文").tag("zh-CN")
                     Text("日本語").tag("ja-JP")
                 }

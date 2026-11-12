@@ -455,6 +455,10 @@ eq(VoiceCommand.parse("a nonstop flight to Lisbon"), nil, "a trigger word inside
 eq(VoiceCommand.parse("what's new in Swift 6?"), nil, "'new' inside a question is not a command")
 eq(VoiceCommand.parse("how do I stop the engine from the CLI?"), nil, "'stop' inside a real question is not a command")
 eq(VoiceCommand.parse(""), nil, "empty")
+eq(VoiceCommand.parse("¡Para!"), .stop, "Spanish stop, with inverted punctuation")
+eq(VoiceCommand.parse("Basta."), .stop, "basta")
+eq(VoiceCommand.parse("Nueva conversación"), .newConversation, "Spanish new conversation")
+eq(VoiceCommand.parse("¿para qué sirve esto?"), nil, "'para' inside a Spanish question is not a command")
 
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

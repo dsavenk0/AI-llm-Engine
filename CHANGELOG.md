@@ -5,6 +5,9 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **Voice understands Spanish, and any mix of languages.** Spanish (Spain or Latin America) is in the recognition
+  menu, "para", "basta" and "nueva conversación" work as voice commands, and *Any language — Whisper detects it*
+  lets you switch between Spanish, Russian and English mid-conversation without changing a setting.
 - **One queue for everything that uses the model, with priorities.** Voice and the browser assistant go ahead of
   chats, chats ahead of background agents (`X-Priority: interactive | normal | background`); waiting raises a
   request's priority, so nothing starves. While the Mac is past its RAM limit, background requests wait, merged

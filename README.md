@@ -554,7 +554,13 @@ there is a progress bar with the bytes the engine process holds so far, and a sl
 - **Pictures:** asking for one ("generate an image of a lighthouse at dusk") draws it with the installed image
   module and shows it in the conversation — on automatically once that module is installed, no separate switch,
   since unlike the web there is nothing to leave on by mistake.
-- **Voice commands:** saying "stop"/"cancel" or "new conversation" (English or Russian) as the *whole* thing you
+- **Languages:** the menu's *Recognition language* picks the one the system recogniser hears (English, Russian,
+  German, French, Spanish — Spain or Latin America —, Chinese, Japanese). *Any language — Whisper detects it*
+  transcribes every utterance with Whisper, which recognises the language itself, so Spanish, Russian and English can
+  alternate in one conversation without touching the menu (needs `./llm setup --audio`; without it the system text
+  is used). The answer comes in the language you spoke and is read in a voice for that language.
+- **Voice commands:** saying "stop"/"cancel" or "new conversation" (English, Russian or Spanish — "para", "basta",
+  "nueva conversación") as the *whole* thing you
   say acts on it right away instead of being sent to the model — a word like "stop" inside a real question is
   never mistaken for one.
 - **History:** a clock button at the top left opens saved conversations — open, rename, delete; the model menu under
