@@ -86,6 +86,10 @@ export function sharedText(sh: Shared): string {
     + (sh.selection_truncated ? ` of ${sh.selection_chars_total.toLocaleString()}` : ""));
   if (sh.page_chars) parts.push(`page text, ${sh.page_chars.toLocaleString()} characters`
     + (sh.page_truncated ? ` of ${sh.page_chars_total.toLocaleString()} (cut to fit the model)` : ""));
+  if (sh.screenshot) parts.push("a screenshot");
+  const cut = (sh.pictures || 0) - (sh.screenshot ? 1 : 0);
+  if (cut > 0) parts.push(`${cut} picture${cut > 1 ? "s" : ""} from the page`);
+  if (sh.described) parts.push("pictures described in words (this model cannot see)");
   let host = "";
   try {
     host = new URL(sh.url).host;

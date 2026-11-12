@@ -54,6 +54,8 @@ export interface Shared {
   selection_chars_total: number;
   selection_truncated: boolean;
   screenshot?: boolean;
+  pictures?: number;
+  described?: boolean;
 }
 
 export type ChatEvent =

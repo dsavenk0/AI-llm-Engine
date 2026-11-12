@@ -149,6 +149,10 @@ def build(req, context_tokens, max_tokens):
     sel, sel_n, sel_cut = _clean(selection, budget)
     rest = max(0, budget - len(sel))
     # the selection is what the user pointed at: with one, the page text is only background
+    # with pictures attached the question is about what they show: a short excerpt of the text is background
+    # enough, and a long one drowns the picture for a small model
+    if req.get("image") or req.get("images"):
+        rest = min(rest, 6000)
     body, body_n, body_cut = _clean(page.get("text"), rest if not sel else min(rest, budget // 3))
     title, _, _ = _clean(page.get("title"), 300)
     url = str(page.get("url") or "")[:500]
@@ -169,10 +173,11 @@ def build(req, context_tokens, max_tokens):
         parts.append(str(req["described"])[:20000])
     if pictures:
         extra = len(pictures) - (1 if req.get("image") else 0)
-        parts.append(("A screenshot of the visible part of the page is attached" if req.get("image") else "")
+        # first, so a small model reads it before the page text: it is being shown the page, and should look
+        parts.insert(0, "You are shown " + (("a screenshot of the visible part of the page" if req.get("image") else "")
                      + (" and " if req.get("image") and extra else "")
-                     + (f"{extra} of the page's pictures, cut from it at full resolution" if extra else "")
-                     + ". Describe and use what you see in them.")
+                     + (f"{extra} of the page's pictures at full resolution" if extra else ""))
+                     + ". You can see them: answer from what they show, and use the page text only as background.")
     elif req.get("can_see"):
         # the model can look but was given nothing to look at: say how, instead of "I am a text assistant"
         parts.append("No picture of the page was attached. If the request is about what the page looks like or "

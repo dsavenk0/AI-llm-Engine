@@ -610,6 +610,7 @@ class TestPrompts(unittest.TestCase):
         content = msgs[1]["content"]
         self.assertEqual([p["image_url"]["url"] for p in content[1:]], [shot, pic, pic])
         self.assertIn("2 of the page's pictures", content[0]["text"])
+        self.assertTrue(content[0]["text"].startswith("You are shown a screenshot"))
         self.assertEqual(shared["pictures"], 3)
         with self.assertRaisesRegex(prompts.PromptError, "at most 4"):
             prompts.images_of({"image": shot, "images": [pic] * 4})
