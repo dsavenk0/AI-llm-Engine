@@ -5,6 +5,14 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## 1.1.0 — 12 November
 
 ### Added
+- **The browser assistant sees what you see.** Ask about an image, a chart or how the page looks and a model with
+  vision gets a screenshot by itself, plus the page's largest pictures cut out at full resolution; a model without
+  vision gets them described in words by the Mac's own image recognition (labels and the text in them).
+- **Conversations that go on and are kept.** Follow-up questions carry the conversation so far; each tab's
+  conversation survives closing the panel and restarting the browser, and a history (◷) opens, renames and deletes
+  past ones, as in the voice chat. While the panel is open the model stays loaded.
+- **Lumo greets you in the terminal.** `./llm` opens with Lumo, a small glowing mascot grown out of LLMBar's orb,
+  saying good morning (or evening) with a tip of the day.
 - **The desktop widget's orb slowly revolves and breathes while the model is on**, on both sizes (a widget cannot
   animate continuously; it now gets a frame every few seconds and the system eases between them).
 - **The browser assistant tells builds apart, and installs into Chrome from Tools too.** Each build has its own
@@ -99,6 +107,10 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   the real forward), `tests/bench_batch.py`.
 
 ### Fixed
+- The browser assistant's side panel no longer closes or goes silent mid-conversation (an update now waits for
+  your click; the panel reconnects when Chrome puts the extension's background to sleep), reads pages built from
+  `display: contents` wrappers, and answers a plain question even on a page with no readable text.
+- LLMBar's panel content sits centred: with Russian labels the tab bar widened the column and pushed every card left.
 - **A tap on the widget now shows LLMBar.** When LLMBar was not running, the widget started it but its window never
   appeared, so it looked as if nothing happened; it now opens. A voice chat minimised to the Dock is brought back too.
 - The request timeout started when the engine lock was acquired, so waiting for the model ate it. It now starts

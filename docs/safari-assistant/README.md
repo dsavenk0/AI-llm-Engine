@@ -74,6 +74,16 @@ question and is shown in the conversation; in the *Act* modes, the model sees th
 layout, images, maps and grids the element list cannot describe. It is off by default: a picture costs prefill
 time on every step. The first time it asks the browser for access to the sites it photographs.
 
+**Conversations.** A follow-up question carries the tab's conversation so far (its last exchanges, never the page
+text twice). Each tab's conversation is kept in the extension — it comes back when the panel reopens, after a
+reload or a browser restart — and **◷** lists past ones to open, rename or delete; **＋** starts a new one. While a
+panel is open the service keeps the model loaded.
+
+**Pictures.** A question about images or how the page looks brings a screenshot by itself, with the page's largest
+visible pictures cut out of a full-resolution capture. A model with vision sees them; a model without gets them
+described in words by Apple Vision (scene labels and the text it reads — good for screenshots and charts, rough
+for photographs).
+
 **The context menu** on selected text — Explain, Summarize, Translate, Rewrite — answers in a small panel on the
 page. *Summarize this page* is in the page's own context menu.
 
