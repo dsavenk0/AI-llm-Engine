@@ -10,6 +10,7 @@ import { AgentRunner } from "./agent";
 import { captureTab, CaptureError } from "./capture";
 import { bridge, overlay } from "./agent-bridge";
 import { overlayFor } from "../core/activity";
+import { originOf } from "../core/policy";
 import { AgentView, AuditEntry } from "../core/agent-types";
 
 const MAX_PAGE_CHARS = 200_000;      // what is read from a page; the service cuts it to the model's context
@@ -165,9 +166,12 @@ async function ask(port: Port, req: Extract<UiRequest, { kind: "ask" }>): Promis
   try {
     page = await readPage(req.tabId);
   } catch {
-    send(port, { kind: "fatal", message: "LLMBar cannot read this page: either it is one of the browser's own pages "
-      + "(new tab, settings, the extension store), which no extension may read, or access to this site was not "
-      + "allowed — send again and choose Allow." });
+    const url = (await tabInfo(req.tabId))?.url || "";
+    const origin = originOf(url);
+    send(port, { kind: "fatal", message: origin
+      ? `LLMBar has no access to ${origin.replace(/^https?:\/\//, "")} yet. Send again and choose Allow when the browser asks.`
+      : `This is one of the browser's own pages${url ? ` (${url.split("?")[0]})` : ""}, which no extension may read. `
+        + "Open a website and ask there." });
     return;
   }
   if (req.selection && !page.selection) page.selection = req.selection;

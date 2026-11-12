@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from assistant import prompts, service
 
@@ -535,17 +536,23 @@ class TestExtensionFiles(unittest.TestCase):
         self.assertEqual(service.sync_extension(tempfile.mkdtemp(), home), {"safari": "0.1.0", "chromium": "0.1.0"})
 
     def test_the_snapshot_says_which_version_is_installed_and_where(self):
-        a = service.Assistant(FakeControl())
-        a.extension = {"safari": "0.2.0"}
-        s = a.refresh()
-        self.assertEqual(s["extension"], {"versions": {"safari": "0.2.0"}, "folder": service.EXT_HOME})
+        home = os.path.join(tempfile.mkdtemp(), "ba")
+        with mock.patch.object(service, "EXT_HOME", home):
+            a = service.Assistant(FakeControl())
+            a.extension = {"safari": "0.2.0"}
+            s = a.refresh()
+            self.assertEqual(s["extension"], {"versions": {"safari": "0.2.0"}, "folder": home})
+            # files replaced while the service runs (setup, an LLMBar update): the snapshot follows the folder
+            self.build(home, "0.3.0")
+            self.assertEqual(a.refresh()["extension"]["versions"], {"safari": "0.3.0", "chromium": "0.3.0"})
 
     def test_the_built_manifest_asks_for_no_more_than_it_needs(self):
         path = os.path.join(service.EXT_BUILT, "safari", "manifest.json")
         if not os.path.exists(path):
             self.skipTest("the extension is not built (npm run build): its manifest was not checked")
         m = json.load(open(path))
-        self.assertEqual(sorted(m["permissions"]), ["activeTab", "contextMenus", "scripting", "storage"])
+        # nativeMessaging: inside LLMBar.app the extension gets its pairing token from the app's handler
+        self.assertEqual(sorted(m["permissions"]), ["activeTab", "contextMenus", "nativeMessaging", "scripting", "storage"])
         self.assertEqual(m["host_permissions"], ["http://127.0.0.1/*"])       # no site is readable without a gesture
         self.assertNotIn("content_scripts", m)                                 # nothing runs on pages unasked
         self.assertNotIn("unsafe", json.dumps(m["content_security_policy"]))

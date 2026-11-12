@@ -73,7 +73,7 @@ function renderEmpty(t: Thread): void {
   for (const d of DEMOS[acting ? "act" : "ask"]) {
     const b = el("button", { type: "button", class: "demo", textContent: d.label });
     b.addEventListener("click", () => {
-      if (d.task) withAccess(() => void ask(d.task!));
+      if (d.task) withAccess(() => whenReady(() => void ask(d.task!)));
       else { input.value = d.text; input.focus(); autosize(); }
     });
     list.append(b);
@@ -83,6 +83,7 @@ function renderEmpty(t: Thread): void {
 
 function show(id: number): void {
   tabId = id;
+  learnUrl(id);
   const t = thread(id);
   for (const x of byTab.values()) x.root.hidden = x !== t;
   post({ kind: "watch", tabId: id });
@@ -100,11 +101,54 @@ function scroll(): void {
   threads.scrollTop = threads.scrollHeight;
 }
 
+// ───────────── the engine starts itself ─────────────
+// A question or a task sent while the engine is off starts it, then runs as soon as the model is ready — as the
+// voice chat and the editor do. ■ cancels the wait.
+let pendingRun: (() => void) | null = null;
+let pendingNote: HTMLElement | null = null;
+
+function whenReady(run: () => void): void {
+  const e = state?.engine.state;
+  if (e === "ready") { run(); return; }
+  pendingRun = run;
+  if (tabId !== null) {
+    const t = thread(tabId);
+    t.empty.hidden = true;
+    pendingNote = el("div", { class: "msg note dim" }, "Starting the model…");
+    t.root.append(pendingNote);
+    scroll();
+  }
+  if (e === "offline" || e === "error") post({ kind: "command", command: { op: "start" }, confirm: false });
+  syncButtons();
+}
+
+function settlePending(): void {
+  if (!pendingRun || !state) return;
+  if (state.engine.state === "ready") {
+    const run = pendingRun;
+    pendingRun = null;
+    pendingNote?.remove();
+    pendingNote = null;
+    run();
+  } else if (state.engine.state === "error") {
+    pendingRun = null;
+    if (pendingNote) { pendingNote.textContent = `The model did not start: ${state.engine.error || "see the model menu"}`; pendingNote.className = "msg note bad"; }
+    pendingNote = null;
+    syncButtons();
+  }
+}
+
 // ───────────── access to the site ─────────────
 // Chrome grants nothing when the side panel opens (unlike a popup, opening it is not "activeTab"), so the panel
 // asks for the site in front at the moment the person sends — a click, the gesture the browser requires — and
 // the browser shows its own Allow prompt once per site. Called synchronously from the click, before any await.
 let currentUrl = "";
+
+/** The panel asks the browser itself which address the tab shows (it needs it before the click that asks for
+ *  access, and an answer relayed through the background could arrive late or empty). */
+function learnUrl(id: number): void {
+  api.tabs.get(id).then((t) => { if (id === tabId) currentUrl = t.url || ""; }).catch(() => undefined);
+}
 
 function withAccess(go: () => void): void {
   const origin = originOf(currentUrl);
@@ -225,7 +269,7 @@ see.addEventListener("click", async (e) => {
 
 // ───────────── the composer ─────────────
 function busy(): boolean {
-  return !!answer?.a.active || (tabId !== null && isActive(byTab.get(tabId)?.view ?? null));
+  return !!pendingRun || !!answer?.a.active || (tabId !== null && isActive(byTab.get(tabId)?.view ?? null));
 }
 
 function syncButtons(): void {
@@ -236,16 +280,18 @@ function syncButtons(): void {
   see.title = canSee() ? (mode.value === "ask" ? "Attach a screenshot of the page to the question"
     : "Let the model see a screenshot of the page at every step") : "The loaded model cannot see images";
   send.hidden = working;
-  send.disabled = !ready;
-  input.placeholder = !ready ? "Start the engine from the model menu above"
+  send.disabled = !state;                       // off is fine: sending starts the model
+  input.placeholder = !state ? "Not connected — open ⚙︎ settings"
+    : !ready && !pendingRun ? (mode.value === "ask" ? "Ask about this page — the model starts by itself"
+                                                    : "Describe what to do — the model starts by itself")
     : mode.value === "ask" ? "Ask about this page — Enter to send" : "Describe what to do on this page — Enter to start";
 }
 
 function submit(): void {
   const text = input.value.trim();
   if (send.disabled || busy()) return;
-  if (mode.value === "ask") withAccess(() => void ask(text ? "ask" : "summarize", text || undefined));
-  else if (text) withAccess(() => act(text));
+  if (mode.value === "ask") withAccess(() => whenReady(() => void ask(text ? "ask" : "summarize", text || undefined)));
+  else if (text) withAccess(() => whenReady(() => act(text)));
   else return;
   input.value = "";
   autosize();
@@ -262,6 +308,13 @@ input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
 });
 stop.addEventListener("click", () => {
+  if (pendingRun) {
+    pendingRun = null;
+    if (pendingNote) pendingNote.textContent = "Cancelled.";
+    pendingNote = null;
+    syncButtons();
+    return;
+  }
   if (answer?.a.active) post({ kind: "cancel" });
   else post({ kind: "agent-cancel" });
 });
@@ -333,6 +386,7 @@ function controlButton(label: string, cmd: Command, danger = false): HTMLButtonE
 
 function renderState(ev: Extract<UiEvent, { kind: "state" }>): void {
   state = ev.state;
+  setTimeout(settlePending, 0);                // after the rest of the state is drawn
   const problem = $("problem");
   problem.hidden = !!(ev.connected && state);
   problem.textContent = problem.hidden ? "" : problemText(ev.problem);
@@ -389,7 +443,7 @@ port.onMessage.addListener((ev: UiEvent) => {
     syncButtons();
   } else if (ev.kind === "tab") {
     if (ev.tabId !== tabId) return;
-    currentUrl = ev.url;
+    if (ev.url) currentUrl = ev.url;
     let host = "";
     try { host = new URL(ev.url).host; } catch { host = ""; }
     tabLine.textContent = host ? `${host} — ${ev.title}` : ev.title || ev.url;
@@ -407,6 +461,9 @@ port.onMessage.addListener((ev: UiEvent) => {
   } else if (ev.kind === "command-result" && !ev.ok && ev.error) conflict(ev.error, ev.command);
 });
 
+api.tabs.onUpdated.addListener((id, change) => {
+  if (id === tabId && change.url) currentUrl = change.url;     // a new page in the same tab
+});
 api.tabs.onActivated.addListener((info) => {
   if (windowId === undefined || info.windowId === windowId) show(info.tabId);
 });

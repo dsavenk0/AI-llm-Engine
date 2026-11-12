@@ -247,6 +247,17 @@ class Assistant:
         self.unload_supported = True
         self.extension = {}         # {browser: version installed in EXT_HOME} — what an extension should be
 
+    def installed_versions(self):
+        """The extension's version in each browser's folder, read now: `llm assistant setup` or an LLMBar update
+        can replace the files while this service keeps running, and an extension reloads itself when it sees a
+        newer one here (browser-assistant/src/background/main.ts)."""
+        out = dict(self.extension)
+        for browser in ("safari", "chromium"):
+            v = _manifest_version(os.path.join(EXT_HOME, browser))
+            if v:
+                out[browser] = v
+        return out
+
     # ── snapshot ──
     def _core(self):
         h = self.control.health()
@@ -287,7 +298,7 @@ class Assistant:
             "in_use": {"inflight": inflight, "assistant_generations": len(gens)},
             "generations": [{"id": g.id, "session": g.session, "since": round(g.started, 3)} for g in gens],
             "metrics": metrics,
-            "extension": {"versions": self.extension, "folder": EXT_HOME},
+            "extension": {"versions": self.installed_versions(), "folder": EXT_HOME},
             "capabilities": {
                 "unload": self.unload_supported,
                 "per_session_model": False,
