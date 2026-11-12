@@ -237,6 +237,12 @@ class MlxHybridRuntime:
     def commit(self, cache, m):
         self.model.commit(cache, m)
 
+    def can_verify(self, cache):
+        return True             # the native model undoes a verify pass itself, recurrent layers included
+
+    def rewind(self, cache, n):
+        return False            # a recurrent state cannot be cut back: the engine drops the cache instead
+
     # ── sampling ──
     def sampler(self, vocab, seed, sampling):
         return Sampler(vocab, seed=seed, **sampling)

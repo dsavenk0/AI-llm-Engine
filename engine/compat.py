@@ -7,8 +7,9 @@
 # chat template and tool-call parser from mlx-lm and keeps everything else ours:
 #   * the same Engine interface, so server.py, the RAM guard, /health, /v1/stats, LLMBar
 #     and the CLI treat both backends identically;
-#   * our own decode loop (not mlx_lm.generate_step) — it's what lets the reasoning budget,
-#     repetition guard, stop strings, cancellation and the memory guard work here too;
+#   * our own decode loop (not mlx_lm.generate_step): the native engine's DecodeLoop
+#     (engine/session.py) through MlxLmRuntime below — so the reasoning budget, repetition guard,
+#     stop strings, cancellation, speculation and the memory guard are the same code on both;
 #   * prefix reuse through mlx-lm's prompt cache where the cache can be trimmed.
 # mlx-lm is imported lazily: without it the native engine stays dependency-light.
 import gc
@@ -21,11 +22,11 @@ from collections import deque
 import mlx.core as mx
 
 from . import memory
-from .generate import (DRAFT_LEVELS, ContextError, Drafter, GiB, MemoryLimitError, Sampler, is_looping, is_repeating, sampling_presets,
+from .generate import (DRAFT_LEVELS, ContextError, GiB, MemoryLimitError, sampling_presets,  # noqa: F401
                        summarize)  # noqa: F401  (summarize is re-exported for the server)
 from . import family
-from .stopfilter import StopFilter
-from .tokenizer import StreamDecoder
+from .runtime import MlxHybridRuntime
+from .session import DecodeLoop
 
 INSTALL_HINT = ("this model's architecture isn't implemented by the native engine; it runs on the "
                 "optional mlx-lm backend. Install it with:  ./llm setup --compat  "
@@ -87,7 +88,7 @@ class _Decoder:
             return self.tok.decode(ids)
 
 
-class CompatEngine:
+class CompatEngine(DecodeLoop):
     backend = "mlx-lm"
     REQUIRES_MLX_LM = True       # a subclass with its own model code (engine/gguf_engine.py) sets this False
 
@@ -106,14 +107,16 @@ class CompatEngine:
         self.speculative = False         # a subclass with a trimmable cache turns it on
         self.draft_levels, self.ngram_min = tuple(sorted({min(l, 15) for l in DRAFT_LEVELS})), 2
         self.store = None                # no SSD prefix cache on this backend
+        self.snapshots, self.im_start = [], None     # nor restore points: a trimmable cache reuses any prefix
         self.moe = None                  # the expert pools of a streamed Mixture-of-Experts model (moe_stream.py)
         self.wired_limit_advice_mb = None
         mx.set_cache_limit(int(cache_limit_mb) * 2**20)
 
         self.sleeping, self.last_used = False, time.time()
         self.lock = threading.Lock()
-        self.model = self.tok = None
+        self.model = self.tok = self.rt = None
         self._load()
+        self._attach_runtime()
 
         tpl = self._template_source()
         # Reasoning is a property of the *template* (a vocabulary that happens to contain <think> says
@@ -136,7 +139,8 @@ class CompatEngine:
         g = self.gen_cfg.get("eos_token_id", self.config.get("eos_token_id", []))
         eos |= set(g if isinstance(g, list) else [g])
         self.eos = {e for e in eos if e is not None}
-        self.vocab = int((self.config.get("text_config") or self.config).get("vocab_size") or 0)
+        self.vocab = (int((self.config.get("text_config") or self.config).get("vocab_size") or 0)
+                      or int(getattr(getattr(self.model, "args", None), "vocab_size", 0)) or 262144)
 
         tc = self.config.get("text_config") or self.config
         native = tc.get("max_position_embeddings") or tc.get("max_seq_len") or tc.get("n_positions") or 32768
@@ -211,7 +215,7 @@ class CompatEngine:
         if getattr(self, "moe", None):
             self.moe.close()                 # saves the hot set, so the next load starts warm
             self.moe = None
-        self.model, self.cache, self.cache_tokens = None, None, []
+        self.model, self.rt, self.cache, self.cache_tokens = None, None, None, []
         gc.collect()
         mx.clear_cache()
         self.sleeping = True
@@ -223,6 +227,7 @@ class CompatEngine:
             return
         t0 = time.time()
         self._load()
+        self._attach_runtime()
         self.sleeping = False
         self.log(f"wake: model reloaded in {time.time() - t0:.1f}s")
 
@@ -371,299 +376,110 @@ class CompatEngine:
         # these backends prefill in one chunk size: no shrinking, the same refusal and grace band
         memory.reserve(self, new_tokens, mx.clear_cache, shrink=False)
 
-    # ───────────────────────── generate ─────────────────────────
-    def _prefix_cache(self, ids):
-        """A prompt cache holding ids[:n] for the largest reusable n (< len(ids)); returns (cache, n)."""
-        make_prompt_cache, can_trim_prompt_cache, trim_prompt_cache = self._cache_api()
-        n = 0
+    def _fit_output(self, max_tokens):
+        return memory.fit_output(self, max_tokens)
+
+    # ───────────────────────── generate (engine/session.py) ─────────────────────────
+    # The decode loop is DecodeLoop's — the one the native engine runs. What differs here is the prefix
+    # policy (mlx-lm's caches can be trimmed to any length, so any shared prefix is reused), the prefill
+    # schedule, and how this tokenizer names the reasoning markers.
+    def _attach_runtime(self):
+        self.rt = MlxLmRuntime(self.model, self._cache_api())
+
+    def _detokenizer(self):
+        return self.decoder
+
+    def _think_closing(self):
+        end = self.think_tags[1] if self.think_tags else None
+        return end, (list(self.tok.encode(f"\n{end}\n\n", add_special_tokens=False)) if end else [])
+
+    def _restore_or_reset(self, ids):
+        """Keep the cache for the longest shared prefix (< len(ids)), trimming what follows it; returns its
+        length. Nothing to trim means any cache (a hybrid model's non-trimmable state too) is reusable."""
+        rt, n = self.rt, 0
         if self.cache is not None and self.cache_tokens:
             m = min(len(self.cache_tokens), len(ids) - 1)
             while n < m and self.cache_tokens[n] == ids[n]:
                 n += 1
         extra = len(self.cache_tokens) - n
-        # nothing to trim means any cache (including a hybrid model's non-trimmable state) is reusable as is
-        if n > 0 and (extra == 0 or can_trim_prompt_cache(self.cache)):
+        if n > 0 and (extra == 0 or rt.can_trim(self.cache)):
             if extra:
-                trim_prompt_cache(self.cache, extra)
-            return self.cache, n
+                rt.trim(self.cache, extra)
+            self.cache_tokens = list(ids[:n])
+            return n
         self.cache, self.cache_tokens = None, []
-        mx.clear_cache()
-        return make_prompt_cache(self.model), 0
+        rt.release()
+        self.cache = rt.make_cache()
+        return 0
 
-    def generate(self, ids, media=None, max_tokens=None, sampling=None, stop=None, should_stop=None,
-                 seed=None, thinking_open=False, fmt=None):
-        """Yield (token_id, text) pairs; the final item is a stats dict (same shape as Engine's).
-        `fmt` constrains the answer to a JSON format, as on the native engine (engine/structured.py)."""
-        self.ensure_awake()
-        if len(ids) >= self.max_context:
-            raise ContextError(f"prompt is {len(ids)} tokens, context limit is {self.max_context}")
-        max_tokens = min(max_tokens or self.max_tokens, self.max_tokens, self.max_context - len(ids))
-        max_tokens = memory.fit_output(self, max_tokens)      # the same clamp the native engine applies
-        vocab = self.vocab or int(getattr(getattr(self.model, "args", None), "vocab_size", 0)) or 262144
-        sampler = Sampler(vocab, seed=seed, **(sampling or {}))
-        from .structured import constrain
-        fmt_done = constrain(sampler, fmt, lambda tok: self.decoder.decode([tok]), self.eos)
-        t0 = time.time()
-
-        cache, reused = self._prefix_cache(ids)
-        self._reserve(len(ids) - reused)
-        self.cache, self.cache_tokens = cache, list(ids[:reused])
-        model, step = self.model, max(64, self.prefill_step)
-        pos = reused
+    def _prefill(self, cache, ids, embeds=None, pos3=None, delta=0, start=0, hidden=False):
+        """All but the last token in fixed chunks, each evaluated with the cache it leaves behind; then the
+        last token alone, whose logits begin the decode."""
+        if embeds is not None or hidden:
+            raise ValueError("this model/server has no vision or embedding support")
+        n, s, step = len(ids), start, max(64, self.prefill_step)
         try:
-            while len(ids) - pos > 1:   # all but the last token: build the cache
-                self.progress = {"phase": "prefill", "done": pos, "total": len(ids)}
-                chunk = ids[pos:min(len(ids) - 1, pos + step)]
-                model(mx.array([chunk]), cache=cache)
-                mx.eval([c.state for c in cache])
-                pos += len(chunk)
-                self.cache_tokens = list(ids[:pos])
+            while n - s > 1:
+                self.progress = {"phase": "prefill", "done": s, "total": n}
+                e = min(n - 1, s + step)
+                self.rt.prefill(cache, ids, None, None, 0, s, e)
+                s = e
+                self.cache_tokens = list(ids[:s])
                 self._check_memory("prefill")
         finally:
             self.progress = None
-        logits = model(mx.array([ids[pos:]]), cache=cache)
-        self.cache_tokens = list(ids)
-        t_prefill = time.time() - t0
+        return self.rt.prefill(cache, ids, None, None, 0, s, n)
 
-        budget = int(max_tokens * self.think_frac) if thinking_open and self.think_frac else None
-        in_think, forced = budget is not None, None
-        looped = [False]
-        think_end = self.think_tags[1] if self.think_tags else None
-        closing = self.tok.encode(f"\n{think_end}\n\n", add_special_tokens=False) if think_end else []
 
-        dec = StreamDecoder(self.decoder)
-        out_tokens, text, finish = [], "", "length"
-        stops = StopFilter(stop)
-        t1 = time.time()
-        fed = list(ids)
+class MlxLmRuntime(MlxHybridRuntime):
+    """The runtime seam (engine/runtime.py) over an mlx-lm-style model: `model(ids, cache=...)` with the
+    prompt caches of `cache_api` — mlx-lm's own, or engine/dense.py's for GGUF files. Sampling and reading
+    tokens are the native runtime's; what differs is the call, the cache and how a verify pass is undone."""
+    name = "mlx-lm"
 
-        def emit(tok):
-            nonlocal text, finish
-            out_tokens.append(tok)
-            if tok in self.eos:
-                finish = "stop"
-                return True, None
-            piece = dec.add(tok)
-            text += piece
-            hit, piece = stops.feed(piece)
-            if hit:
-                finish = "stop"
-                return True, piece
-            if fmt_done and fmt_done.pop(0):
-                finish = "stop"
-                return True, piece
-            if should_stop and should_stop():
-                finish = "cancelled"
-                return True, piece
-            if len(out_tokens) % 32 == 0 and not self._check_memory("decode"):
-                finish = "length"
-                self.log(f"memory: stopped generation at {memory.used_fraction():.0%} RAM")
-                return True, piece
-            if len(out_tokens) % 16 == 0 and not in_think:
-                answer = text[text.rfind(think_end) + len(think_end):] if think_end and think_end in text else text
-                if is_looping(answer):
-                    finish, looped[0] = "stop", True
-                    self.log(f"repetition: the answer was looping; stopped after {len(out_tokens)} tokens")
-                    return True, piece
-            return len(out_tokens) >= max_tokens, piece
+    def __init__(self, model, cache_api):
+        self.model = model
+        self._make, self._can_trim, self._trim = cache_api
+        self._width = 0          # tokens in the last verify pass
 
-        def think_check():
-            nonlocal in_think, forced
-            if not in_think:
-                return False
-            if think_end and think_end in text:
-                in_think = False
-                return False
-            if budget and len(out_tokens) >= budget:
-                forced = "budget"
-                return True
-            if is_repeating(text[-700:]):
-                forced = "repetition"
-                return True
-            return False
+    def make_cache(self):
+        return self._make(self.model)
 
-        make_cache_, can_trim_, trim_ = self._cache_api()
-        spec = {"drafted": 0, "accepted": 0, "verifies": 0}
-        if self.speculative and can_trim_(cache) and fmt_done is None:
-            # Prompt-lookup speculation with exact acceptance (the native engine's scheme): plain steps stay
-            # pipelined; verification starts only while the output copies text already in prompt + output.
-            drafter = Drafter(ids, nmin=self.ngram_min, nmax=max(4, self.ngram_min))
-            levels = self.draft_levels
-            y = sampler(logits)
-            mx.async_eval(y)
-            lvl, spec_mode, done = 1, False, False
-
-            def force_close():
-                nonlocal done
-                lg = None
-                for cid in closing:   # teacher-force the close so the model sees reasoning ended
-                    lg = model(mx.array([[cid]]), cache=cache)
-                    fed.append(cid)
-                    drafter.add(cid)
-                    d2, p2 = emit(cid)
-                    if p2:
-                        yield cid, p2
-                    if d2:
-                        done = True
-                        return None
-                return lg
-
-            while not done:
-                if not spec_mode:
-                    nxt = sampler(model(y.reshape(1, 1), cache=cache))
-                    mx.async_eval(nxt)
-                    tok = y.item()
-                    drafter.add(tok)
-                    fed.append(tok)
-                    done, piece = emit(tok)
-                    if piece:
-                        yield tok, piece
-                    if not done and closing and think_check():
-                        in_think = False
-                        lg = yield from force_close()
-                        if lg is None:
-                            done = True
-                        else:
-                            y = sampler(lg)
-                            mx.async_eval(y)
-                    else:
-                        y = nxt
-                    spec_mode = bool(drafter.propose(1))        # the suffix was seen before: likely copying
-                    continue
-                tok = y if isinstance(y, int) else y.item()
-                if tok in self.eos:
-                    out_tokens.append(tok)
-                    finish = "stop"
-                    break
-                drafter.add(tok)
-                room = max_tokens - len(out_tokens) - 1
-                draft = drafter.propose(levels[lvl])[:max(0, room)]
-                if not draft:                                    # back to pipelined plain decoding
-                    y = sampler(model(mx.array([[tok]]), cache=cache))
-                    mx.async_eval(y)
-                    fed.append(tok)
-                    done, piece = emit(tok)
-                    if piece:
-                        yield tok, piece
-                    if not done and closing and think_check():
-                        in_think = False
-                        lg = yield from force_close()
-                        if lg is None:
-                            done = True
-                        else:
-                            y = sampler(lg)
-                            mx.async_eval(y)
-                    spec_mode = False
-                    continue
-                lg = model(mx.array([[tok] + draft]), cache=cache)
-                acc, nxt = 0, None
-                if sampler.greedy:
-                    best = mx.argmax(lg[0], axis=-1).tolist()
-                    while acc < len(draft) and best[acc] == draft[acc]:
-                        acc += 1
-                    nxt = best[acc]
-                else:
-                    for i, d in enumerate(draft):
-                        ok, t_ = sampler.verify(lg[0, i], d)
-                        if not ok:
-                            nxt = t_
-                            break
-                        acc += 1
-                    if nxt is None:
-                        nxt = sampler(lg[:, len(draft):len(draft) + 1]).item()
-                if acc < len(draft):
-                    trim_(cache, len(draft) - acc)               # forget the rejected draft tokens
-                spec["verifies"] += 1
-                spec["drafted"] += len(draft)
-                spec["accepted"] += acc
-                full = acc == len(draft) == levels[lvl]
-                lvl = min(lvl + 1, len(levels) - 1) if full else max(0, min(lvl, acc) - (acc == 0))
-                for j, t_ in enumerate([tok] + draft[:acc]):
-                    if j:
-                        drafter.add(t_)
-                    fed.append(t_)
-                    done, piece = emit(t_)
-                    if piece:
-                        yield t_, piece
-                    if done:
-                        break
-                if not done and closing and think_check():
-                    in_think = False
-                    lg2 = yield from force_close()
-                    if lg2 is None:
-                        done = True
-                    else:
-                        y = sampler(lg2)
-                        mx.async_eval(y)
-                else:
-                    y = nxt
-        else:
-            y = sampler(logits)
-            mx.async_eval(y)
-            for _ in range(max_tokens):
-                nxt = sampler(model(y.reshape(1, 1), cache=cache))
-                mx.async_eval(nxt)
-                tok = y.item()
-                fed.append(tok)
-                done, piece = emit(tok)
-                if piece:
-                    yield tok, piece
-                if done:
-                    break
-                if closing and think_check():
-                    in_think = False
-                    lg, stopped = None, False
-                    for cid in closing:   # teacher-force the close so the model sees reasoning ended
-                        lg = model(mx.array([[cid]]), cache=cache)
-                        fed.append(cid)
-                        d2, p2 = emit(cid)
-                        if p2:
-                            yield cid, p2
-                        if d2:
-                            stopped = True
-                            break
-                    if stopped:
-                        break
-                    y = sampler(lg)
-                    mx.async_eval(y)
-                else:
-                    y = nxt
-        rest = stops.flush()
-        if rest:
-            yield None, rest
-        tail = dec.flush()
-        if tail and finish == "length":
-            yield None, tail
+    def settle(self, cache):
         mx.eval([c.state for c in cache])
-        if spec["verifies"]:
-            # a stop string that completed on an accepted draft token leaves the later accepted ones in the cache
-            # without them being in `fed`: cut them off, or the next request's reuse would be off by that many
-            extra = getattr(cache[0], "offset", len(fed)) - len(fed)
-            if extra > 0:
-                trim_(cache, extra)
-        self.cache_tokens = fed   # every fed token (the last one included) is in the cache: its forward ran before emit()
-        t_dec = time.time() - t1
-        n_out = len(out_tokens)
-        st = {
-            "prompt_tokens": len(ids), "cached_tokens": reused, "completion_tokens": n_out,
-            "prefill_s": round(t_prefill, 3), "decode_s": round(t_dec, 3),
-            "prefill_tps": round((len(ids) - reused) / t_prefill, 1) if t_prefill > 0 else 0,
-            "decode_tps": round(n_out / t_dec, 2) if t_dec > 0 else 0,
-            "finish_reason": finish, "think_forced": forced, "loop_stopped": looped[0],
-            "peak_gb": round(mx.get_peak_memory() / GiB, 2),
-            "draft_accept": round(spec["accepted"] / spec["drafted"], 2) if spec["drafted"] else None,
-            "verifies": spec["verifies"], "ram_used": round(memory.used_fraction(), 3),
-        }
-        self.stats["requests"] += 1
-        self.stats["last"] = st
-        T_ = self.totals
-        T_["requests"] += 1
-        for k in ("prompt_tokens", "cached_tokens", "completion_tokens", "prefill_s", "decode_s"):
-            T_[k] += st[k]
-        T_["drafted"] += spec["drafted"]
-        T_["accepted"] += spec["accepted"]
-        self.history.append({"t": round(time.time()), "prompt": st["prompt_tokens"], "cached": st["cached_tokens"],
-                             "out": st["completion_tokens"], "prefill_tps": st["prefill_tps"],
-                             "decode_tps": st["decode_tps"], "accept": st["draft_accept"]})
-        mx.clear_cache()
-        yield st
+
+    def can_trim(self, cache):
+        return self._can_trim(cache)
+
+    def trim(self, cache, n):
+        self._trim(cache, n)
+
+    def can_verify(self, cache):
+        return self._can_trim(cache)
+
+    def rewind(self, cache, n):
+        extra = getattr(cache[0], "offset", n) - n
+        if extra > 0:
+            self._trim(cache, extra)
+        return True
+
+    def prefill(self, cache, ids, embeds, pos3, delta, s, e, hidden=False):
+        """Evaluates the cache the chunk leaves; the logits stay lazy (only the last chunk's are read)."""
+        logits = self.model(mx.array([ids[s:e]]), cache=cache)
+        mx.eval([c.state for c in cache])
+        return logits
+
+    def step(self, token, cache, delta):
+        ids = mx.array([[token]]) if isinstance(token, int) else token.reshape(1, 1)
+        return self.model(ids, cache=cache)
+
+    def verify(self, token, draft, cache, delta):
+        self._width = 1 + len(draft)
+        return self.model(mx.array([[token] + draft]), cache=cache)
+
+    def commit(self, cache, m):
+        if self._width > m:
+            self._trim(cache, self._width - m)        # forget the rejected draft tokens
+
+    def embed_media(self, ids, media):
+        raise ValueError("this model/server has no vision support")

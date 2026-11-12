@@ -89,6 +89,12 @@ class ToyRuntime:
     def commit(self, cache, m):
         del cache[0].toks[cache[0].base + m:]
 
+    def can_verify(self, cache):
+        return True
+
+    def rewind(self, cache, n):
+        return False
+
     def settle(self, cache):
         pass
 

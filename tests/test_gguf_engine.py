@@ -725,7 +725,7 @@ class TestEngine(Base):
             def propose(self, k):
                 g = len(self.toks) - self.n
                 return full[g:g + k]
-        with mock.patch("engine.compat.Drafter", Oracle):
+        with mock.patch("engine.session.Drafter", Oracle):
             for i in range(1, 6):                      # the stop is the i-th reply token, inside the first draft block
                 stop = spec.tok.decode([full[i]])
                 out = list(spec.generate(ids, max_tokens=60, sampling={"temperature": 0.0}, stop=[stop]))
@@ -895,7 +895,7 @@ class TestGenerationLoop(Base):
             def __call__(inner, ids, cache=None):
                 calls.append((ids.shape[1], dict(e.progress) if e.progress else None))
                 return real(ids, cache)
-        e.model = Spy()
+        e.model = e.rt.model = Spy()        # the runtime makes the calls (engine/compat.py MlxLmRuntime)
         return calls
 
     GREEDY = {"temperature": 0.0}
@@ -948,11 +948,11 @@ class TestGenerationLoop(Base):
         self.assertTrue(any("memory: stopped generation" in l for l in e2._logs))
 
     def test_a_looping_answer_is_cut_at_the_first_check_after_16_tokens(self):
-        import engine.compat as compat
+        import engine.session as session
         from unittest import mock
         e = self.engine(max_tokens=100)
         ids = [(3 * i) % 100 + 3 for i in range(12)]
-        with mock.patch.object(compat, "is_looping", lambda text: True):
+        with mock.patch.object(session, "is_looping", lambda text: True):
             _, st = self.run_gen(e, ids, max_tokens=60, sampling=self.GREEDY)
         self.assertEqual((st["finish_reason"], st["loop_stopped"], st["completion_tokens"]), ("stop", True, 16))
         self.assertTrue(any("repetition: the answer was looping; stopped after 16 tokens" in l for l in e._logs))

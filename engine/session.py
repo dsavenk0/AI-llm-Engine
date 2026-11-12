@@ -17,6 +17,8 @@ What the loop asks of a runtime:
     verify(token, draft, cache, delta)    run a token and a drafted continuation in one pass; logits per position
     greedy_tokens / verify_token / sample_at    read that pass: the model's own choices, and the acceptance test
     commit(cache, m)                      keep the first m tokens of a verify pass, undo the rest
+    can_verify(cache)                     whether this cache can undo a verify pass (else no speculation)
+    rewind(cache, n) -> bool              cut the cache back to n tokens; False when it cannot (recurrent state)
     make_cache, settle, release, peak_gb, embed_media
 
 `sample` returning a handle is what keeps the loop pipelined: the graph for token t+1 is built while t
@@ -24,7 +26,9 @@ is still running, and the loop only blocks in `read_token`. A runtime that compu
 give that up (15 % of a step on MLX).
 
 The class is a mixin: an engine supplies the state (cache, tokenizer, limits, the prefix store) and a
-runtime, and gets `generate`.
+runtime, and gets `generate`. Both engines use it — the native one (engine/generate.py) and the mlx-lm /
+GGUF one (engine/compat.py), which replaces only the prefix policy (`_restore_or_reset`), the prefill
+schedule (`_prefill`) and what its tokenizer calls the reasoning end (`_think_closing`, `_detokenizer`).
 """
 import time
 
@@ -118,6 +122,16 @@ def is_looping(tail, min_n=6, max_n=400, window=3000):
 class DecodeLoop:
     """`generate()` and what it needs, over `self.rt`."""
 
+    # ───────────────────────── what the engine's tokenizer says ─────────────────────────
+    def _detokenizer(self):
+        """What turns ids back into text, special tokens kept (the output parser reads the markers)."""
+        return self.tok
+
+    def _think_closing(self):
+        """(the reasoning end marker, the ids teacher-forced to close reasoning); (None, []) for a model
+        that does not reason — then the reasoning budget never applies."""
+        return "</think>", self.tok.encode("\n</think>\n\n")
+
     # ───────────────────────── prefill ─────────────────────────
     def _prefill(self, cache, ids, embeds=None, pos3=None, delta=0, start=0, hidden=False):
         """Run ids[start:] through the model in chunks; return last-position logits, or with `hidden` the
@@ -195,7 +209,8 @@ class DecodeLoop:
         rt = self.rt
         sampler = rt.sampler(self.vocab, seed, sampling or {})
         from .structured import constrain
-        fmt_done = constrain(sampler, fmt, lambda tok: self.tok.decode([tok]), self.eos)
+        detok = self._detokenizer()
+        fmt_done = constrain(sampler, fmt, lambda tok: detok.decode([tok]), self.eos)
         t0 = time.time()
         delta = 0
         if media is not None:
@@ -246,7 +261,7 @@ class DecodeLoop:
         max_tokens = self._fit_output(max_tokens)
         think_budget = int(max_tokens * self.think_frac) if thinking_open and self.think_frac else None
 
-        dec = StreamDecoder(self.tok)
+        dec = StreamDecoder(detok)
         out_tokens, text, finish = [], "", "length"
         stops = StopFilter(stop)
         spec = {"verifies": 0, "drafted": 0, "accepted": 0}
@@ -282,8 +297,8 @@ class DecodeLoop:
                 finish = "length"
                 self.log(f"memory: stopped generation at {memory.used_fraction():.0%} RAM")
                 return True, piece
-            if len(out_tokens) % 16 == 0 and not in_think and is_looping(text[text.rfind("</think>") + 8:]
-                                                                         if "</think>" in text else text):
+            if len(out_tokens) % 16 == 0 and not in_think and is_looping(
+                    text[text.rfind(think_end) + len(think_end):] if think_end and think_end in text else text):
                 finish, looped[0] = "stop", True
                 self.log(f"repetition: the answer was looping; stopped after {len(out_tokens)} tokens")
                 return True, piece
@@ -291,7 +306,7 @@ class DecodeLoop:
 
         # Reasoning models can fail to ever emit </think> — budget how many tokens the
         # reasoning phase may use, and bail out of an exact repeating loop even sooner.
-        THINK_END = "</think>"
+        think_end, closing = self._think_closing()
         in_think = think_budget is not None
         forced = None   # why the reasoning was force-closed: "budget" | "repetition" (None = never)
 
@@ -301,7 +316,7 @@ class DecodeLoop:
             nonlocal in_think, forced
             if not in_think:
                 return False
-            if THINK_END in text:
+            if think_end in text:
                 in_think = False
                 return False
             if think_budget and len(out_tokens) >= think_budget:
@@ -316,9 +331,11 @@ class DecodeLoop:
             """Teacher-force a `</think>` and hand back fresh logits to resume sampling from,
             so the model actually sees that reasoning ended instead of being cut off cold."""
             logits_ = None
-            for cid in self.tok.encode(f"\n{THINK_END}\n\n"):
+            for cid in closing:
                 logits_ = rt.step(cid, cache, delta)
                 fed.append(cid)
+                if drafter is not None:
+                    drafter.add(cid)
                 done_, piece_ = emit(cid)
                 if piece_:
                     yield cid, piece_
@@ -326,7 +343,8 @@ class DecodeLoop:
                     return None
             return logits_
 
-        if not (self.speculative and media is None and fmt_done is None):
+        drafter = None
+        if not (self.speculative and media is None and fmt_done is None and rt.can_verify(cache)):
             # plain pipelined decode: graph for token t+1 is built while t runs
             y = rt.sample(sampler, logits)
             rt.flush(y)
@@ -341,7 +359,7 @@ class DecodeLoop:
                     yield tok, piece
                 if done:
                     break
-                if _think_check():
+                if closing and _think_check():
                     in_think = False
                     logits = yield from _force_close_think()
                     if logits is None:
@@ -369,7 +387,7 @@ class DecodeLoop:
                     done, piece = emit(tok)
                     if piece:
                         yield tok, piece
-                    if not done and _think_check():
+                    if not done and closing and _think_check():
                         in_think = False
                         logits = yield from _force_close_think()
                         if logits is None:
@@ -397,7 +415,7 @@ class DecodeLoop:
                     done, piece = emit(tok)
                     if piece:
                         yield tok, piece
-                    if not done and _think_check():
+                    if not done and closing and _think_check():
                         in_think = False
                         logits = yield from _force_close_think()
                         if logits is None:
@@ -440,7 +458,7 @@ class DecodeLoop:
                         if j < acc:       # accepted tokens after the stop are in the state but not in `fed`
                             cache_stale = True
                         break
-                if not done and _think_check():
+                if not done and closing and _think_check():
                     in_think = False
                     logits = yield from _force_close_think()
                     if logits is None:
@@ -458,7 +476,7 @@ class DecodeLoop:
             yield None, tail
         rt.settle(cache)
         self.cache_tokens = fed
-        if cache_stale:
+        if cache_stale and not rt.rewind(cache, len(fed)):
             self.cache, self.cache_tokens = None, []     # the recurrent state ran past `fed` and cannot be trimmed
         if media is not None:
             self.cache = None  # 3-D positions: not reusable as a text prefix
