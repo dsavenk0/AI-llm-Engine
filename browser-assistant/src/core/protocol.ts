@@ -82,7 +82,7 @@ export type UiRequest =
   | { kind: "agent-reply"; text: string }
   | { kind: "command"; command: Command; confirm?: boolean }
   | { kind: "ask"; tabId: number; task: Task; question?: string; lang?: string; tone?: string; thinking?: boolean;
-      selectionOnly?: boolean; selection?: string; screenshot?: boolean }
+      selectionOnly?: boolean; selection?: string; screenshot?: boolean; history?: { q: string; a: string }[] }
   | { kind: "cancel" }
   | { kind: "watch"; tabId: number }
   | { kind: "undock" }

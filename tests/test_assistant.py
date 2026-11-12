@@ -658,3 +658,41 @@ class TestEngineSleepWake(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKeepAwake(unittest.TestCase):
+    """An open side panel keeps the model loaded; nothing else does, and a sleeping engine is not woken."""
+
+    def test_only_while_a_panel_is_open_and_only_an_awake_engine(self):
+        c = FakeControl(None)
+        c.up = True
+        a = service.Assistant(c)
+        self.assertFalse(a.keep_awake(now=1000))                      # no panel open
+        a.watchers = 1
+        self.assertTrue(a.keep_awake(now=1000))
+        self.assertEqual(c.posts[-1][0], "/v1/engine/wake")
+        self.assertFalse(a.keep_awake(now=1000 + service.KEEP_AWAKE_S - 1))   # not more often than that
+        c.asleep = True
+        self.assertFalse(a.keep_awake(now=1000 + service.KEEP_AWAKE_S + 1))   # asleep: left asleep
+
+
+class TestConversation(unittest.TestCase):
+    """A follow-up question carries the tab's conversation so far, without repeating the page in it."""
+
+    def test_earlier_turns_come_before_the_new_question_as_a_dialogue(self):
+        msgs, shared = prompts.build({"task": "ask", "question": "and in more detail?", "page": {"text": "the page"},
+                                      "history": [{"q": "what is this?", "a": "A restaurant menu."}]}, 8192, 512)
+        self.assertEqual([m["role"] for m in msgs], ["system", "user", "assistant", "user"])
+        self.assertEqual(msgs[1]["content"], "what is this?")
+        self.assertEqual(msgs[2]["content"], "A restaurant menu.")
+        self.assertIn("the page", msgs[3]["content"])
+        self.assertEqual(shared["earlier_turns"], 1)
+
+    def test_the_oldest_turns_give_way_and_malformed_ones_are_skipped(self):
+        turns = [{"q": f"q{i}", "a": "a" * 3000} for i in range(12)] + [{"q": "", "a": "x"}, "junk"]
+        msgs, shared = prompts.build({"task": "ask", "question": "now?", "page": {"text": "p"}, "history": turns},
+                                     8192, 512)
+        self.assertLessEqual(shared["earlier_turns"], prompts.MAX_TURNS)
+        self.assertEqual(msgs[-2]["role"], "assistant")                  # the newest turn is the one kept
+        with self.assertRaisesRegex(prompts.PromptError, "history"):
+            prompts.build({"task": "ask", "question": "q", "page": {"text": "p"}, "history": "nope"}, 8192, 512)

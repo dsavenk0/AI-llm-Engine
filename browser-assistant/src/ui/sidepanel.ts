@@ -7,6 +7,7 @@ import { AgentView, Autonomy } from "../core/agent-types";
 import { activityLabel } from "../core/activity";
 import { originOf } from "../core/policy";
 import { wantsToSee } from "../core/vision";
+import { Conversations, historyFor } from "./conversations";
 import { Command, PROTOCOL, ServiceError, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { isActive, renderAgent } from "./agent-view";
 import { Answer, el, metricsText, modelLabel, problemText, statusLine, updateNotice } from "./view";
@@ -53,9 +54,13 @@ let tabId: number | null = null;
 let windowId: number | undefined;
 
 // ───────────── one conversation per tab ─────────────
-interface Thread { root: HTMLElement; empty: HTMLElement; agents: Map<string, HTMLElement>; view: AgentView | null }
+interface Thread { root: HTMLElement; empty: HTMLElement; agents: Map<string, HTMLElement>; view: AgentView | null;
+  conv: string }                                                // the stored conversation this tab shows
 const byTab = new Map<number, Thread>();
-let answer: { a: Answer; tab: number } | null = null;           // the one answer streaming now, and whose it is
+// the one answer streaming now, whose it is, and the question it answers (stored with it when it is done)
+let answer: { a: Answer; tab: number; q: string } | null = null;
+const convs = new Conversations(api.storage.local);
+const newId = (): string => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 const DEMOS: Record<"ask" | "act", { label: string; text: string; task?: Task }[]> = {
   ask: [
@@ -75,11 +80,32 @@ function thread(id: number): Thread {
   if (t) return t;
   const empty = el("div", { class: "empty" });
   const root = el("div", { class: "thread" }, empty);
-  t = { root, empty, agents: new Map(), view: null };
+  t = { root, empty, agents: new Map(), view: null, conv: newId() };
   byTab.set(id, t);
   threads.append(root);
   renderEmpty(t);
+  const made = t;
+  // the conversation this tab showed before the panel closed (or the extension reloaded) comes back
+  void convs.forTab(id).then(async (cid) => {
+    const c = cid ? await convs.get(cid) : undefined;
+    if (c && made.root.querySelectorAll(".msg").length === 0) load(made, c.id);
+  });
   return t;
+}
+
+/** Show a stored conversation in a tab's thread: its exchanges as bubbles, ready to go on. */
+async function load(t: Thread, id: string): Promise<void> {
+  const c = await convs.get(id);
+  if (!c) return;
+  t.conv = c.id;
+  for (const n of Array.from(t.root.querySelectorAll(".msg, .agent-card"))) n.remove();
+  t.empty.hidden = c.turns.length > 0;
+  for (const turn of c.turns) {
+    t.root.append(el("div", { class: "msg user" }, turn.q));
+    t.root.append(el("div", { class: "msg assistant" },
+      el("div", { class: "answer" }, el("div", { class: "body" }, turn.a))));
+  }
+  scroll();
 }
 
 function renderEmpty(t: Thread): void {
@@ -203,14 +229,16 @@ async function ask(task: Task, question?: string): Promise<void> {
   const t = thread(tabId);
   const labels: Partial<Record<Task, string>> = { summarize: "Summarize this page", key_points: "Key points",
     explain: "Explain the selection" };
-  bubble(t, question || labels[task] || task, "Ask");
+  const q = question || labels[task] || task;
+  bubble(t, q, "Ask");
   const a = new Answer();
   a.begin();
   t.root.append(el("div", { class: "msg assistant" }, a.root));
-  answer = { a, tab: tabId };
+  answer = { a, tab: tabId, q };
   const lang = navigator.language.startsWith("ru") ? "Russian" : "English";
+  const history = historyFor(await convs.get(t.conv));          // the conversation goes on
   post({ kind: "ask", tabId, task, question, lang, thinking: $<HTMLInputElement>("thinking").checked,
-         screenshot: seeing() || wantsToSee(question) });
+         screenshot: seeing() || wantsToSee(question), history });
   syncButtons();
   scroll();
 }
@@ -224,9 +252,19 @@ function act(goal: string): void {
   post({ kind: "agent-start", tabId, goal, autonomy, see: seeing() });
 }
 
+const savedTasks = new Set<string>();
+
 function renderTask(v: AgentView): void {
   const t = thread(v.tabId);
   t.view = v;
+  if (!isActive(v) && !savedTasks.has(v.id)) {
+    // a finished task joins the conversation too: what was asked, and how it ended
+    savedTasks.add(v.id);
+    const steps = v.steps.map((s) => `• ${s.summary} — ${s.result}`).join("\n");
+    const end = v.state === "completed" ? (v.message || "Done.") : v.state === "cancelled" ? "Stopped." : (v.message || "Stopped.");
+    void convs.add(t.conv, { q: `Act: ${v.goal}`, a: (steps ? steps + "\n" : "") + end }, { url: currentUrl })
+      .then((id) => convs.bind(v.tabId, id));
+  }
   let card = t.agents.get(v.id);
   if (!card) {
     card = el("div", { class: "msg agent-card" });
@@ -354,7 +392,49 @@ $("clear").addEventListener("click", () => {
   if (tabId === null || busy()) return;
   byTab.get(tabId)?.root.remove();
   byTab.delete(tabId);
+  void convs.bind(tabId, null);                                 // the old one stays in the history
   show(tabId);
+});
+
+// ───────────── the history ─────────────
+const historySheet = $("history-sheet");
+async function renderHistory(): Promise<void> {
+  const list = await convs.list();
+  const current = tabId !== null ? byTab.get(tabId)?.conv : undefined;
+  historySheet.replaceChildren();
+  if (!list.length) { historySheet.append(el("div", { class: "dim small" }, "No conversations yet.")); return; }
+  for (const c of list) {
+    const when = new Date(c.updated).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+    const row = el("div", { class: "conv" + (c.id === current ? " current" : "") },
+      el("div", { class: "what" }, el("b", {}, c.title), el("span", {}, `${c.host || "—"} · ${when} · ${c.turns.length}`)));
+    const rename = el("button", { type: "button", textContent: "✎", title: "Rename" });
+    const del = el("button", { type: "button", textContent: "✕", title: "Delete" });
+    rename.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const name = prompt("Name of the conversation", c.title);
+      if (name) { await convs.rename(c.id, name); void renderHistory(); }
+    });
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await convs.remove(c.id);
+      if (tabId !== null && byTab.get(tabId)?.conv === c.id) $("clear").click();
+      void renderHistory();
+    });
+    row.addEventListener("click", async () => {
+      if (tabId === null || busy()) return;
+      await load(thread(tabId), c.id);
+      await convs.bind(tabId, c.id);
+      historySheet.hidden = true;
+      $("history").setAttribute("aria-expanded", "false");
+    });
+    row.append(rename, del);
+    historySheet.append(row);
+  }
+}
+$("history").addEventListener("click", () => {
+  historySheet.hidden = !historySheet.hidden;
+  $("history").setAttribute("aria-expanded", String(!historySheet.hidden));
+  if (!historySheet.hidden) void renderHistory();
 });
 $("settings").addEventListener("click", () => void api.runtime.openOptionsPage());
 
@@ -488,6 +568,12 @@ function onEvent(ev: UiEvent): void {
     scroll();
   } else if (ev.kind === "chat" && answer) {
     answer.a.on(ev.event);
+    if (ev.event.type === "done" && answer.a.text().trim()) {
+      // a finished answer joins the stored conversation of its tab
+      const t = thread(answer.tab), tab = answer.tab;
+      void convs.add(t.conv, { q: answer.q, a: answer.a.text() }, { url: currentUrl })
+        .then((id) => convs.bind(tab, id)).then(() => { if (!historySheet.hidden) void renderHistory(); });
+    }
     syncButtons();
     scroll();
   } else if (ev.kind === "fatal") {

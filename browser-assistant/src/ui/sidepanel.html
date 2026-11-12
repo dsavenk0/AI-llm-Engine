@@ -15,7 +15,8 @@
     <span id="dot" class="dot" aria-hidden="true"></span><span id="model-name">Connecting…</span><span aria-hidden="true">▾</span>
   </button>
   <button id="theme" type="button" class="icon" title="Theme: follows the system" aria-label="Theme">◐</button>
-  <button id="clear" type="button" class="icon" title="New conversation for this tab" aria-label="New conversation">⟲</button>
+  <button id="history" type="button" class="icon" title="Conversations" aria-label="Conversations" aria-expanded="false">◷</button>
+  <button id="clear" type="button" class="icon" title="New conversation for this tab" aria-label="New conversation">＋</button>
   <button id="settings" type="button" class="icon" title="Settings" aria-label="Settings">⚙︎</button>
   <button id="undock" type="button" class="icon" title="Close the panel" aria-label="Close the panel" hidden>✕</button>
 </header>
@@ -27,6 +28,8 @@
   <div id="metrics" class="dim small"></div>
   <div id="note" class="bad small" role="alert"></div>
 </section>
+
+<section id="history-sheet" class="sheet" hidden aria-label="Conversations"></section>
 
 <div class="modebar">
   <label for="mode" class="sr">What the assistant may do</label>

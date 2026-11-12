@@ -96,6 +96,30 @@ def with_image(text, image):
     return [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
 
 
+MAX_TURNS = 8                  # earlier exchanges of this tab's conversation sent with a new question
+MAX_TURN_CHARS = 4000
+
+
+def history_of(req, budget):
+    """The conversation so far, as alternating user / assistant messages, newest kept when it does not all fit
+    in `budget` characters. Each turn is {"q": question, "a": answer}; page text is never repeated in them."""
+    turns = req.get("history") or []
+    if not isinstance(turns, list):
+        raise PromptError("history must be a list of {q, a}")
+    msgs, used = [], 0
+    for t in reversed(turns[-MAX_TURNS:]):
+        if not isinstance(t, dict):
+            continue
+        q, a = str(t.get("q") or "")[:MAX_TURN_CHARS], str(t.get("a") or "")[:MAX_TURN_CHARS]
+        if not q or not a:
+            continue
+        if used + len(q) + len(a) > budget:
+            break
+        msgs[:0] = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+        used += len(q) + len(a)
+    return msgs, used
+
+
 def build(req, context_tokens, max_tokens):
     """(messages, shared) for one request. `req` is the extension's body: task, question, page {title, url,
     text}, selection, lang, tone. `shared` says exactly what was sent: characters of each part and whether
@@ -119,6 +143,9 @@ def build(req, context_tokens, max_tokens):
     budget = int((max(1024, context_tokens) - max_tokens - 600) * CHARS_PER_TOKEN)
     if budget < 2000:
         raise PromptError("the model's context is too small for page content")
+    # the conversation so far takes at most a third of the room; the page gets the rest
+    earlier, used = history_of(req, budget // 3)
+    budget -= used
     sel, sel_n, sel_cut = _clean(selection, budget)
     rest = max(0, budget - len(sel))
     # the selection is what the user pointed at: with one, the page text is only background
@@ -150,10 +177,10 @@ def build(req, context_tokens, max_tokens):
         # the model can look but was given nothing to look at: say how, instead of "I am a text assistant"
         parts.append("No picture of the page was attached. If the request is about what the page looks like or "
                      "about its images, say that pressing the 📷 Screenshot button lets you see the page.")
-    messages = [{"role": "system", "content": SYSTEM},
+    messages = [{"role": "system", "content": SYSTEM}] + earlier + [
                 {"role": "user", "content": with_image("\n\n".join(parts) + "\n\n" + request, pictures)}]
     shared = {"title": bool(title), "url": url,
               "page_chars": len(body), "page_chars_total": body_n, "page_truncated": body_cut,
               "selection_chars": len(sel), "selection_chars_total": sel_n, "selection_truncated": sel_cut,
-              "screenshot": bool(req.get("image")), "pictures": len(pictures), "described": bool(req.get("described"))}
+              "screenshot": bool(req.get("image")), "pictures": len(pictures), "described": bool(req.get("described")), "earlier_turns": len(earlier) // 2}
     return messages, shared

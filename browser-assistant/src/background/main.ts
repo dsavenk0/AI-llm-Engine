@@ -198,6 +198,7 @@ async function ask(port: Port, req: Extract<UiRequest, { kind: "ask" }>): Promis
   try {
     await new Client(await settings()).chat({
       session, task: req.task, question: req.question, lang: req.lang, tone: req.tone, thinking: req.thinking, image, images,
+      history: Array.isArray(req.history) ? req.history.slice(-8) : undefined,
       page: { title: page.title, url: page.url, text: page.text, selection: page.selection },
     }, (ev: ChatEvent) => {
       if (ev.type === "start") run.id = ev.id;

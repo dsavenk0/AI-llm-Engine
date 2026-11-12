@@ -36,6 +36,7 @@ EXTENSION_SCHEMES = ("safari-web-extension", "chrome-extension", "moz-extension"
 HOME = os.environ.get("ASSISTANT_HOME") or os.path.expanduser("~/Library/Application Support/AI-llm-Engine")
 TOKEN_FILE = os.path.join(HOME, "browser-assistant.json")
 POLL_S = 1.0
+KEEP_AWAKE_S = 240.0          # how often an open side panel tells the engine it is in use
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT_BUILT = os.path.join(ROOT, "browser-assistant", "dist")      # what this copy of the code ships
 EXT_HOME = os.path.join(HOME, "browser-assistant")                # what the browser is pointed at
@@ -246,6 +247,8 @@ class Assistant:
         self.gens = {}
         self.unload_supported = True
         self.extension = {}         # {browser: version installed in EXT_HOME} — what an extension should be
+        self.watchers = 0           # open event streams: a side panel (or popup) someone has in front of them
+        self.kept_awake = 0.0
 
     def installed_versions(self):
         """The extension's version in each browser's folder, read now: `llm assistant setup` or an LLMBar update
@@ -327,10 +330,25 @@ class Assistant:
             self.changed.wait_for(lambda: self.version > version, timeout)
             return dict(self.core, version=self.version) if self.core else None
 
+    def keep_awake(self, now=None):
+        """While a side panel is open, the engine must not unload the model for being idle between questions —
+        the conversation is still going on. Every KEEP_AWAKE_S the service tells an awake engine it is in use;
+        an engine already asleep is left asleep (it loads again with the next question)."""
+        now = time.time() if now is None else now
+        if self.watchers <= 0 or now - self.kept_awake < KEEP_AWAKE_S:
+            return False
+        h = self.control.health()
+        if not h or h.get("state") == "sleeping":
+            return False
+        self.kept_awake = now
+        self.control.post("/v1/engine/wake", {})
+        return True
+
     def poll_forever(self, stop):
         while not stop.is_set():
             try:
                 self.refresh()
+                self.keep_awake()
             except Exception:                  # a health probe must never take the service down
                 pass
             stop.wait(POLL_S)
@@ -722,21 +740,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, a.refresh())
         if path == "/v1/assistant/events":
             self._start_stream()
-            snap = a.refresh()
-            if not self._event({"type": "state", "state": snap}):
-                return
-            while not self.server.stopping.is_set():
-                nxt = a.wait_change(snap["version"], 15)
-                if nxt and nxt["version"] > snap["version"]:
-                    snap = nxt
-                    if not self._event({"type": "state", "state": snap}):
-                        return
-                else:
-                    try:
-                        self.wfile.write(b": keep-alive\n\n")
-                        self.wfile.flush()
-                    except OSError:
-                        return
+            with a.lock:
+                a.watchers += 1                       # someone has a panel open: keep the model loaded
+            try:
+                snap = a.refresh()
+                if not self._event({"type": "state", "state": snap}):
+                    return
+                while not self.server.stopping.is_set():
+                    nxt = a.wait_change(snap["version"], 15)
+                    if nxt and nxt["version"] > snap["version"]:
+                        snap = nxt
+                        if not self._event({"type": "state", "state": snap}):
+                            return
+                    else:
+                        try:
+                            self.wfile.write(b": keep-alive\n\n")
+                            self.wfile.flush()
+                        except OSError:
+                            return
+            finally:
+                with a.lock:
+                    a.watchers -= 1
             return
         self._error(404, "not_found", "unknown path")
 

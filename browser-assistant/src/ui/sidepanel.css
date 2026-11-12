@@ -42,6 +42,13 @@ body.browser-titled .logo, body.browser-titled .brand { display: none; }
 
 .sheet { padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--raise); display: grid; gap: 6px; }
 .sheet label { color: var(--dim); font-size: 11px; }
+#history-sheet { max-height: 45vh; overflow-y: auto; gap: 4px; }
+.conv { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.conv:hover, .conv.current { background: var(--field); }
+.conv .what { flex: 1; min-width: 0; }
+.conv .what b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conv .what span { color: var(--dim); font-size: 11px; }
+.conv button { width: 24px; height: 24px; padding: 0; border-radius: 50%; font-size: 12px; flex: none; }
 .modebar { padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .modebar select { border-radius: 8px; font-weight: 600; }
 .banner { margin: 8px 12px 0; padding: 7px 10px; border-radius: 8px; border: 1px solid currentColor; font-size: 12px;
