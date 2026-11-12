@@ -17,7 +17,26 @@ const BOOT = Math.random().toString(36).slice(2, 8);
 
 async function settings(): Promise<Settings> {
   const s = await api.storage.local.get(["service", "token"]);
-  return { service: (s.service as string) || DEFAULT_SERVICE, token: (s.token as string) || "" };
+  let token = (s.token as string) || "";
+  if (!token) token = await pairFromApp();
+  return { service: (s.service as string) || DEFAULT_SERVICE, token };
+}
+
+/** Inside LLMBar.app (Safari), the app's native handler hands over the pairing token, so the person never
+ *  has to paste it. Anywhere else — Chrome, a temporary Safari extension — there is no handler and the
+ *  settings page asks for it as before. */
+async function pairFromApp(): Promise<string> {
+  if (!api.runtime.sendNativeMessage) return "";
+  try {
+    const r = await api.runtime.sendNativeMessage("local.llm-engine.llmbar", { kind: "token" });
+    if (r && r.ok && typeof r.token === "string" && r.token.length >= 24) {
+      await api.storage.local.set({ token: r.token });
+      return r.token;
+    }
+  } catch {
+    // not inside the app, or the app is not installed: pair by hand
+  }
+  return "";
 }
 
 // ───────────── state: one stream, shared by every open side panel and in-page panel ─────────────
@@ -258,7 +277,7 @@ api.runtime.onInstalled.addListener(async () => {
   await api.contextMenus.removeAll();
   for (const m of MENU) api.contextMenus.create({ id: m.id, title: m.title, contexts: m.contexts });
   const s = await api.storage.local.get(["token"]);
-  if (!s.token) await api.runtime.openOptionsPage();
+  if (!s.token && !(await pairFromApp())) await api.runtime.openOptionsPage();
 });
 
 api.contextMenus.onClicked.addListener(async (info, tab) => {

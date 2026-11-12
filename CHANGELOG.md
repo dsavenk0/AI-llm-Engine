@@ -5,6 +5,10 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **Tools ▸ Browser Assistant opens Safari on the extension.** The Safari extension now ships inside LLMBar.app;
+  the button sets up the service and opens Safari ▸ Settings ▸ Extensions on it to be ticked, and the extension
+  takes its token from LLMBar — no Terminal, no folder, nothing to paste. Until the app is signed by an Apple
+  developer, Safari needs Develop ▸ Allow Unsigned Extensions first; the button says how.
 - **Voice understands Spanish, and any mix of languages.** Spanish (Spain or Latin America) is in the recognition
   menu, "para", "basta" and "nueva conversación" work as voice commands, and *Any language — Whisper detects it*
   lets you switch between Spanish, Russian and English mid-conversation without changing a setting.

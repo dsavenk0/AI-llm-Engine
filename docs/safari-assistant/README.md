@@ -10,27 +10,28 @@ Why it is built the way it is: [AUDIT.md](AUDIT.md). The wire format: [PROTOCOL.
 
 ## Install
 
-From LLMBar: **Tools ▸ Browser Assistant**. From a terminal: `./llm assistant setup`. Both do the same
-thing, and can be run again at any time:
+**Safari, from LLMBar: Tools ▸ Browser Assistant.** The extension ships inside LLMBar.app, so Safari lists it
+like any app's extension. The button sets up the service (a LaunchAgent, so the extension works with LLMBar
+closed) and the pairing token in the background, then opens **Safari ▸ Settings ▸ Extensions on the extension**:
+tick *LLMBar Assistant*. That tick, and the per-site access Safari asks for the first time the panel opens on a
+site, are the only steps — Apple lets no app take them on your behalf. The extension then fetches the token from
+LLMBar itself; nothing to paste.
 
-1. put the extension's files in `~/Library/Application Support/AI-llm-Engine/browser-assistant/safari` (and
-   `…/chromium`);
-2. install the assistant service as a LaunchAgent, so it is up after login;
-3. copy the pairing token to the clipboard.
+Until LLMBar is signed by an Apple developer, Safari lists the extension only while **Develop ▸ Allow Unsigned
+Extensions** is on (the button says so and opens Safari): turn on *Show features for web developers* in Safari ▸
+Settings ▸ Advanced, then that menu item, then press the button again. Safari turns it off when it quits. Building
+with a free *Apple Development* certificate (sign in to Xcode with your Apple ID, then
+`LLMBAR_SIGN_IDENTITY="Apple Development: …" ./build-app.sh --install`) keeps the extension enabled for good.
 
-Then three steps that Safari reserves for you — no app can take them on your behalf:
-
-1. Safari ▸ Settings ▸ Advanced: turn on *Show features for web developers*.
-2. Safari ▸ Settings ▸ Developer: *Add Temporary Extension…* and choose the folder from step 1 above.
-3. The extension's settings open: paste the token and press **Connect**.
+**Without LLMBar** (a terminal): `./llm assistant setup` does the same setup and prints how to load the files as
+a temporary extension (Safari ▸ Settings ▸ Developer ▸ *Add Temporary Extension…*), which Safari forgets when it
+quits; paste the token it copied into the extension's settings.
 
 **Chrome, Edge, Brave, Arc and other Chromium browsers:** open `chrome://extensions` (`edge://extensions`),
 turn on *Developer mode*, press *Load unpacked* and choose the `chromium` folder next to the Safari one. Click
 the toolbar button: the side panel opens, and its ⚙︎ settings take the token.
 
-**Safari forgets a temporary extension when it quits**; repeat step 2 after restarting Safari. The token
-and settings are kept. A permanent install needs the extension inside a signed app built with Xcode — see
-[Packaging](#packaging-and-updates).
+
 
 `./llm assistant status` says what is installed and running. `./llm assistant uninstall` removes the
 service; deleting the folder removes the files.
@@ -158,8 +159,8 @@ services' own APIs.
 | Update of the extension's files when LLMBar updates | implemented, tested |
 | Chrome / Chromium build | builds from the same source (`dist/chromium`), side panel included; **never loaded in Chrome** |
 | Firefox | not built; it has a sidebar of its own (`sidebar_action`), so a build is mostly a manifest |
-| Permanent Safari install (containing app, signing) | planned — needs Xcode and a Developer ID |
-| Native messaging | planned, with the containing app |
+| Safari extension inside LLMBar.app; Tools ▸ Browser Assistant opens Safari on it | implemented; built and registered with macOS (`pluginkit` lists it); ad-hoc signed, so Safari needs *Allow Unsigned Extensions* until it is signed with an Apple Development / Developer ID certificate. **Not yet enabled in Safari by its author** |
+| Native messaging: the extension gets the token from LLMBar | implemented (reads the token file only); **untested in Safari** |
 | Google Sheets, Excel Online | planned (Phases 3 – 4) — need OAuth client registrations |
 | Email assistant (Gmail, Outlook Web) | planned (Phase 5) |
 | Mailbox access through Gmail API / Microsoft Graph | planned (Phase 6) — needs OAuth client registrations |
@@ -167,25 +168,23 @@ services' own APIs.
 
 ## Packaging and updates
 
-**Today (temporary extension).** The extension lives in Application Support, not inside LLMBar.app, so an
-update that replaces or moves the app cannot leave Safari pointing at files that are gone. When a new
-LLMBar — or a `git pull` and `./llm assistant setup` — brings a newer extension:
+**Inside LLMBar.app (Safari).** The extension is part of the app: a new LLMBar brings a new extension, and Safari
+picks it up with the app — nothing to re-add. The service still updates itself: when it notices its own code
+changed on disk it exits when nobody is mid-answer, and launchd starts the new one.
 
-1. the running service notices its own code changed on disk and exits when nobody is mid-answer; launchd
-   starts the new one;
-2. on start the service compares the shipped extension with the installed copy and replaces the copy;
-3. the next time the side panel opens, the old extension — still loaded in Safari — is told a newer version is
-   installed and where; restarting Safari and adding the folder again loads it.
+**A temporary or unpacked extension (Safari without LLMBar, Chrome).** Its files live in Application Support,
+so an update that replaces the app cannot leave the browser pointing at files that are gone. On start the service
+compares the shipped extension with that copy and replaces it; the side panel then says a newer version is
+installed and where — reload it in the browser (Safari: add the folder again; Chrome: the reload button in
+chrome://extensions).
 
 The extension and the service also compare protocol versions, and each says plainly when the other is
 too old, rather than failing on a missing field.
 
-**With a signed app (planned).** A Safari web extension is distributed inside a macOS app. The natural home
-is LLMBar.app itself: the extension becomes an app extension in `Contents/PlugIns`, next to the widget, and
-is enabled once in Safari ▸ Settings ▸ Extensions. Then Safari updates the extension whenever the app is
-updated — nothing to re-add, no developer setting. The app does not have to be *running* for the extension
-to work. This needs Xcode (to build the extension target) and a Developer ID (Safari loads only signed
-extensions outside developer mode); neither is on the machine this was written on.
+**Signing.** Safari keeps an extension from an app signed by an Apple developer; an ad-hoc signed one (this
+build) only while *Allow Unsigned Extensions* is on. A free Apple Development certificate is enough on your own
+Mac; distributing the app to others needs a Developer ID and notarization (`LLMBAR_SIGN_IDENTITY`, see
+`build-app.sh`).
 
 ## Build from source
 

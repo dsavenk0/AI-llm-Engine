@@ -21,6 +21,8 @@ export interface BrowserApi {
     onInstalled: Event<(details: { reason: string }) => void>;
     openOptionsPage(): Promise<void>;
     getURL(path: string): string;
+    /** Safari: a message to the native handler of the app the extension ships in (LLMBar). */
+    sendNativeMessage?(application: string, message: unknown): Promise<any>;
   };
   action?: { onClicked: Event<(tab: Tab) => void> };
   storage: {

@@ -132,6 +132,60 @@ else
   rm -rf "$APP/Contents/PlugIns"
 fi
 
+echo "▸ Safari extension (inside the app)…"
+# The browser assistant as a real Safari extension: Safari lists extensions that live inside an app, so LLMBar can
+# open Safari ▸ Settings ▸ Extensions on it for the person to tick (an app may not enable one by itself). The web
+# extension is dist/safari; the small native handler only hands the extension the service's pairing token.
+# Safari keeps an ad-hoc signed one only while Develop ▸ Allow Unsigned Extensions is on; sign with an Apple
+# Development or Developer ID identity (LLMBAR_SIGN_IDENTITY) and it stays enabled across restarts.
+SAFARI_EXT="$APP/Contents/PlugIns/LLMBar Assistant.appex"
+ASSISTANT_HOME="$HOME/Library/Application Support/AI-llm-Engine"
+if [ -f "$ROOT/browser-assistant/dist/safari/manifest.json" ]; then
+  mkdir -p "$SAFARI_EXT/Contents/MacOS" "$SAFARI_EXT/Contents/Resources"
+  if swiftc -O -parse-as-library -application-extension -target "$(uname -m)-apple-macos13.0" \
+       -framework SafariServices -Xlinker -e -Xlinker _NSExtensionMain \
+       -o "$SAFARI_EXT/Contents/MacOS/LLMBarAssistant" "$ROOT/app/safari/SafariExtensionHandler.swift" 2>"$TMP/safari.log"; then
+    ditto "$ROOT/browser-assistant/dist/safari" "$SAFARI_EXT/Contents/Resources"
+    cat > "$SAFARI_EXT/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>LLMBar Assistant</string>
+  <key>CFBundleDisplayName</key><string>LLMBar Assistant</string>
+  <key>CFBundleIdentifier</key><string>local.llm-engine.llmbar.safari</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundlePackageType</key><string>XPC!</string>
+  <key>CFBundleExecutable</key><string>LLMBarAssistant</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LLMAssistantHome</key><string>$ASSISTANT_HOME</string>
+  <key>NSHumanReadableDescription</key><string>Ask the model on this Mac about the page, or let it act on the page while you watch.</string>
+  <key>NSExtension</key><dict>
+    <key>NSExtensionPointIdentifier</key><string>com.apple.Safari.web-extension</string>
+    <key>NSExtensionPrincipalClass</key><string>SafariWebExtensionHandler</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+    cat > "$TMP/safari.entitlements" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.app-sandbox</key><true/>
+  <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+  <array><string>$ASSISTANT_HOME/</string></array>
+</dict></plist>
+PLIST
+    codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" --entitlements "$TMP/safari.entitlements" "$SAFARI_EXT" >/dev/null 2>&1 || true
+  else
+    echo "  (the Safari extension was not built: $(tail -1 "$TMP/safari.log"))"
+    rm -rf "$SAFARI_EXT"
+  fi
+else
+  echo "▸ Safari extension: skipped (the browser extension was not built)"
+fi
+
 echo "▸ Icon…"
 PNG="$TMP/icon-1024.png"
 swift "$ROOT/tools/make-icon.swift" "$PNG"
@@ -200,6 +254,7 @@ if [[ "$INSTALL" == 1 ]]; then
   ditto "$APP" "$DEST"
   [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
   [ -d "$DEST/Contents/PlugIns/LLMBarWidget.appex" ] && pluginkit -a "$DEST/Contents/PlugIns/LLMBarWidget.appex" >/dev/null 2>&1 || true
+  [ -d "$DEST/Contents/PlugIns/LLMBar Assistant.appex" ] && pluginkit -a "$DEST/Contents/PlugIns/LLMBar Assistant.appex" >/dev/null 2>&1 || true
   echo "✓ Installed: $DEST — add the widget: right-click the desktop → Edit Widgets → LLMBar"
 fi
 

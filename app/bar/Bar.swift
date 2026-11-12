@@ -1819,13 +1819,12 @@ struct ToolsTab: View {
                     CLI.terminal("./llm lab")
                 }
                 // Optional and independent of this app: the Safari extension talks to its own small service,
-                // so it keeps working with LLMBar closed. This only installs what is missing (the service,
-                // the extension's files, the token on the clipboard) and shows the steps Safari reserves
-                // for the user — an extension cannot be enabled, or given a site, on anyone's behalf.
+                // so it keeps working with LLMBar closed. This installs what is missing and opens Safari on the
+                // extension's switch — the one step Safari keeps for the person (BrowserAssistantSetup.swift).
                 tool("safari", L("Browser Assistant", "Браузерный ассистент"),
-                     L("Safari extension: ask the local model about the page · installs if missing",
-                       "Расширение Safari: вопросы локальной модели о странице · установит, если нет")) {
-                    CLI.terminal("./llm assistant setup --reveal; ./llm assistant status")
+                     L("Safari extension: the local model reads and acts on the page · installs and opens Safari",
+                       "Расширение Safari: локальная модель читает страницу и действует · установит и откроет Safari")) {
+                    BrowserAssistantSetup.run()
                 }
             }
         }
