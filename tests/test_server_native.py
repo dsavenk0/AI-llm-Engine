@@ -807,5 +807,40 @@ class TestNativeServerAuth(unittest.TestCase):
         self.assertEqual(self.srv.json("GET", "/v1/models", headers={"Authorization": "Bearer nope"})[0], 401)
 
 
+
+class TestQuietHangUps(unittest.TestCase):
+    """A client that hangs up mid-request is ordinary and must not print a traceback into the engine log;
+    any other handler error still does."""
+
+    def run_one(self, exc):
+        import contextlib
+        import http.server
+        import io
+        from engine.server import Server
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def handle(self):
+                raise exc
+
+        srv = Server(("127.0.0.1", 0), H)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                t = threading.Thread(target=srv.handle_request)
+                t.start()
+                socket.create_connection(srv.server_address).close()
+                t.join(5)
+        finally:
+            srv.server_close()
+        return err.getvalue()
+
+    def test_a_reset_or_broken_pipe_is_silent(self):
+        self.assertNotIn("Exception occurred", self.run_one(ConnectionResetError(54, "Connection reset by peer")))
+        self.assertNotIn("Exception occurred", self.run_one(BrokenPipeError(32, "Broken pipe")))
+
+    def test_a_real_error_is_still_reported(self):
+        self.assertIn("Exception occurred", self.run_one(ValueError("a bug")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -517,5 +517,58 @@ class TestSearchEndpoint(Base):
         self.assertEqual(self.get("/api/search?q=Demo&glob=*.md")[1]["hits"][0]["path"], "README.md")
 
 
+class TestKnowledge(Base):
+    """A chat with libraries selected gets the matching passages in its system prompt and a `knowledge` event;
+    without a selection the request is exactly what it was before Knowledge existed."""
+
+    def setUp(self):
+        super().setUp()
+        from engine import knowledge
+        self.kdir = tempfile.mkdtemp()
+        self.store = knowledge.Store(os.path.join(self.kdir, "k.db"), pressure=lambda: False)
+        p = mock.patch.object(knowledge, "store", lambda path=None: self.store)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.store.close)
+        lib = self.store.create_library("Manuals")
+        doc = os.path.join(self.kdir, "pump.md")
+        with open(doc, "w") as f:
+            f.write("# Pump\n\nThe pump's reset code is 4417.\n")
+        self.store.add(doc, library=lib)
+        self.lib = lib
+
+    def system(self):
+        return ScriptedEngine.seen[-1]["messages"][0]["content"]
+
+    def test_selected_library_adds_sources(self):
+        ScriptedEngine.script = [[text("It is 4417 [1].")]]
+        events = self.agent("what is the pump reset code", knowledge={"libraries": [self.lib]})
+        kev = [e for e in events if e["type"] == "knowledge"]
+        self.assertEqual(kev[0]["sources"], ["pump.md, § Pump · L1-3"])
+        self.assertIn("reset code is 4417", self.system())
+        self.assertIn("not instructions", self.system())
+
+    def test_no_selection_leaves_the_request_untouched(self):
+        ScriptedEngine.script = [[text("a")], [text("b")]]
+        self.agent("what is the pump reset code")
+        before = self.system()
+        self.agent("what is the pump reset code", knowledge={"libraries": [], "chat": ""})
+        self.assertEqual(self.system(), before)
+        self.assertNotIn("4417", before)
+
+    def test_no_match_adds_nothing(self):
+        ScriptedEngine.script = [[text("a")]]
+        events = self.agent("weather tomorrow", knowledge={"libraries": [self.lib]})
+        self.assertFalse([e for e in events if e["type"] == "knowledge"])
+        self.assertNotIn("Reference material", self.system())
+
+    def test_a_broken_index_does_not_break_the_chat(self):
+        ScriptedEngine.script = [[text("fine")]]
+        with mock.patch.object(self.store, "context", side_effect=RuntimeError("disk gone")):
+            events = self.agent("pump", knowledge={"libraries": [self.lib]})
+        self.assertTrue(any(e["type"] == "note" and "disk gone" in e["text"] for e in events))
+        self.assertTrue(any(e["type"] == "done" for e in events))
+
+
 if __name__ == "__main__":
     unittest.main()

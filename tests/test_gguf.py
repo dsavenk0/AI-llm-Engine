@@ -215,13 +215,20 @@ def free_port():
         return s.getsockname()[1]
 
 
+
+def fake_server():
+    """The fake llama-server, run by the Python running these tests: `#!/usr/bin/env python3` took whichever
+    python3 came first on PATH, which on a CI runner need not be one that starts quickly (or at all)."""
+    return FAKE_SERVER.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1)
+
+
 class Gateway:
     def __init__(self, tmp, *extra, env=None):
         self.tmp = tmp
         self.model = make_gguf(os.path.join(tmp, "tiny-Q4_K_M.gguf"), arch="qwen2", name="Tiny Qwen", ctx=8192)
         self.fake = os.path.join(tmp, "llama-server")
         with open(self.fake, "w") as f:
-            f.write(FAKE_SERVER)
+            f.write(fake_server())
         os.chmod(self.fake, os.stat(self.fake).st_mode | stat.S_IEXEC)
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
@@ -239,7 +246,10 @@ class Gateway:
                 return
             except OSError:
                 time.sleep(0.2)
-        raise RuntimeError("gateway did not come up")
+        self.proc.kill()
+        self.log.flush()
+        with open(self.log.name) as f:
+            raise RuntimeError("gateway did not come up in 60 s; its log:\n" + f.read()[-3000:])
 
     def stop(self):
         self.proc.terminate()
@@ -302,7 +312,7 @@ class TestGateway(unittest.TestCase):
 
     def test_prompt_lookup_speculation_is_on_when_the_server_knows_it(self):
         with open(os.path.join(self.tmp, "llama-server"), "w") as f:
-            f.write(FAKE_SERVER)
+            f.write(fake_server())
         # a fake that answers --help with the option list of a recent build
         helper = os.path.join(self.tmp, "helped")
         os.makedirs(helper)

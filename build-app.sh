@@ -5,22 +5,33 @@
 #   ./build-app.sh --install    also copies it to /Applications and registers the widget with the system
 #   ./build-app.sh --offline    also puts Python and the engine's wheels inside (+~150 MB): works with no network
 #                               at first launch; flags combine
+#   ./build-app.sh --sign adhoc|developer-id   how it is signed (ad hoc by default; see tools/signing.sh)
+#   ./build-app.sh --sign status               which mode and certificate would be used — builds nothing
 # The engine and CLI are bundled inside, so the app also works without this checkout: it then keeps config, logs
 # and its .venv in ~/Library/Application Support/LLMBar.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 FINAL="$ROOT/LLMBar.app"
-VERSION="${VERSION:-1.1}"
+VERSION="${VERSION:-1.2}"
 INSTALL=0
 OFFLINE=0
-for arg in "$@"; do
-  case "$arg" in
+SIGN_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --install) INSTALL=1 ;;
     --offline) OFFLINE=1 ;;
-    *) echo "unknown option: $arg (use --install and/or --offline)" >&2; exit 2 ;;
+    --sign) SIGN_ARG="${2:-}"; shift ;;
+    --sign=*) SIGN_ARG="${1#--sign=}" ;;
+    *) echo "unknown option: $1 (use --install, --offline, --sign adhoc|developer-id|status)" >&2; exit 2 ;;
   esac
+  shift
 done
+
+# shellcheck source=tools/signing.sh
+source "$ROOT/tools/signing.sh"
+if [ "$SIGN_ARG" = "status" ]; then signing_status "$FINAL"; exit 0; fi
+signing_resolve "$SIGN_ARG"            # before compiling: a missing certificate is said at once, not after a minute
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -31,7 +42,8 @@ APP="$TMP/LLMBar.app"
 echo "▸ Compiling (panel + editor + voice in one binary)…"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/llm"
 swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$APP/Contents/MacOS/LLMBar" \
-  "$ROOT/app/main.swift" "$ROOT"/app/core/*.swift "$ROOT"/app/bar/*.swift "$ROOT"/app/editor/*.swift "$ROOT"/app/voice/*.swift
+  "$ROOT/app/main.swift" "$ROOT"/app/core/*.swift "$ROOT"/app/bar/*.swift "$ROOT"/app/editor/*.swift "$ROOT"/app/voice/*.swift \
+  "$ROOT"/app/knowledge/*.swift
 
 echo "▸ OCR helper (Apple Vision)…"
 mkdir -p "$APP/Contents/Resources/llm/bin"
@@ -126,7 +138,7 @@ PLIST
   <array><string>$LLM_HOME_DIR/.llm/</string></array>
 </dict></plist>
 PLIST
-  codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" --entitlements "$TMP/widget.entitlements" "$WIDGET" >/dev/null 2>&1 || true
+  signing_add_nested "$WIDGET" "$TMP/widget.entitlements"          # signed with the app, keeping its sandbox
 else
   echo "  (the desktop widget was not built: $(tail -1 "$TMP/widget.log"))"
   rm -rf "$APP/Contents/PlugIns"
@@ -181,7 +193,7 @@ PLIST
   <array><string>$ASSISTANT_HOME/</string></array>
 </dict></plist>
 PLIST
-    codesign --force --sign "${LLMBAR_SIGN_IDENTITY:--}" --entitlements "$TMP/safari.entitlements" "$SAFARI_EXT" >/dev/null 2>&1 || true
+    signing_add_nested "$SAFARI_EXT" "$TMP/safari.entitlements"   # signed with the app, keeping its sandbox
   else
     echo "  (the Safari extension was not built: $(tail -1 "$TMP/safari.log"))"
     rm -rf "$SAFARI_EXT"
@@ -206,16 +218,12 @@ if [[ "$OFFLINE" == 1 ]]; then
   python3 "$ROOT/tools/bundle-deps.py" "$APP"
 fi
 
-# Ad hoc by default; a stable identity also keeps the microphone permission across rebuilds. With a real
-# Developer ID, sign the way notarization requires — Apple rejects a submission that lacks the hardened
-# runtime or a secure timestamp, and neither can be applied to an ad-hoc signature.
-#
-# The hardened runtime then needs telling that this app legitimately loads code it did not sign: the
-# bundled Python and MLX are .so files from pip, and MLX compiles Metal kernels at runtime. Without these
-# three entitlements the app signs and notarizes but refuses to start.
-if [ -n "${LLMBAR_SIGN_IDENTITY:-}" ]; then
-  echo "▸ Signing with ${LLMBAR_SIGN_IDENTITY} (hardened runtime, timestamped)…"
-  cat > "$TMP/app.entitlements" <<'PLIST'
+# Signing (tools/signing.sh): ad hoc by default; developer-id adds the hardened runtime and a secure timestamp,
+# which notarization requires. The hardened runtime then needs telling that this app legitimately loads code it
+# did not sign: the bundled Python and MLX are .so files from pip, and MLX compiles Metal kernels at runtime.
+# Without these three entitlements the app signs and notarizes but refuses to start. The extensions keep their
+# own entitlements (the sandbox) — signing them with the app's would stop them from loading.
+cat > "$TMP/app.entitlements" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -224,20 +232,7 @@ if [ -n "${LLMBAR_SIGN_IDENTITY:-}" ]; then
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
 </dict></plist>
 PLIST
-  # nested code first, outside in: a bundle is only valid once everything inside it is signed
-  find "$APP/Contents" \( -name "*.dylib" -o -name "*.so" \) -print0 2>/dev/null \
-    | xargs -0 -r codesign --force --timestamp --options runtime --sign "$LLMBAR_SIGN_IDENTITY" 2>/dev/null || true
-  for nested in "$APP/Contents/Resources/llm/bin/ocr" "$APP/Contents/PlugIns/"*.appex; do
-    [ -e "$nested" ] && codesign --force --timestamp --options runtime \
-      --entitlements "$TMP/app.entitlements" --sign "$LLMBAR_SIGN_IDENTITY" "$nested" || true
-  done
-  codesign --force --timestamp --options runtime --entitlements "$TMP/app.entitlements" \
-    --sign "$LLMBAR_SIGN_IDENTITY" "$APP"
-  codesign --verify --strict --verbose=2 "$APP" 2>&1 | tail -2
-else
-  echo "▸ Ad-hoc signing…"
-  codesign --force --sign - "$APP"
-fi
+signing_app "$APP" "$TMP/app.entitlements"
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
 rm -rf "$FINAL"

@@ -1191,6 +1191,14 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        """A client that hangs up (a closed panel, a cancelled request, the app quitting) is ordinary: it used to
+        print a full traceback into the engine log for every one. Anything else is still reported."""
+        import sys as _sys
+        if isinstance(_sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
 
 START = time.time()
 

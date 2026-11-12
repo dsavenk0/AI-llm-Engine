@@ -319,6 +319,11 @@ struct Composer: View {
                 }.buttonStyle(.plain)
                     .help(store.web ? "Web search is on: the assistant may search the internet and read pages (click to turn off)"
                                     : "Let the assistant search the internet and read web pages")
+                if AppHost.enabled(.knowledge) {
+                    KnowledgePicker(choice: Binding(get: { store.knowledgeChoice }, set: { store.knowledgeChoice = $0 }),
+                                    tint: Palette.accent, dim: .secondary,
+                                    addToChat: { pickKnowledgeFiles() }, clearChat: { store.clearKnowledgeFiles() })
+                }
                 Spacer()
                 if let phase = store.planPhase {
                     Text(phase).font(.caption).foregroundColor(.secondary)
@@ -432,6 +437,16 @@ struct Composer: View {
         p.prompt = "Attach"
         if images { p.allowedContentTypes = [.png, .jpeg, .gif, .webP, .heic, .tiff, .bmp] }
         if p.runModal() == .OK { addFiles(p.urls) }
+    }
+
+    /// Documents for this chat's knowledge (PDFs, manuals…): indexed and searched per message, not inlined.
+    private func pickKnowledgeFiles() {
+        let p = NSOpenPanel()
+        p.allowsMultipleSelection = true
+        p.canChooseDirectories = true
+        p.prompt = "Add to Chat"
+        p.message = "Indexed for this chat only; removed from the index when the chat is deleted."
+        if p.runModal() == .OK { store.addKnowledgeFiles(p.urls.map(\.path)) }
     }
 }
 

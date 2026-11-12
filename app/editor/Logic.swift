@@ -14,6 +14,7 @@ enum AgentEvent: Equatable {
     case toolResult(id: String, name: String, ok: Bool, summary: String)
     case image(path: String, prompt: String)          // a picture the assistant generated, saved in the project
     case note(String)                                 // a remark for the person (not part of the conversation)
+    case knowledge([String])                          // the knowledge sources this reply was given ("a.pdf, p. 3")
     case done
     case error(String)
 
@@ -45,6 +46,7 @@ enum AgentEvent: Equatable {
                                summary: s("summary") ?? "")
         case "image": return s("path").map { .image(path: $0, prompt: s("prompt") ?? "") }
         case "note": return s("text").map { .note($0) }
+        case "knowledge": return .knowledge(obj["sources"] as? [String] ?? [])
         case "done": return .done
         case "error": return .error(s("message") ?? "error")
         default: return nil

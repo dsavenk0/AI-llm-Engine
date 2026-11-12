@@ -12,7 +12,7 @@ enum AppHost {
     // MARK: modules and their switches
 
     enum Module: String, CaseIterable {
-        case editor, voice
+        case editor, voice, knowledge
         var key: String { "module.\(rawValue).enabled" }
     }
 
@@ -36,6 +36,13 @@ enum AppHost {
         becomeRegular()
         VoiceModule.shared.show(listen: listen)
         activate()
+    }
+
+    /// The knowledge libraries: a page inside LLMBar ▸ Tools (app/bar/KnowledgePage.swift), opened on the panel.
+    static func openKnowledge() {
+        guard enabled(.knowledge) else { return }
+        bar?.engine.toolsPage = "knowledge"
+        openPanel()
     }
 
     /// A menu-bar app turns into an ordinary one *before* its window appears; done after, the system keeps showing
@@ -113,6 +120,8 @@ enum AppHost {
             preloadModel()
         case "voice":
             openVoice()                                            // listening starts the model itself
+        case "knowledge":
+            openKnowledge()
         default:
             // a tap on the widget's background, or a link this version does not know: show the panel. It
             // used to fall through to the voice chat, so any stray tap on the widget started listening.

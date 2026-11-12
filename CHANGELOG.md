@@ -2,6 +2,33 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## 1.2.0 — 12 November
+
+### Added
+- **Knowledge: your documents for the chats.** Make libraries of PDFs, Markdown, text and code in LLMBar ▸ Tools ▸
+  *Knowledge*, tick them with the 📚 button in the code editor or the quick chat, and the chat searches them before
+  answering and shows which pages and sections it was given. Nothing runs, loads or is added to a prompt until a
+  chat has a library ticked; there is no extra model. Libraries can be renamed and deleted there (the index only —
+  your files are never touched), and `./llm knowledge` does the same from the terminal.
+- **Documents for one chat.** In the editor, *Add files to this chat…* indexes documents for that conversation only;
+  they leave the index when the chat is deleted.
+- **Knowledge reads PDFs page by page with the Mac's own PDF engine**, so answers cite pages, non-Latin (e.g.
+  Russian) PDFs are read correctly, and only scanned pages go through OCR. From a checkout, rebuild the helper with
+  `./llm setup --ocr` (the app build includes it).
+- **Two signing modes for builds.** `--sign adhoc` (the default) or `--sign developer-id` in `build-app.sh` and
+  `build-dmg.sh`; the Developer ID certificate is found in the keychain by itself, `--sign status` shows what would
+  be used, and a developer-id DMG is signed, notarized and stapled when a notary profile is set.
+
+### Fixed
+- **Developer ID builds kept the widget and the Safari extension working**: they were re-signed without their
+  sandbox, which stops an extension from loading.
+- **The engine log no longer fills with tracebacks** when a client hangs up (a closed panel, a cancelled request).
+- **The app builds on Xcode 16 again** (the macOS 26 glass is used only when built with Xcode 26).
+
+### Changed
+- **MLX is held at 0.32.3**: 0.32.4 rounds the grouped expert kernel differently and streamed MoE experts drift;
+  an existing install is moved back on its next start.
+
 ## 1.1.0 — 12 November
 
 ### Added

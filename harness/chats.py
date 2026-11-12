@@ -128,6 +128,12 @@ def rename(session, title):
 
 def delete(sessions, session):
     sessions[:] = [s for s in sessions if s["id"] != session["id"]]
+    if session.get("knowledgeChat"):         # files attached to this chat only leave the knowledge index too
+        try:
+            from engine import knowledge
+            knowledge.store().forget_chat(session["id"])
+        except Exception:
+            pass
 
 
 def listing(sessions, current_id=None):

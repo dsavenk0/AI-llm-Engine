@@ -181,5 +181,98 @@ class TestDocuments(unittest.TestCase):
             D.MAX_CHARS = orig
 
 
+class TestPages(unittest.TestCase):
+    """extract_pages: the PDF page mode of the OCR helper (bin/ocr --pages), and its fallbacks."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        D._PAGE_MODE.clear()
+
+    def helper(self, script):
+        p = write("ocr", "#!/bin/sh\n" + script, self.d)
+        os.chmod(p, 0o755)
+        return p
+
+    def with_helper(self, path, fn):
+        from unittest import mock
+        with mock.patch.object(D, "ocr_tool", lambda: path):
+            return fn()
+
+    PAGES = ('if [ $# -eq 1 ]; then echo "usage: ocr --pages <file.pdf>" >&2; exit 2; fi\n'
+             'echo \'{"pages": 3}\'\n'
+             'echo \'{"page": 1, "text": "one", "source": "text"}\'\n'
+             'echo \'{"page": 2, "text": "", "source": "none"}\'\n'
+             'echo \'{"page": 3, "text": "three", "source": "ocr"}\'\n')
+
+    def test_pages_stream_with_numbers_and_sources(self):
+        pdf = write("a.pdf", b"%PDF-1.4\n", self.d)
+        r = self.with_helper(self.helper(self.PAGES), lambda: D.extract_pages(pdf))
+        self.assertTrue(r["anchored"])
+        self.assertEqual(r["count"], 3)
+        self.assertEqual([(p["page"], p["source"]) for p in r["pages"]], [(1, "text"), (2, "none"), (3, "ocr")])
+        self.assertIn("1 page(s) have no text layer", r["note"])
+
+    def test_ocr_flag_is_passed_only_when_allowed(self):
+        log = os.path.join(self.d, "args")
+        script = self.PAGES.replace("echo '{\"pages\": 3}'", f'echo "$@" > {log}; echo \'{{"pages": 3}}\'')
+        pdf = write("a.pdf", b"%PDF-1.4\n", self.d)
+        tool = self.helper(script)
+        def args():
+            with open(log) as f:
+                return f.read()
+        self.with_helper(tool, lambda: D.extract_pages(pdf, ocr=False))
+        self.assertNotIn("--ocr-missing", args())
+        self.with_helper(tool, lambda: D.extract_pages(pdf, ocr=True))
+        self.assertIn("--ocr-missing", args())
+
+    def test_stop_between_pages(self):
+        pdf = write("a.pdf", b"%PDF-1.4\n", self.d)
+        seen = []
+        r = self.with_helper(self.helper(self.PAGES),
+                             lambda: D.extract_pages(pdf, should_stop=lambda: (seen.append(1), len(seen) >= 2)[1]))
+        self.assertEqual(len(r["pages"]), 1)
+        self.assertIn("stopped after 1 of 3", r["note"])
+
+    def test_locked_pdf_is_an_error(self):
+        pdf = write("a.pdf", b"%PDF-1.4\n", self.d)
+        tool = self.helper('if [ $# -eq 1 ]; then echo "usage: ocr --pages" >&2; exit 2; fi\n'
+                           'echo \'{"error": "the PDF is password-protected"}\'; exit 3\n')
+        with self.assertRaises(D.DocError):
+            self.with_helper(tool, lambda: D.extract_pages(pdf))
+
+    def test_an_older_helper_is_not_asked_for_pages(self):
+        pdf = write("a.pdf", b"%PDF-1.4\nstream\nBT (Fallback words) Tj ET\nendstream", self.d)
+        marker = os.path.join(self.d, "ran")
+        tool = self.helper(f'[ "$1" = "--pages" ] && [ $# -gt 1 ] && touch {marker}\necho plain text\n')
+        r = self.with_helper(tool, lambda: D.extract_pages(pdf))
+        self.assertFalse(os.path.exists(marker))                 # no whole-file OCR run by mistake
+        self.assertFalse(r["anchored"])
+        self.assertEqual(r["pages"][0]["text"], "Fallback words")
+        self.assertIn("not built", r["note"])
+
+    def test_without_a_helper_the_stdlib_parser_is_used(self):
+        from unittest import mock
+        pdf = write("a.pdf", b"%PDF-1.4\n/Type /Page\nstream\nBT (Plain) Tj ET\nendstream", self.d)
+        with mock.patch.object(D, "ocr_tool", lambda: None):
+            r = D.extract_pages(pdf)
+        self.assertEqual((r["pages"][0]["page"], r["pages"][0]["text"], r["anchored"]), (None, "Plain", False))
+
+    def test_real_helper_reads_pages(self):
+        """The built Swift helper (PDFKit text layer); skipped when it is not built or predates page mode."""
+        tool = D.ocr_tool()
+        if not tool or not D._has_page_mode(tool):
+            self.skipTest("OCR helper with page mode not built (./llm setup --ocr)")
+        from tests.pdfgen import make_pdf
+        pdf = write("real.pdf", make_pdf(["Alpha page", None, "Gamma (rotated)"], rotate={2: 90}), self.d)
+        r = D.extract_pages(pdf, ocr=False)
+        self.assertTrue(r["anchored"])
+        self.assertEqual(r["count"], 3)
+        self.assertEqual([p["source"] for p in r["pages"]], ["text", "none", "text"])
+        self.assertIn("Alpha page", r["pages"][0]["text"])
+        self.assertIn("Gamma (rotated)", r["pages"][2]["text"])
+        with self.assertRaises(D.DocError):
+            D.extract_pages(write("bad.pdf", b"not a pdf at all", self.d))
+
+
 if __name__ == "__main__":
     unittest.main()

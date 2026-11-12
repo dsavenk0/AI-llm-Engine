@@ -24,7 +24,12 @@ CFG = {"model_type": "qwen3_moe", "hidden_size": 128, "num_hidden_layers": 3, "i
 
 
 def build(folder, bits=4, quantize=True, seed=3, cfg=None):
-    from mlx_lm.models import qwen3_moe
+    # the tiny model is built with mlx-lm's Qwen3-MoE, an optional install (not in requirements.txt): without it
+    # these tests are skipped and say so, instead of erroring (CI installs only requirements.txt)
+    try:
+        from mlx_lm.models import qwen3_moe
+    except ImportError:
+        raise unittest.SkipTest("mlx-lm is not installed (pip install mlx-lm): MoE streaming was not covered")
     cfg = dict(CFG, **(cfg or {}))
     mx.random.seed(seed)
     model = qwen3_moe.Model(qwen3_moe.ModelArgs.from_dict(cfg))

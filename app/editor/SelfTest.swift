@@ -151,6 +151,16 @@ func runSelfTest(_ ws: Workspace, root: String) {
         for _ in 0..<50 where ws.branches?.current != original { try? await Task.sleep(nanoseconds: 100_000_000) }
         check(ws.branches?.current == original, "switched back")
 
+        // knowledge: chats saved before it (and by `llm chat`) still open; the choice survives a save
+        let old = #"[{"id":"0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0","title":"Old","updated":0,"items":[]}]"#
+        let decoded = try? JSONDecoder().decode([ChatSession].self, from: Data(old.utf8))
+        check(decoded?.first?.title == "Old" && decoded?.first?.knowledgeChoice.isOff == true,
+              "a chat saved without knowledge fields opens, with Knowledge off")
+        var withChoice = ChatSession()
+        withChoice.knowledgeChoice = KnowledgeChoice(libraries: [3], ownDocuments: true)
+        let round = (try? JSONEncoder().encode([withChoice])).flatMap { try? JSONDecoder().decode([ChatSession].self, from: $0) }
+        check(round?.first?.knowledge == [3] && round?.first?.knowledgeChat == true, "the knowledge choice is saved with the chat")
+
         ws.shutdown()
         print(failures.isEmpty ? "SELFTEST OK" : "SELFTEST FAILED: \(failures.count)")
         exit(failures.isEmpty ? 0 : 1)

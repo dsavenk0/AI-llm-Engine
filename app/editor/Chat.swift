@@ -32,6 +32,28 @@ struct ChatSession: Identifiable, Codable {
     var title = "New chat"
     var updated = Date()
     var items: [ChatItem] = []
+    var knowledge: [Int] = []             // library ids this chat searches (empty: Knowledge off)
+    var knowledgeChat = false             // files attached to this chat alone are in the knowledge index
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey { case id, title, updated, items, knowledge, knowledgeChat }
+
+    /// The Knowledge fields are optional on disk: chats saved before them (and by `llm chat`) still open.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        updated = try c.decode(Date.self, forKey: .updated)
+        items = try c.decode([ChatItem].self, forKey: .items)
+        knowledge = try c.decodeIfPresent([Int].self, forKey: .knowledge) ?? []
+        knowledgeChat = try c.decodeIfPresent(Bool.self, forKey: .knowledgeChat) ?? false
+    }
+
+    var knowledgeChoice: KnowledgeChoice {
+        get { KnowledgeChoice(libraries: knowledge, ownDocuments: knowledgeChat) }
+        set { knowledge = newValue.libraries; knowledgeChat = newValue.ownDocuments }
+    }
 }
 
 @MainActor
@@ -97,6 +119,9 @@ final class ChatStore: ObservableObject {
     }
 
     func delete(_ id: UUID) {
+        if sessions.first(where: { $0.id == id })?.knowledgeChat == true {
+            Task { await KnowledgeStore.shared.forgetChat(id.uuidString) }   // its own documents leave the index
+        }
         sessions.removeAll { $0.id == id }
         if currentID == id { currentID = sessions.first?.id; if currentID == nil { newChat() } }
         save()
@@ -135,6 +160,40 @@ final class ChatStore: ObservableObject {
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
         delete(id)
+    }
+
+    // MARK: knowledge
+
+    /// Which knowledge this chat reads — the composer's books button. Saved with the chat, not "touched" (the
+    /// chat does not jump to the top of the list for it).
+    var knowledgeChoice: KnowledgeChoice {
+        get { current?.knowledgeChoice ?? KnowledgeChoice() }
+        set {
+            guard let i = sessions.firstIndex(where: { $0.id == currentID }) else { return }
+            sessions[i].knowledgeChoice = newValue
+            save()
+        }
+    }
+
+    /// Files indexed for this chat alone; they leave the index when the chat is deleted.
+    func addKnowledgeFiles(_ paths: [String]) {
+        guard let id = currentID, !paths.isEmpty else { return }
+        Task {
+            let results = await KnowledgeStore.shared.add(paths, chat: id.uuidString)
+            let ok = results.filter { $0.state == "ready" }.count
+            if ok > 0, let i = sessions.firstIndex(where: { $0.id == id }) {
+                sessions[i].knowledgeChat = true
+                save()
+            }
+            ws.say(KnowledgeStore.shared.message ?? "Nothing was indexed", bad: ok == 0)
+        }
+    }
+
+    func clearKnowledgeFiles() {
+        guard let id = currentID, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].knowledgeChat = false
+        save()
+        Task { await KnowledgeStore.shared.forgetChat(id.uuidString) }
     }
 
     private func mutate(_ body: (inout ChatSession) -> Void) {
@@ -221,12 +280,15 @@ final class ChatStore: ObservableObject {
     private func run(history: [[String: String]], attached: [String], inline: [InlineFile], pictures: [Picture],
                      active: [String: Any]? = nil) async {
         defer { busy = false; runID = nil; save() }
+        // nil unless this chat ticked libraries or has files of its own: then the request is what it always was
+        let knowledge = currentID.flatMap { id in current?.knowledgeChoice.requestField(chatID: id.uuidString) }
         do {
             let stream = ws.backend.agent(messages: history, attachments: attached,
                                           inline: inline.map { ["name": $0.name, "text": $0.text] },
                                           images: pictures.map { ["name": $0.name, "data": $0.dataURL] },
                                           think: think, autoEdit: autoEdit, web: web,
-                                          mode: mode.rawValue, effort: think ? effort : nil, active: active)
+                                          mode: mode.rawValue, effort: think ? effort : nil, active: active,
+                                          knowledge: knowledge)
             for try await ev in stream {
                 apply(ev)
             }
@@ -300,6 +362,10 @@ final class ChatStore: ObservableObject {
             case .toolResult(_, _, let ok, let summary):
                 if !ok, !lastIs(.error) { s.items.append(ChatItem(kind: .error, text: summary)) }
             case .note(let t): ws.say(t)
+            case .knowledge(let sources):
+                s.items.append(ChatItem(kind: .activity,
+                                        text: "Knowledge: \(sources.count) source\(sources.count == 1 ? "" : "s")",
+                                        steps: sources))
             case .done: break
             case .error(let m): s.items.append(ChatItem(kind: .error, text: m))
             }
@@ -458,7 +524,8 @@ struct ChatItemView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Button { showSteps.toggle() } label: {
                     HStack(spacing: 4) {
-                        Text(item.counts.summary()).foregroundColor(.secondary)
+                        Text([item.text, item.counts.summary()].filter { !$0.isEmpty }.joined(separator: " · "))
+                            .foregroundColor(.secondary)
                         Image(systemName: showSteps ? "chevron.down" : "chevron.right").font(.caption2).foregroundColor(.secondary)
                     }
                 }.buttonStyle(.plain)

@@ -20,7 +20,7 @@ class TestEditorApp(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp()
         cls.binary = os.path.join(cls.tmp, "LLMBar")
         files = [os.path.join(ROOT, "app/main.swift")]
-        for d in ("core", "bar", "editor", "voice"):
+        for d in ("core", "bar", "editor", "voice", "knowledge"):
             folder = os.path.join(ROOT, "app", d)
             files += sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".swift"))
         build = subprocess.run(["swiftc", "-O", *files, "-o", cls.binary], capture_output=True, text=True, timeout=1500)

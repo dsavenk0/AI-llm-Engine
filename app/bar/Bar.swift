@@ -363,6 +363,7 @@ struct UpdateInfo: Equatable {
 final class EngineState: ObservableObject {
     @Published var checks: [CheckItem] = []     // warnings and errors only; empty = ready
     @Published var update: UpdateInfo? = nil     // set when a newer release is on GitHub (the banner offers it)
+    @Published var toolsPage: String? = nil      // a page opened inside Tools ("knowledge"); nil: the tool list
     private var lastUpdateCheck = Date.distantPast
     @Published var health: [String: Any]? = nil
     @Published var stats: [String: Any]? = nil
@@ -1039,6 +1040,10 @@ struct SettingsTab: View {
                 toggle(L("Voice chat module", "Модуль: голосовой чат"),
                        Binding(get: { AppHost.enabled(.voice) }, set: { AppHost.setEnabled(.voice, $0); e.objectWillChange.send() }),
                        hint: L("Off: no voice chat, and the widget's voice button does nothing", "Выкл.: нет голосового чата, кнопка виджета ничего не делает"))
+                toggle(L("Knowledge module", "Модуль: Knowledge"),
+                       Binding(get: { AppHost.enabled(.knowledge) }, set: { AppHost.setEnabled(.knowledge, $0); e.objectWillChange.send() }),
+                       hint: L("Off: no Knowledge page in Tools and no books button in the chats; indexed data stays on disk",
+                               "Выкл.: нет страницы Knowledge в Тулзах и кнопки с книгами в чатах; проиндексированное остаётся на диске"))
                 toggle(L("Liquid glass background", "Фон «жидкое стекло»"), Binding(get: { e.g("glass", false) }, set: { e.setG("glass", $0) }),
                        hint: L("A lighter, see-through panel that lets the desktop show through. Off by default.",
                                "Более лёгкая прозрачная панель, сквозь которую виден рабочий стол. По умолчанию выключено."))
@@ -1751,6 +1756,14 @@ struct ToolsTab: View {
     @ObservedObject var e: EngineState
     @State private var connectOpen = false
     var body: some View {
+        if e.toolsPage == "knowledge", AppHost.enabled(.knowledge) {
+            KnowledgePage(e: e)
+        } else {
+            list
+        }
+    }
+
+    private var list: some View {
         VStack(spacing: 10) {
             Card {
                 Caption(text: L("Interface", "Интерфейс"))
@@ -1776,6 +1789,13 @@ struct ToolsTab: View {
                          L("Quick chat: speak (the default) or type, attach files — a module, opens on demand",
                            "Быстрый чат: говорите (по умолчанию) или печатайте, прикладывайте файлы — модуль, открывается по требованию")) {
                         e.openVoice()
+                    }
+                }
+                if AppHost.enabled(.knowledge) {
+                    tool("books.vertical", L("Knowledge", "Knowledge — библиотеки документов"),
+                         L("Your documents for the chats to search: add, remove and delete libraries — nothing runs until you add some",
+                           "Ваши документы для поиска в чатах: добавить, убрать, удалить библиотеки — ничего не работает, пока их нет")) {
+                        e.toolsPage = "knowledge"
                     }
                 }
                 // Optional and independent of this app: the browser extension talks to its own small service, so
@@ -1966,6 +1986,7 @@ struct ContentView: View {
             }
             .scrollIndicators(.never)
             .frame(height: ContentView.scrollHeight)
+            .onChange(of: e.toolsPage) { page in if page != nil { tab = 4 } }   // "Manage Knowledge…" from a chat
             if e.busy == nil, !e.checks.isEmpty {
                 CheckBanner(e: e)
             }
@@ -2259,6 +2280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// launch, macOS 26+ — wrapped in the system's NSGlassEffectView (real lensing and refraction).
     func installContent() {
         guard let w = window, let host = hosting else { return }
+        // NSGlassEffectView is in the macOS 26 SDK only (Xcode 26, Swift 6.2+): an older toolchain — CI's
+        // Xcode 16 — builds the app without it, as on a macOS before 26
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *), glassAtLaunch ?? false {
             let glass = NSGlassEffectView()
             glass.cornerRadius = 16
@@ -2276,10 +2300,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // the window shadow is computed from the window's alpha once; for glass it comes out as a
             // sharp rectangle around the rounded panel — the glass draws its own edge, so go without
             w.hasShadow = false
-        } else {
-            w.contentView = host
-            w.hasShadow = true
+            DispatchQueue.main.async { w.invalidateShadow() }
+            return
         }
+        #endif
+        w.contentView = host
+        w.hasShadow = true
         DispatchQueue.main.async { w.invalidateShadow() }
     }
 
@@ -2451,6 +2477,10 @@ enum BarSnapshot {
             engine.config = ["model": "/m/Bonsai-2-27B-CRACK-PTQ1-MLX"]
         }
         let tab = Int(value("--tab") ?? "0") ?? 0
+        if let page = value("--page") {                  // a page inside Tools, e.g. knowledge (opened on a library)
+            engine.toolsPage = page
+            KnowledgePage.preset = (library: value("--library") ?? "", query: value("--query") ?? "")
+        }
         let host = NSHostingView(rootView: ContentView(e: engine, mon: SystemMonitor(), tab: tab).frame(width: 392))
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 392, height: 640), styleMask: [.titled],
                          backing: .buffered, defer: false)
@@ -2458,7 +2488,7 @@ enum BarSnapshot {
         w.contentView = host
         w.center()
         w.orderFrontRegardless()
-        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        RunLoop.current.run(until: Date().addingTimeInterval(engine.toolsPage == nil ? 1.0 : 4.0))   // a page asks the CLI first
         typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
         guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { exit(3) }
         let f = unsafeBitCast(sym, to: Capture.self)

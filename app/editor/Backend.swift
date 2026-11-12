@@ -240,15 +240,17 @@ final class Backend: @unchecked Sendable {
     func agent(messages: [[String: String]], attachments: [String], inline: [[String: String]] = [],
                images: [[String: String]] = [], think: Bool, autoEdit: Bool,
                web: Bool = false, mode: String? = nil, effort: String? = nil,
-               active: [String: Any]? = nil) -> AsyncThrowingStream<AgentEvent, Error> {
-        AsyncThrowingStream { cont in
+               active: [String: Any]? = nil, knowledge: [String: Any]? = nil) -> AsyncThrowingStream<AgentEvent, Error> {
+        var body: [String: Any] = ["messages": messages, "attachments": attachments, "inline": inline, "images": images,
+                                   "think": think, "auto_edit": autoEdit, "web": web,
+                                   "mode": mode ?? (autoEdit ? "edit" : "manual"),
+                                   "effort": effort ?? "", "active": active ?? [:]]
+        if let knowledge { body["knowledge"] = knowledge }        // absent when Knowledge is off for the chat
+        let request = Result { try make("POST", "/api/agent", body: body) }
+        return AsyncThrowingStream { cont in
             let task = Task {
                 do {
-                    var r = try make("POST", "/api/agent", body: ["messages": messages, "attachments": attachments,
-                                                                  "inline": inline, "images": images,
-                                                                  "think": think, "auto_edit": autoEdit, "web": web,
-                                                                  "mode": mode ?? (autoEdit ? "edit" : "manual"),
-                                                                  "effort": effort ?? "", "active": active ?? [:]])
+                    var r = try request.get()
                     r.timeoutInterval = 3600
                     let (bytes, resp) = try await URLSession.shared.bytes(for: r)
                     if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {

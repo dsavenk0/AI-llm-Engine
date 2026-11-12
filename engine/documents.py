@@ -207,6 +207,95 @@ def extract_text(path):
     return _result(_read_text(data), "text")
 
 
+# ───────────────────────────── PDF page by page (the knowledge index) ─────────────────────────────
+PAGE_TIMEOUT = 600          # seconds for one PDF in page mode (OCR of a long scan is the slow case)
+_PAGE_MODE = {}             # (helper path, mtime) -> it understands --pages
+
+
+def _has_page_mode(tool):
+    """An older build reads "--pages" as a file name and would OCR the whole PDF; the current one answers a
+    bare `--pages` with its usage and exit code 2. Asked once per build."""
+    try:
+        key = (tool, os.path.getmtime(tool))
+    except OSError:
+        return False
+    if key not in _PAGE_MODE:
+        try:
+            r = subprocess.run([tool, "--pages"], capture_output=True, text=True, timeout=10)
+            _PAGE_MODE[key] = r.returncode == 2 and "--pages" in r.stderr
+        except (OSError, subprocess.SubprocessError):
+            _PAGE_MODE[key] = False
+    return _PAGE_MODE[key]
+
+
+def extract_pages(path, ocr=True, should_stop=None, timeout=PAGE_TIMEOUT, langs=None):
+    """A PDF's text page by page, for citations: {"pages": [{"page", "text", "source"}], "count",
+    "anchored", "note"}.
+
+    With the OCR helper (bin/ocr --pages) the text layer comes from PDFKit — Unicode and CID fonts, which the
+    stdlib parser below cannot decode — and Vision reads only the pages that have no text layer, only when
+    `ocr` is true. Pages stream in one JSON line at a time, so `should_stop()` (checked between pages) ends
+    the helper without waiting for the rest; the pages already read are returned with a note. Without the
+    helper (or with an older build that has no page mode) this falls back to `_pdf`: one unanchored block,
+    `anchored` false. Raises DocError for a missing, unreadable or password-protected file."""
+    import json
+    import threading
+    if not os.path.isfile(path):
+        raise DocError(f"no such file: {path}")
+    tool = ocr_tool()
+    if tool and _has_page_mode(tool):
+        cmd = [tool, "--pages", path] + (["--ocr-missing"] if ocr else []) + (["--lang", ",".join(langs)] if langs else [])
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except OSError:
+            proc = None
+        if proc is not None:
+            timer = threading.Timer(timeout, proc.kill)
+            timer.start()
+            pages, count, error, stopped = [], None, None, False
+            try:
+                for line in proc.stdout:
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue                                  # an old helper printing plain text
+                    if "error" in obj:
+                        error = str(obj["error"])
+                    elif "pages" in obj and "page" not in obj:
+                        count = int(obj["pages"])
+                    elif "page" in obj:
+                        pages.append({"page": int(obj["page"]), "text": str(obj.get("text") or ""),
+                                      "source": str(obj.get("source") or "text")})
+                    if should_stop and should_stop():
+                        stopped = True
+                        proc.kill()
+                        break
+            finally:
+                timer.cancel()
+                proc.stdout.close()
+                proc.wait()
+            if error:
+                raise DocError(error)
+            if count is not None:                                 # the helper understood --pages
+                note = ""
+                if stopped:
+                    note = f"stopped after {len(pages)} of {count} pages"
+                elif len(pages) < count:
+                    note = f"only {len(pages)} of {count} pages could be read (timed out or failed)"
+                else:
+                    missing = sum(1 for p in pages if p["source"] == "none")
+                    if missing:
+                        note = (f"{missing} page(s) have no text layer" +
+                                ("" if ocr else " — OCR is off") + (" and OCR found no text" if ocr else ""))
+                return {"pages": pages, "count": count, "anchored": True, "note": note}
+    with open(path, "rb") as f:
+        r = _pdf(f.read())
+    text = r["text"].strip()
+    return {"pages": [{"page": None, "text": text, "source": "text"}] if text else [], "count": r["pages"],
+            "anchored": False,
+            "note": "no page numbers: the OCR helper is not built (./llm setup --ocr)" if text else r["note"]}
+
+
 # ───────────────────────────── excerpts for long documents ─────────────────────────────
 _STOP = frozenset("a an the and or of to in on for is are be was were this that it its with as at by from "
                   "not but if then else what which who how why when where".split())

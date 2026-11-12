@@ -126,6 +126,7 @@ struct Turn: Identifiable, Equatable {
     var fileText = ""                        // what the text files said, sent after the message
     var images: [String] = []                // data: URLs
     var spoken = false                       // it was asked by voice (and so answered short, aloud)
+    var sources: [String] = []               // an answer's knowledge sources ("manual.pdf, p. 3"), shown above it
 }
 
 enum Files {
@@ -217,6 +218,10 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         didSet { UserDefaults.standard.set(webMode, forKey: "webMode") }
     }
     @Published private(set) var webNote: String?           // the query being looked up, while it is
+    /// Knowledge: the libraries this quick chat searches before answering (none ticked: off, nothing runs).
+    @Published var knowledge: KnowledgeChoice {
+        didSet { UserDefaults.standard.set(knowledge.libraries, forKey: "quickChatKnowledge") }
+    }
     /// Pictures: when the question asks for one and the engine has image generation ready (/health "images"),
     /// the model's own prompt is drawn with the same route chat and the editor use — no separate switch, since
     /// unlike web search there is nothing to leave on by mistake: it only ever runs when actually installed.
@@ -245,6 +250,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         autoListen = UserDefaults.standard.object(forKey: "autoListen") as? Bool ?? true
         dialogMode = UserDefaults.standard.object(forKey: "dialogMode") as? Bool ?? true
         webMode = UserDefaults.standard.object(forKey: "webMode") as? Bool ?? true
+        knowledge = KnowledgeChoice(libraries: UserDefaults.standard.array(forKey: "quickChatKnowledge") as? [Int] ?? [])
         history = VoiceHistory.load(from: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/LLMBar/voice-chats.json"))
         keepOnTop = UserDefaults.standard.object(forKey: "keepOnTop") as? Bool ?? false
@@ -954,6 +960,13 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             system += "\n\n" + (await webContext(query))
             webNote = nil
         }
+        // the ticked libraries, searched for this question (a short `llm knowledge` run; skipped when none ticked)
+        if !knowledge.isOff, AppHost.enabled(.knowledge), !lastQuestion.isEmpty,
+           let found = await KnowledgeStore.shared.context(lastQuestion, libraries: knowledge.libraries),
+           !Task.isCancelled {
+            system += "\n\n" + found.text
+            reply.sources = found.sources.map(\.label)
+        }
         if Task.isCancelled { return }
         turns.append(reply)
         speakCurrent = spoken
@@ -1525,7 +1538,7 @@ struct VoiceView: View {
                         if t.role == "user" {
                             card(t.spoken ? "YOU · VOICE" : "YOU", t.text, VHUD.cyan, size: 12.5, files: t.files, images: t.images)
                         } else {
-                            card("MODEL", t.text, VHUD.phosphor, size: 13, images: t.images)
+                            card("MODEL", t.text, VHUD.phosphor, size: 13, files: t.sources, images: t.images)
                         }
                     }
                     if voice.state == .listening, !voice.heard.isEmpty {
@@ -1569,6 +1582,10 @@ struct VoiceView: View {
             HStack(alignment: .bottom, spacing: 10) {
                 Button { choose() } label: { Image(systemName: "paperclip").font(.system(size: 15)).frame(width: 26, height: 26) }
                     .buttonStyle(.plain).foregroundColor(VHUD.dim).help("Attach files or pictures")
+                if AppHost.enabled(.knowledge) {
+                    KnowledgePicker(choice: $voice.knowledge, tint: VHUD.cyan, dim: VHUD.dim)
+                        .frame(height: 26)
+                }
                 TextField("Type a message, or just speak", text: $voice.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...5).font(.system(size: 13)).foregroundColor(VHUD.text)
                     .frame(minHeight: 26)                                   // the same row height as the buttons
@@ -1700,12 +1717,17 @@ final class VoiceModule: NSObject {
         w.isReleasedWhenClosed = false
         w.minSize = NSSize(width: 340, height: 480)
         w.appearance = NSAppearance(named: lightTheme ? .aqua : .darkAqua)
+        var glassed = false
+        #if compiler(>=6.2)                          // the macOS 26 SDK (Xcode 26) only — see AppDelegate.installContent
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()          // the system's real glass, as in the panel
             glass.style = .regular                   // not .clear: the page behind must not read through the text
             glass.contentView = host
             w.contentView = glass
-        } else {
+            glassed = true
+        }
+        #endif
+        if !glassed {
             let fx = NSVisualEffectView()
             fx.material = .hudWindow
             fx.blendingMode = .behindWindow

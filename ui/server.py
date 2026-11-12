@@ -490,6 +490,42 @@ def user_content(text, images):
     return [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
 
 
+def _message_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def knowledge_context(body, messages):
+    """The knowledge block for this request, or None. Knowledge is off unless the request names libraries or
+    its chat has its own documents (`"knowledge": {"libraries": [ids], "chat": "<chat id>"}`) — then, and only
+    then, the index module is imported and searched for the last user message. Any failure here leaves the
+    request as it was (None), with the reason in "error"."""
+    k = body.get("knowledge")
+    if not isinstance(k, dict):
+        return None
+    libs = [x for x in (k.get("libraries") or []) if isinstance(x, (int, str)) and not isinstance(x, bool)][:32]
+    chat = str(k.get("chat") or "")[:64]
+    if not libs and not chat:
+        return None
+    query = next((_message_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), "")
+    try:
+        from engine import knowledge
+        budget = k.get("budget") if isinstance(k.get("budget"), int) else knowledge.DEFAULT_BUDGET
+        return knowledge.store().context(query[:2000], knowledge.Scope(libraries=libs, chat=chat),
+                                         budget=max(1000, min(budget, 40_000)))
+    except Exception as e:                    # the chat goes on without it
+        return {"error": f"knowledge search failed: {e}"}
+
+
+def knowledge_event(ctx):
+    """What the editor shows for the sources a reply was given: labels like "manual.pdf, p. 3"."""
+    return {"type": "knowledge",
+            "sources": [s["name"] + (f", {s['anchor']}" if s["anchor"] else "") for s in ctx["sources"]]}
+
+
 def attachment_block(items):
     parts = []
     for path, text in items:
@@ -718,6 +754,7 @@ class Handler(BaseHTTPRequestHandler):
             msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{attachment_block(items)}"
         if pictures:
             msgs[-1]["content"] = user_content(msgs[-1]["content"], pictures)
+        knowledge = knowledge_context(body, messages)
 
         def alive():
             try:                                  # an orderly close shows up as an empty peek
@@ -749,6 +786,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             effort = body.get("effort")
             extra += agentloop.active_note(P, body.get("active"))
+            if knowledge and knowledge.get("error"):
+                emit({"type": "note", "text": knowledge["error"]})
+            elif knowledge:
+                extra += "\n\n" + knowledge["text"]
+                emit(knowledge_event(knowledge))
             finished = agentloop.run_agent(P, self.server.endpoint, msgs, emit, run, think=bool(body.get("think")),
                                            auto_edit=bool(body.get("auto_edit")), system_extra=extra,
                                            web=bool(body.get("web")), mode=body.get("mode"),
@@ -931,7 +973,11 @@ class Handler(BaseHTTPRequestHandler):
             msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{attachment_block(items)}"
         if pictures:
             msgs[-1]["content"] = user_content(msgs[-1]["content"], pictures)
-        msgs.insert(0, {"role": "system", "content": self.server.system_prompt()})
+        system = self.server.system_prompt()
+        knowledge = knowledge_context(body, messages)
+        if knowledge and not knowledge.get("error"):
+            system += "\n\n" + knowledge["text"]
+        msgs.insert(0, {"role": "system", "content": system})
         ep = self.server.endpoint
         req = urllib.request.Request(ep.chat_url, data=json.dumps(ep.payload(msgs, bool(body.get("think", False)))).encode(),
                                      headers=ep.headers())

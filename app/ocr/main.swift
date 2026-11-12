@@ -5,6 +5,11 @@
 //   ocr <file.pdf | image> [more files…] [--lang en,ru]   →  recognised text on stdout
 //   ocr --describe <image> [more images…]                 →  one JSON line per image: {"text", "labels"} —
 //        what a model that cannot see is told about a picture (the browser assistant, assistant/describe.py)
+//   ocr --pages <file.pdf> [--ocr-missing] [--lang en,ru]  →  JSON lines for the knowledge index
+//        (engine/documents.py extract_pages): first {"pages": N}, then one {"page", "text", "source"} per page,
+//        streamed as each page is done. The text layer comes from PDFKit (Unicode, CID fonts); Vision runs only
+//        on pages without usable text, and only with --ocr-missing. source: "text" | "ocr" | "none".
+//        A PDF that cannot be opened or is locked prints {"error": "…"} and exits 3.
 import Foundation
 import Vision
 import PDFKit
@@ -63,7 +68,55 @@ func labels(_ cg: CGImage) -> [String] {
         .map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
 }
 
+func emit(_ obj: [String: Any]) {
+    if let data = try? JSONSerialization.data(withJSONObject: obj), let line = String(data: data, encoding: .utf8) {
+        print(line)
+        fflush(stdout)                                      // the reader stops (or is stopped) between pages
+    }
+}
+
+/// A page with fewer visible characters than this is treated as having no text layer (a scan, or only a
+/// page number on top of one).
+let minPageChars = 16
+
+func pages(_ path: String, ocrMissing: Bool, langs: [String]) -> Int32 {
+    guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else {
+        emit(["error": "cannot open the PDF (damaged or not a PDF)"]); return 3
+    }
+    if doc.isLocked { emit(["error": "the PDF is password-protected"]); return 3 }
+    emit(["pages": doc.pageCount])
+    for i in 0..<doc.pageCount {
+        autoreleasepool {
+            guard let page = doc.page(at: i) else { emit(["page": i + 1, "text": "", "source": "none"]); return }
+            let native = page.string ?? ""
+            let visible = native.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
+            if visible >= minPageChars { emit(["page": i + 1, "text": native, "source": "text"]); return }
+            if ocrMissing, let cg = renderPage(page, scale: 2.0) {
+                let t = recognize(cg, langs)
+                if !t.isEmpty { emit(["page": i + 1, "text": t, "source": "ocr"]); return }
+            }
+            emit(["page": i + 1, "text": native, "source": visible > 0 ? "text" : "none"])
+        }
+    }
+    return 0
+}
+
 var args = Array(CommandLine.arguments.dropFirst())
+if let i = args.firstIndex(of: "--pages") {
+    args.remove(at: i)
+    let ocrMissing = args.contains("--ocr-missing")
+    args.removeAll { $0 == "--ocr-missing" }
+    var pageLangs: [String] = []
+    if let j = args.firstIndex(of: "--lang"), j + 1 < args.count {
+        pageLangs = args[j + 1].split(separator: ",").map(String.init)
+        args.removeSubrange(j...(j + 1))
+    }
+    guard args.count == 1 else {
+        FileHandle.standardError.write(Data("usage: ocr --pages <file.pdf> [--ocr-missing] [--lang en,ru]\n".utf8))
+        exit(2)
+    }
+    exit(pages(args[0], ocrMissing: ocrMissing, langs: pageLangs))
+}
 if let i = args.firstIndex(of: "--describe") {
     args.remove(at: i)
     for path in args {

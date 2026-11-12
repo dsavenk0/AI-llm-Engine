@@ -3381,6 +3381,167 @@ def setup_audio():
     return r.returncode == 0
 
 
+def knowledge_cmd(cfg, args):
+    """`./llm knowledge …` — local document libraries the chats can search (engine/knowledge.py). FTS5 over
+    extracted text: no model is loaded, nothing runs in the background, the original files are never touched."""
+    from engine import knowledge as K
+    as_json = "--json" in args
+    flags = {"--json", "--no-ocr", "--exact", "--context", "--yes"}
+    opts, words, i = {}, [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--limit", "--budget", "--db", "--chat") and i + 1 < len(args):
+            opts[a] = args[i + 1]; i += 2
+        elif a in flags:
+            opts[a] = True; i += 1
+        else:
+            words.append(a); i += 1
+    st = K.Store(os.path.expanduser(opts["--db"])) if "--db" in opts else K.store()
+    sub, rest = (words[0], words[1:]) if words else ("stats", [])
+    usage = ('./llm knowledge [stats | libraries | create <name> | rename <library> <name> | delete <library> '
+             '| add <library> <file|folder>… [--no-ocr] | docs [<library>] [--chat ID] | remove <library> <doc-id> '
+             '| attach <chat-id> <file>… | detach <chat-id> <doc-id> | forget-chat <chat-id> '
+             '| promote <doc-id> <library> '
+             '| search <library>[,<library>…]|- "<query>" [--chat ID] [--exact] [--limit N] [--context] '
+             '[--budget N]] [--json]')
+    chat = str(opts.get("--chat") or "")
+
+    def out(obj, text):
+        print(json.dumps(obj, ensure_ascii=False, indent=1) if as_json else text)
+        return True
+
+    def need(n):
+        if len(rest) < n:
+            print(T("Usage:") + " " + usage)
+            return False
+        return True
+
+    try:
+        if sub == "stats":
+            s, libs = st.stats(), st.libraries()
+            lines = [T("Knowledge: nothing indexed yet — add documents with ./llm knowledge add <library> <files>")
+                     if not s["ready"] else
+                     f"{s['ready']} " + T("documents ready") + f" · {s['chunks']} " + T("chunks") +
+                     f" · {s['bytes'] / 2**20:.1f} MB"]
+            lines += [f"  {lib['name']}  ({lib['ready']}/{lib['documents']})" for lib in libs]
+            return out({**s, "libraries": libs}, "\n".join(lines))
+        if sub in ("libraries", "libs"):
+            libs = st.libraries()
+            return out(libs, "\n".join(f"{lib['id']:>3}  {lib['name']}  ({lib['ready']}/{lib['documents']})"
+                                       for lib in libs) or T("No libraries yet."))
+        if sub == "create":
+            if not need(1):
+                return False
+            lib = st.create_library(" ".join(rest))
+            return out({"id": lib, "name": " ".join(rest)}, G(T("Library created:") + f" {' '.join(rest)}"))
+        if sub == "rename":
+            if not need(2):
+                return False
+            st.rename_library(rest[0], " ".join(rest[1:]))
+            return out({"ok": True}, G(T("Renamed.")))
+        if sub == "delete":
+            if not need(1):
+                return False
+            if not opts.get("--yes"):
+                if not sys.stdin.isatty():
+                    print(R(T("Add --yes to delete a library non-interactively."))); return False
+                ans = input(T("Delete the library and its index? The original files stay. [y/N]") + " ").strip()
+                if ans.lower() not in ("y", "yes", "д", "да"):
+                    return False
+            n = st.delete_library(rest[0])
+            return out({"ok": True, "removed": n}, G(T("Library deleted; documents removed from the index:") + f" {n}"))
+        if sub in ("add", "attach"):
+            if not need(2):
+                return False
+            lib, owner_chat = (rest[0], "") if sub == "add" else (None, rest[0])
+            if lib is not None and st.library_id(lib) is None:
+                print(R(T("No such library:") + f" {lib}  (./llm knowledge create {lib})")); return False
+
+            def progress(ev):
+                if as_json:
+                    return
+                if ev["stage"] == "paused":
+                    print(Y(T("Paused: the Mac is short of memory; indexing continues when it recovers.")),
+                          file=sys.stderr)
+                elif ev["stage"] == "indexing":
+                    print(DIM(f"[{ev['done'] + 1}/{ev['total']}] {ev['path']}"), file=sys.stderr)
+            # the app's Stop button sends SIGTERM: finish (or abandon) the current file cleanly, then stop
+            import signal
+            import threading
+            stop = threading.Event()
+            try:
+                previous = signal.signal(signal.SIGTERM, lambda *a: stop.set())
+            except ValueError:                        # not the main thread (an embedding caller): no handler
+                previous = None
+            try:
+                results = st.add_many(rest[1:], library=lib, chat=owner_chat, ocr=not opts.get("--no-ocr"),
+                                      progress=progress, should_stop=stop.is_set)
+            finally:
+                if previous is not None:
+                    signal.signal(signal.SIGTERM, previous)
+            lines = []
+            for r in results:
+                mark = {"ready": G("✓"), "failed": R("✗"), "skipped": Y("–")}.get(r["state"], "·")
+                lines.append(f"{mark} {r['name']}" + (f"  {DIM(r['note'])}" if r["note"] else "") +
+                             (f"  {DIM(T('(already indexed)'))}" if r.get("reused") else ""))
+            ok = sum(r["state"] == "ready" for r in results)
+            lines.append(f"{ok}/{len(results)} " + T("documents ready"))
+            out(results, "\n".join(lines))
+            return ok > 0 or not results
+        if sub == "docs":
+            docs = st.documents(library=rest[0] if rest else None, chat=chat or None)
+            return out(docs, "\n".join(
+                f"{d['id']:>4}  {d['state']:<8} {d['name']}  " +
+                DIM(f"{d['chunks']} {T('chunks')}" + (f", {d['pages']} p." if d["pages"] else "") +
+                    (f" · {T('changed since indexing')}" if d["changed"] else "") +
+                    (f" · {d['note']}" if d["note"] else "")) for d in docs) or T("No documents."))
+        if sub == "remove":
+            if not need(2):
+                return False
+            if not rest[1].isdigit():
+                print(T("Usage:") + " " + usage); return False
+            n = st.remove(int(rest[1]), library=rest[0])
+            return out({"ok": True, "removed": n}, G(T("Removed from the library.")))
+        if sub == "detach":
+            if not need(2) or not rest[1].isdigit():
+                print(T("Usage:") + " " + usage); return False
+            n = st.remove(int(rest[1]), chat=rest[0])
+            return out({"ok": True, "removed": n}, G(T("Removed from the chat.")))
+        if sub == "forget-chat":
+            if not need(1):
+                return False
+            n = st.forget_chat(rest[0])
+            return out({"ok": True, "removed": n}, G(T("Chat documents removed from the index:") + f" {n}"))
+        if sub == "promote":
+            if not need(2) or not rest[0].isdigit():
+                print(T("Usage:") + " " + usage); return False
+            st.promote(int(rest[0]), " ".join(rest[1:]))
+            return out({"ok": True}, G(T("Added to the library.")))
+        if sub == "search":
+            if not need(2):
+                return False
+            scope = K.Scope(libraries=[x for x in rest[0].split(",") if x and x != "-"], chat=chat)
+            query = " ".join(rest[1:])
+            if opts.get("--context"):
+                c = st.context(query, scope, budget=int(opts.get("--budget", K.DEFAULT_BUDGET)),
+                               exact=bool(opts.get("--exact")))
+                return out(c, c["text"] if c else T("Nothing found."))
+            hits = st.search(query, scope, limit=int(opts.get("--limit", 8)), exact=bool(opts.get("--exact")))
+            return out(hits, "\n\n".join(
+                B(f"{h['name']}") + (f"  {h['anchor']}" if h["anchor"] else "") + DIM(f"  {h['score']}") + "\n" +
+                (h["text"][:400] + ("…" if len(h["text"]) > 400 else "")) for h in hits) or T("Nothing found."))
+    except K.KnowledgeError as e:
+        if as_json:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        else:
+            print(R(str(e)))
+        return False
+    finally:
+        st.close()                                    # a one-shot command: nothing stays open after it
+    print(T("Usage:") + " " + usage)
+    return False
+
+
 def read_doc_cmd(cfg, args):
     """`./llm read <file> [--json] [--max N]` — extract plain text from a document (PDF, DOCX, PPTX, HTML,
     text/markdown/CSV…) so it can be attached to the model as one source. PDF is best-effort; a scanned PDF
@@ -4257,6 +4418,11 @@ COMMANDS = [
     Command("read", "Audio & documents", "Extract text from a document (PDF/DOCX/PPTX/HTML/text, OCR for "
             "scans) to attach as a source.", './llm read <file> [--query "…"] [--budget N] [--json]',
             ("--query", "--budget", "--json")),
+    Command("knowledge", "Audio & documents", "Local document libraries the chats can search (full-text, no "
+            "extra model; originals are never touched).",
+            './llm knowledge [stats|libraries|create|rename|delete|add|docs|remove|attach|detach|forget-chat|'
+            'promote|search] … [--json]',
+            ("--json", "--no-ocr", "--exact", "--context", "--limit", "--budget", "--yes", "--db", "--chat")),
 
     Command("start", "Engine & service", "Start the engine with the selected model.", "./llm start", ()),
     Command("stop", "Engine & service", "Stop the engine.", "./llm stop", ()),
@@ -4477,6 +4643,7 @@ def main():
         "assistant": lambda: assistant_cmd(cfg, sys.argv[2:]),
         "update": lambda: update_cmd(cfg, sys.argv[2:]),
         "read": lambda: read_doc_cmd(cfg, sys.argv[2:]),
+        "knowledge": lambda: knowledge_cmd(cfg, sys.argv[2:]),
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),

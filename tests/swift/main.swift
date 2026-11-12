@@ -460,5 +460,37 @@ eq(VoiceCommand.parse("Basta."), .stop, "basta")
 eq(VoiceCommand.parse("Nueva conversación"), .newConversation, "Spanish new conversation")
 eq(VoiceCommand.parse("¿para qué sirve esto?"), nil, "'para' inside a Spanish question is not a command")
 
+// ── knowledge (app/knowledge/KnowledgeLogic.swift)
+eq(AgentEvent.parse(line: #"data: {"type":"knowledge","sources":["a.pdf, p. 3","b.md"]}"#),
+   .knowledge(["a.pdf, p. 3", "b.md"]), "knowledge sources event")
+let libsJSON = #"[{"id": 2, "name": "Manuals", "created": 1.5, "documents": 3, "ready": 2, "chars": 900}]"#
+eq(KnowledgeJSON.decode([KnowledgeLibrary].self, from: libsJSON),
+   [KnowledgeLibrary(id: 2, name: "Manuals", documents: 3, ready: 2)], "libraries decode, extra fields ignored")
+eq(KnowledgeJSON.decode([KnowledgeLibrary].self, from: "[1/2] /x/a.md\n" + libsJSON)?.count, 1,
+   "progress lines before the JSON are skipped")
+check(KnowledgeJSON.decode(KnowledgeContext.self, from: "null") == nil, "nothing found → nil")
+check(KnowledgeJSON.decode([KnowledgeLibrary].self, from: "") == nil, "empty output → nil")
+eq(KnowledgeJSON.error(in: #"{"error": "no such library: X"}"#), "no such library: X", "CLI error")
+let ctxJSON = #"{"text": "Reference…\n\n[1] a.pdf, p. 2\nhello", "sources": [{"n": 1, "name": "a.pdf", "path": "/a.pdf", "anchor": "p. 2", "doc": 1, "chunk": 5}], "searched": 3}"#
+eq(KnowledgeJSON.decode(KnowledgeContext.self, from: ctxJSON)?.sources.map(\.label), ["a.pdf, p. 2"], "context sources")
+let docJSON = #"[{"id": 1, "name": "a.pdf", "path": "/a.pdf", "kind": "pdf", "state": "ready", "pages": 4, "anchored": true, "note": "", "chars": 10, "added": 0, "chunks": 7, "changed": true, "missing": false}]"#
+eq(KnowledgeJSON.decode([KnowledgeDocument].self, from: docJSON)?.first?.detail, "4 p. · 7 chunks · changed since indexing",
+   "document detail line")
+var choice = KnowledgeChoice()
+check(choice.isOff, "a new chat has Knowledge off")
+check(choice.requestField(chatID: "C") == nil, "off → no request field at all")
+eq(choice.badge(libraryNames: [:]), "", "off → no badge")
+choice.toggle(2); choice.toggle(5)
+eq(choice.libraries, [2, 5], "toggle on")
+choice.toggle(5)
+eq(choice.libraries, [2], "toggle off")
+eq(choice.badge(libraryNames: [2: "Manuals"]), "Manuals", "one library → its name")
+check(choice.requestField(chatID: "C")?["chat"] == nil, "no own documents → no chat id sent")
+choice.ownDocuments = true
+eq(choice.requestField(chatID: "C")?["chat"] as? String, "C", "own documents → chat id sent")
+eq(choice.badge(libraryNames: [2: "Manuals"]), "2", "library + own documents → a count")
+choice.keepOnly(existing: [])
+eq(choice.libraries, [], "deleted libraries drop out of the choice")
+
 print("swift logic: \(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

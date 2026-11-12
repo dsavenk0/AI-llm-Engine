@@ -20,11 +20,24 @@ cleanup() {
 trap cleanup EXIT
 
 SUFFIX=""
-OFFLINE_ARG=()
-if [[ "${1:-}" == "--offline" ]]; then SUFFIX="-offline"; OFFLINE_ARG=(--offline); fi   # Python + wheels inside
+BUILD_ARGS=()
+SIGN_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --offline) SUFFIX="-offline"; BUILD_ARGS+=(--offline) ;;              # Python + wheels inside
+    --sign) SIGN_ARG="${2:-}"; shift ;;
+    --sign=*) SIGN_ARG="${1#--sign=}" ;;
+    *) echo "unknown option: $1 (use --offline, --sign adhoc|developer-id)" >&2; exit 2 ;;
+  esac
+  shift
+done
+# shellcheck source=tools/signing.sh
+source "$ROOT/tools/signing.sh"
+signing_resolve "$SIGN_ARG"
+BUILD_ARGS+=(--sign "$SIGN_MODE")
 
 echo "▸ Building the app…"
-"$ROOT/build-app.sh" ${OFFLINE_ARG[@]+"${OFFLINE_ARG[@]}"}
+"$ROOT/build-app.sh" "${BUILD_ARGS[@]}"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 FINAL_DMG="$OUT_DIR/LLMBar-$VERSION$SUFFIX.dmg"
@@ -75,17 +88,19 @@ DEVICE=""
 echo "▸ Compressing final DMG…"
 hdiutil convert "$RW_DMG" -quiet -format UDZO -imagekey zlib-level=9 -o "$FINAL_DMG"
 
+signing_dmg "$FINAL_DMG"
+
 echo "✓ Done: $FINAL_DMG ($(du -h "$FINAL_DMG" | cut -f1))"
 echo "  Open it and drag LLMBar to Applications."
 
 # Notarization (optional). Apple will not vouch for an ad-hoc signature, so a DMG downloaded from the
 # releases page is blocked on first launch ("Apple could not verify that this file is free of malware").
-# Set both of these to ship a DMG that opens with no warning at all:
-#   LLMBAR_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)"   # read by build-app.sh
-#   LLMBAR_NOTARY_PROFILE=<name>                                     # xcrun notarytool store-credentials <name>
+# Build with --sign developer-id and set LLMBAR_NOTARY_PROFILE to ship a DMG that opens with no warning at all:
+#   xcrun notarytool store-credentials <name>      # once: your Apple ID, team and an app-specific password
+#   LLMBAR_NOTARY_PROFILE=<name> ./build-dmg.sh --sign developer-id
 if [[ -n "${LLMBAR_NOTARY_PROFILE:-}" ]]; then
-  if codesign -dv "$APP" 2>&1 | grep -q "TeamIdentifier=not set"; then
-    echo "✗ Notarization needs a Developer ID signature: set LLMBAR_SIGN_IDENTITY and build again." >&2
+  if [ "$SIGN_MODE" != "developer-id" ]; then
+    echo "✗ Notarization needs a Developer ID signature: build with --sign developer-id." >&2
     exit 1
   fi
   echo "▸ Notarizing (this waits for Apple)…"
@@ -93,7 +108,7 @@ if [[ -n "${LLMBAR_NOTARY_PROFILE:-}" ]]; then
   xcrun stapler staple "$FINAL_DMG"
   echo "✓ Notarized and stapled: it opens with no warning."
 else
-  echo "  Not notarized (ad-hoc signature). Whoever downloads it sees Gatekeeper's warning once and has to"
+  echo "  Not notarized ($SIGN_MODE signature). Whoever downloads it sees Gatekeeper's warning once and has to"
   echo "  allow it in System Settings ▸ Privacy & Security, or run:"
   echo "    xattr -dr com.apple.quarantine /Applications/LLMBar.app"
 fi

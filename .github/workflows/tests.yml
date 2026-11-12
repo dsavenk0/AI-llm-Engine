@@ -17,7 +17,7 @@ jobs:
   test:
     name: Tests and app build
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45            # the suite alone took 28 min on macos-15; the app build comes after it
 
     steps:
       - uses: actions/checkout@v4

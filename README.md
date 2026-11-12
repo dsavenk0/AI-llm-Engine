@@ -5,7 +5,7 @@
 **Private AI for your whole Mac — chat, voice, code and your browser, on one local model.** No cloud, no
 subscription, no account: download a model once and it works offline, with nothing ever leaving the machine.
 
-### [⬇ Download LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg) · [Русская версия](README.ru.md)
+### [⬇ Download LLMBar.dmg](https://github.com/dsavenk0/AI-llm-Engine/releases/latest/download/LLMBar.dmg)
 
 <sub>**First launch:** the app is signed ad hoc, not notarized, so macOS blocks it once. Press **Done**, then
 **System Settings ▸ Privacy & Security ▸ Open Anyway** — or `xattr -dr com.apple.quarantine /Applications/LLMBar.app`.</sub>
@@ -291,9 +291,14 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
 >
 > A downloaded copy is blocked once by Gatekeeper, because the build is signed ad hoc rather than notarized:
 > allow it in **System Settings ▸ Privacy & Security**, or run `xattr -dr com.apple.quarantine
-> /Applications/LLMBar.app`. Building it yourself avoids this entirely — `build-app.sh` clears the flag. To ship
-> a DMG that opens with no warning, sign with a Developer ID (`LLMBAR_SIGN_IDENTITY`) and notarize
-> (`LLMBAR_NOTARY_PROFILE`); `build-dmg.sh` does both when those are set.
+> /Applications/LLMBar.app`. Building it yourself avoids this entirely — `build-app.sh` clears the flag.
+>
+> **Signing** has two modes, one switch for both scripts: `--sign adhoc` (the default — no Apple account, works on
+> the Mac that built it and on CI) and `--sign developer-id` (a *Developer ID Application* certificate, the
+> hardened runtime and a secure timestamp; the one certificate in the keychain is found by itself, or name it with
+> `LLMBAR_SIGN_IDENTITY`). `./build-app.sh --sign status` shows what would be used. To ship a DMG that opens with
+> no warning: `xcrun notarytool store-credentials <name>` once, then
+> `LLMBAR_NOTARY_PROFILE=<name> ./build-dmg.sh --sign developer-id` — it signs, notarizes and staples.
 
 LLMBar is the lightweight UI of the engine. It lives in the menu bar as a small `Ai_` icon. Click the icon to open a
 frosted-glass panel right under it; click again, press Esc or click elsewhere to hide it (the model keeps running).
@@ -323,6 +328,12 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 
 ## CLI
 
+<p align="center">
+  <img src="docs/assets/lumo-en.svg" width="620" alt="Lumo, the mascot, greets you in the terminal with a tip of the day">
+</p>
+
+`./llm` opens with **Lumo**, a small glowing creature grown out of LLMBar's orb, saying good morning (or evening) with a tip of the day.
+
 ```
 ./llm                      interactive menu
 ./llm help [<command>]     every command, grouped; one command's usage and flags
@@ -337,6 +348,7 @@ from the DMG on another Mac, it runs its bundled copy and keeps its config and `
 ./llm web search "<q>"     web search + the top pages as one JSON line (what the voice chat uses)
 ./llm inspect [<#|name>]   what is inside a model, from its headers: layers, storage types, bits per weight, biggest tensors
 ./llm read <file>          extract text from a PDF/DOCX/PPTX/HTML/text document (or OCR a scan/image) to attach as a source
+./llm knowledge …          document libraries the chats can search: create, add, search, delete (see Knowledge)
 ./llm transcribe <audio>   on-device speech-to-text with Whisper (MLX); install once with ./llm setup --audio
 ./llm say "<text>"         on-device text-to-speech with Kokoro (MLX): plays it and saves a WAV
 ./llm agent [dir]          terminal coding agent (files, search, edits, shell)
@@ -588,6 +600,29 @@ widget's taps are `llmbar://` links into the one app. WidgetKit lists extensions
 right-click the desktop → *Edit Widgets* → *LLMBar*. It is signed ad hoc (no developer account), so it works on
 the Mac that built it.
 
+### Knowledge: your documents for the chats (optional)
+
+Libraries of your own documents — PDFs, Markdown, text, source code — that a chat searches before it answers, with
+the sources it was given shown under the reply (`manual.pdf, p. 12`, `README.md § Install`, `src/app.py L40-88`).
+
+- **Nothing runs until you add documents.** With no library ticked in a chat, the request is exactly what it was
+  without Knowledge: nothing is searched, opened or added to the prompt. There is no background service and no
+  second model — search is SQLite full-text (BM25), in the Python standard library, so the loaded LLM keeps the
+  memory (measured: well under 1 ms per search, a few MB while it runs, see
+  [docs/KNOWLEDGE_ENGINE_ARCHITECTURE.md](docs/KNOWLEDGE_ENGINE_ARCHITECTURE.md)).
+- **Libraries** live in LLMBar ▸ Tools ▸ *Knowledge*: create, rename and delete them, add files or whole folders,
+  remove a document, and try a question to see what a chat would be given. Deleting removes the index only — your
+  files are never changed or moved.
+- **In a chat**, the 📚 button next to the message box ticks the libraries it searches (code editor and quick chat).
+  In the editor, *Add files to this chat…* indexes documents for that conversation alone; they leave the index when
+  the chat is deleted, unless a library holds them too.
+- **PDFs** are read page by page, so answers cite pages; pages without a text layer (scans) are read with the Mac's
+  own OCR (Vision), and only those pages. Credentials (`.env`, keys) and `.gitignore`d files are never indexed.
+- Off entirely: LLMBar settings ▸ *Knowledge module*.
+
+From the terminal: `./llm knowledge create Manuals`, `./llm knowledge add Manuals ~/Docs/pump.pdf`,
+`./llm knowledge search Manuals "reset code"`, `./llm knowledge delete Manuals` (`--json` for scripts).
+
 ### Benchmarks
 
 `./llm eval` has two modes. Without arguments it runs the small built-in regression suite (math, code, sanity).
@@ -740,10 +775,10 @@ See [CHANGELOG.md](CHANGELOG.md) ([по-русски](CHANGELOG.ru.md)).
 engine/   model.py (layers, Hadamard, fused ops) · loader.py · vision.py · gated_delta.py
           tokenizer.py · generate.py (cache, sampling) · server.py (HTTP) · steering.py (activation edits)
           gguf.py · gguf_tensors.py · gguf_tokenizer.py · dense.py · gguf_engine.py (own GGUF decoder)
-          gguf_server.py (llama.cpp behind the same API)
+          gguf_server.py (llama.cpp behind the same API) · knowledge.py (document libraries, SQLite FTS5)
 llm.py    CLI / menu (stdlib only) — locales/ru.json for Russian
 agent.py  terminal coding agent (stdlib only) · harness/ optional web / MCP / memory / compaction / fix-tests modules
-app/      LLMBar.swift (menu-bar app) · editor/ (LLM Editor) · voice/ (LLM Voice)
+app/      LLMBar.swift (menu-bar app) · editor/ (LLM Editor) · voice/ (LLM Voice) · knowledge/ (Knowledge client + chat picker; the page is bar/KnowledgePage.swift)
 tools/    icon / DMG background / banner generators (Swift)
 build-app.sh (one app: panel + editor + voice + widget), build-dmg.sh
 tests/    unittest suite · perf.py + perf_baseline.json · eval.py + eval_baseline.json
@@ -753,3 +788,7 @@ tests/    unittest suite · perf.py + perf_baseline.json · eval.py + eval_basel
 
 Apache-2.0 — see [LICENSE](LICENSE). Parts are derived from vMLX and jang (Apache-2.0), and from mlx-lm and mlx-vlm
 (MIT). See [NOTICE](NOTICE) and `third_party/`. Model weights are not included and have their own licenses.
+
+---
+
+[Русская версия](README.ru.md)

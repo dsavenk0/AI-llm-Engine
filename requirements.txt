@@ -1,4 +1,6 @@
-mlx>=0.32.3
+# mlx 0.32.4 changes the rounding of the grouped expert kernel: streamed MoE experts drift past
+# tolerance (tests/test_gguf_engine.py, MixtureOfExperts). Kept below it until that test passes on it.
+mlx>=0.32.3,<0.32.4
 tokenizers>=0.21
 jinja2>=3.1
 numpy>=1.26
