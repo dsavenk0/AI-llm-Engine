@@ -252,3 +252,46 @@ class TestStepEndpoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNewActionsAndScreenshots(unittest.TestCase):
+    """scroll / press / wait, and a screenshot that reaches only a model that can see."""
+
+    def ok(self, action):
+        return agent.validate(action, agent.clean_snapshot(SNAP))
+
+    def test_scroll_press_and_wait_are_normalised_and_bounded(self):
+        self.assertEqual(self.ok({"action": "scroll"}), {"action": "scroll", "direction": "down"})
+        self.assertEqual(self.ok({"action": "scroll", "direction": "up"})["direction"], "up")
+        self.assertEqual(self.ok({"action": "scroll", "ref": "e1"}), {"action": "scroll", "direction": "down", "ref": "e1"})
+        with self.assertRaisesRegex(agent.AgentError, '"up" or "down"'):
+            self.ok({"action": "scroll", "direction": "sideways"})
+        self.assertEqual(self.ok({"action": "press", "key": "Enter", "ref": "e2", "why": "go"}),
+                         {"action": "press", "key": "Enter", "why": "go", "ref": "e2"})
+        self.assertEqual(self.ok({"action": "press", "key": "Escape"}), {"action": "press", "key": "Escape", "why": ""})
+        for key in ("F5", "Meta+R", "a", None):
+            with self.assertRaisesRegex(agent.AgentError, "press takes one of"):
+                self.ok({"action": "press", "key": key})
+        with self.assertRaisesRegex(agent.AgentError, "not an element"):
+            self.ok({"action": "press", "key": "Enter", "ref": "e99"})
+        self.assertEqual(self.ok({"action": "wait", "seconds": 60})["seconds"], 10)
+        self.assertEqual(self.ok({"action": "wait", "seconds": 0})["seconds"], 1)
+
+    def test_the_prompt_tells_the_model_about_the_new_actions(self):
+        msgs, _ = agent.build_messages("x", SNAP, [])
+        for word in ('"scroll"', '"press"', '"wait"', "Enter"):
+            self.assertIn(word, msgs[0]["content"])
+
+    def test_a_screenshot_becomes_an_image_part_and_a_bad_one_is_refused(self):
+        shot = "data:image/jpeg;base64,/9j/4AAQ"
+        msgs, _ = agent.build_messages("x", SNAP, [], shot)
+        content = msgs[1]["content"]
+        self.assertEqual(content[1], {"type": "image_url", "image_url": {"url": shot}})
+        self.assertIn("screenshot of the visible part", content[0]["text"])
+        self.assertIsInstance(agent.build_messages("x", SNAP, [])[0][1]["content"], str)     # none: plain text
+        from assistant import prompts
+        for bad in ("data:text/html;base64,AAAA", "https://evil.example/x.png", "data:image/png;base64,<script>",
+                    "data:image/png;base64," + "A" * (3 * 2**20), 5):
+            with self.assertRaises(prompts.PromptError):
+                prompts.image_url(bad)
+        self.assertIsNone(prompts.image_url(None))

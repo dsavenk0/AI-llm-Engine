@@ -87,6 +87,10 @@ Errors are `{"error": {"code": "…", "message": "…", …}}`.
  "tone": "clearer", "thinking": false, "max_tokens": 1024}
 ```
 
+`image` (optional): a screenshot of the tab as a `data:image/jpeg|png|webp;base64,…` URL of at most 3 MB; it is
+attached to the question for a model with vision, and refused with 400 `no_vision` for any other. `shared`
+then says `"screenshot": true`. A request body may be up to 8 MB.
+
 `task`: `ask` (needs `question`) · `summarize` · `explain` · `translate` (`lang`) · `rewrite` (`tone`:
 clearer, shorter, more formal, more friendly) · `key_points`.
 
@@ -124,8 +128,13 @@ The snapshot is cut to a known shape and size before it is used (150 elements, b
 keys dropped; a sensitive field's value is never put in the prompt). The reply is one validated action:
 
 ```json
-{"action": {"action": "click", "ref": "e1", "why": "…"}, "attempts": 1}
+{"action": {"action": "click", "ref": "e1", "why": "…"}, "attempts": 1, "saw_screenshot": false}
 ```
+
+`screenshot` (optional, same form as `image` in a chat) goes with the step when the person turned 📷 on. It
+reaches the model only when the engine reports vision; otherwise it is dropped and `saw_screenshot` is false.
+Whether the action may run unasked is the extension's decision (its policy and the mode the person chose), not
+the service's.
 
 | `action` | Fields | Validated as |
 |---|---|---|
@@ -134,6 +143,9 @@ keys dropped; a sensitive field's value is never put in the prompt). The reply i
 | `fill_form` | `fields: [{ref, value}]` | 1 – 6 fields, no ref twice |
 | `navigate` | `url` | `http(s)://host…`, no credentials |
 | `find` | `query` | non-empty; read-only |
+| `scroll` | `direction` (`up` / `down`), or `ref` | a ref from the list when given; changes nothing |
+| `press` | `key`, `ref` optional | one of Enter, Tab, Escape, ArrowDown/Up/Left/Right, PageDown/Up, Home, End, Backspace, Space |
+| `wait` | `seconds` | clamped to 1 – 10 |
 | `ask_user` | `question` | non-empty |
 | `done` | `answer` | text |
 

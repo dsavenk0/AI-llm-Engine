@@ -31,7 +31,7 @@ from . import agent, prompts
 
 PROTOCOL = 1
 PORT = 8093
-MAX_BODY = 4 * 2**20
+MAX_BODY = 8 * 2**20          # page text and, when asked for, a screenshot
 EXTENSION_SCHEMES = ("safari-web-extension", "chrome-extension", "moz-extension")
 HOME = os.environ.get("ASSISTANT_HOME") or os.path.expanduser("~/Library/Application Support/AI-llm-Engine")
 TOKEN_FILE = os.path.join(HOME, "browser-assistant.json")
@@ -477,8 +477,10 @@ class Assistant:
         if not h:
             raise Conflict("engine_offline", "the engine is not running — start it first")
         try:
-            messages, snap = agent.build_messages(req.get("goal"), req.get("snapshot"), req.get("history"))
-        except agent.AgentError as e:
+            # a screenshot only reaches a model that can see; for any other it is dropped, and the reply says so
+            shot = prompts.image_url(req.get("screenshot")) if h.get("vision") else None
+            messages, snap = agent.build_messages(req.get("goal"), req.get("snapshot"), req.get("history"), shot)
+        except (agent.AgentError, prompts.PromptError) as e:
             raise Conflict("bad_request", str(e)) from None
         g = Generation(session)
         rid = req.get("request_id")
@@ -494,7 +496,8 @@ class Assistant:
                 if g.cancelled:
                     raise Conflict("cancelled", "stopped")
                 try:
-                    return {"action": agent.validate(agent.parse_action(text), snap), "attempts": attempt}
+                    return {"action": agent.validate(agent.parse_action(text), snap), "attempts": attempt,
+                            "saw_screenshot": shot is not None}
                 except agent.AgentError as e:
                     problem = str(e)
                     messages = messages + [
@@ -516,6 +519,9 @@ class Assistant:
         if not h:
             raise Conflict("engine_offline", "the engine is not running — start it first")
         max_tokens = max(64, min(int(req.get("max_tokens") or 1024), 4096))
+        if req.get("image") and not h.get("vision"):
+            raise Conflict("no_vision", "the loaded model cannot see images — pick a model with vision to ask about "
+                                        "a screenshot")
         try:
             messages, shared = prompts.build(req, int(h.get("context") or 4096), max_tokens)
         except prompts.PromptError as e:

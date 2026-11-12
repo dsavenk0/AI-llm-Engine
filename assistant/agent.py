@@ -21,7 +21,9 @@ MAX_FIELDS = 6
 MAX_VALUE = 2000
 MAX_HISTORY = 6
 REF = re.compile(r"^e\d{1,5}$")
-ACTIONS = ("click", "fill", "fill_form", "navigate", "find", "ask_user", "done")
+ACTIONS = ("click", "fill", "fill_form", "navigate", "find", "scroll", "press", "wait", "ask_user", "done")
+KEYS = ("Enter", "Tab", "Escape", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End",
+        "Backspace", "Space")
 
 SYSTEM = (
     "You control a web browser for the user, one step at a time. You are given the user's goal, what the "
@@ -32,11 +34,17 @@ SYSTEM = (
     '  {"action":"fill_form","fields":[{"ref":"e3","value":"…"},{"ref":"e4","value":"…"}],"why":"…"}   (at most 6)\n'
     '  {"action":"navigate","url":"https://…","why":"…"}\n'
     '  {"action":"find","query":"text to look for"}   (when the element you need is not in the list)\n'
+    '  {"action":"scroll","direction":"down"}   (or "up"; or {"action":"scroll","ref":"e7"} to bring one element into '
+    "view) — to see more of a long page or list\n"
+    '  {"action":"press","key":"Enter","ref":"e3","why":"…"}   (keys: ' + ", ".join(KEYS) + "; ref optional — "
+    "e.g. Enter in a search box, ArrowDown in a suggestion list, Escape to close a dialog)\n"
+    '  {"action":"wait","seconds":2}   (1–10: the page is still loading or updating)\n'
     '  {"action":"ask_user","question":"…"}   (the goal is ambiguous, several elements could match, or you need a '
     "value you were not given)\n"
     '  {"action":"done","answer":"…"}   (the goal is achieved, or cannot be)\n'
     "Rules:\n"
-    "- Use only refs from the element list. One action per reply.\n"
+    "- Use only refs from the element list. One action per reply. fill also picks an option in a list (value = the "
+    "option's text).\n"
     "- Never invent personal details, addresses, card numbers or passwords; ask the user instead.\n"
     "- Never enter passwords, card numbers or one-time codes. Do not touch CAPTCHAs.\n"
     "- Do not buy, pay, send, delete or submit unless the goal asks for exactly that — and even then the user "
@@ -110,7 +118,7 @@ def _fence(text):
     return prompts._clean(text, 100000)[0]
 
 
-def build_messages(goal, snapshot, history):
+def build_messages(goal, snapshot, history, screenshot=None):
     goal = (goal or "").strip()
     if not goal:
         raise AgentError("a goal is needed")
@@ -131,8 +139,11 @@ def build_messages(goal, snapshot, history):
         if isinstance(h, dict):
             done.append(f"{len(done) + 1}. {_str(h.get('summary'), 300)} → {_str(h.get('result'), 300)}")
     user = (f"Goal: {goal}\n\nSo far:\n" + ("\n".join(done) if done else "nothing yet") +
-            "\n\n<page>\n" + _fence("\n".join(page)) + "\n</page>\n\nWhat is the next single action?")
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], snap
+            "\n\n<page>\n" + _fence("\n".join(page)) + "\n</page>\n\n" +
+            ("A screenshot of the visible part of the page is attached: use it to see the layout and what the list "
+             "cannot show (images, maps, grids, charts), but act only through refs from the list.\n\n" if screenshot else "") +
+            "What is the next single action?")
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompts.with_image(user, screenshot)}], snap
 
 
 def _first_object(text):
@@ -214,6 +225,28 @@ def validate(action, snapshot):
         if not isinstance(url, str) or len(url) > 2000 or not re.match(r"^https?://[^\s/@]+(/|$|\?|#)", url):
             raise AgentError("a navigation needs an http(s) address without credentials")
         return {"action": "navigate", "url": url, "why": why}
+    if kind == "scroll":
+        ref = action.get("ref")
+        if ref is not None:
+            return {"action": "scroll", "direction": "down", "ref": ref_of(ref)}
+        d = action.get("direction", "down")
+        if d not in ("up", "down"):
+            raise AgentError('scroll direction is "up" or "down"')
+        return {"action": "scroll", "direction": d}
+    if kind == "press":
+        key = action.get("key")
+        if key not in KEYS:
+            raise AgentError(f"press takes one of: {', '.join(KEYS)}")
+        out = {"action": "press", "key": key, "why": why}
+        if action.get("ref") is not None:
+            out["ref"] = ref_of(action.get("ref"))
+        return out
+    if kind == "wait":
+        try:
+            sec = int(action.get("seconds", 2))
+        except (TypeError, ValueError):
+            raise AgentError("wait takes a number of seconds") from None
+        return {"action": "wait", "seconds": max(1, min(10, sec))}
     if kind == "find":
         q = _str(action.get("query"), 200).strip()
         if not q:

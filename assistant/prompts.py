@@ -49,6 +49,27 @@ def _clean(text, limit):
     return (cut[:space] if space > 0 else cut) + " …[truncated]", n, True
 
 
+IMAGE = re.compile(r"^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$")
+MAX_IMAGE = 3 * 2**20          # a screenshot of the visible part of a tab, already scaled down by the extension
+
+
+def image_url(value):
+    """A screenshot the extension sent, as a data URL the engine takes — or None when there is none. A value that is
+    not a small base64 JPEG / PNG / WebP is an error, never passed on."""
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > MAX_IMAGE or not IMAGE.match(value):
+        raise PromptError("the screenshot must be a JPEG, PNG or WebP data URL of at most 3 MB")
+    return value
+
+
+def with_image(text, image):
+    """A user message's content: the text alone, or the text and the screenshot (the engine's image_url part)."""
+    if not image:
+        return text
+    return [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image}}]
+
+
 def build(req, context_tokens, max_tokens):
     """(messages, shared) for one request. `req` is the extension's body: task, question, page {title, url,
     text}, selection, lang, tone. `shared` says exactly what was sent: characters of each part and whether
@@ -86,9 +107,13 @@ def build(req, context_tokens, max_tokens):
     request = instruction + (f"\n\nThe user's request: {question}" if question else "")
     if sel and task != "ask":
         request += "\nWork on the selection; use the page only as background."
+    image = image_url(req.get("image"))
+    if image:
+        parts.append("A screenshot of the visible part of the page is attached.")
     messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": "\n\n".join(parts) + "\n\n" + request}]
+                {"role": "user", "content": with_image("\n\n".join(parts) + "\n\n" + request, image)}]
     shared = {"title": bool(title), "url": url,
               "page_chars": len(body), "page_chars_total": body_n, "page_truncated": body_cut,
-              "selection_chars": len(sel), "selection_chars_total": sel_n, "selection_truncated": sel_cut}
+              "selection_chars": len(sel), "selection_chars_total": sel_n, "selection_truncated": sel_cut,
+              "screenshot": bool(image)}
     return messages, shared
