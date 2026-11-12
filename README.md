@@ -38,6 +38,13 @@ subscription, no account: download a model once and it works offline, with nothi
   everything the app does.
 
 <p align="center">
+  <img src="docs/assets/carousel.webp" width="720" alt="LLMBar: the engine panel, the browser assistant, the code editor, the voice chat and the model list">
+</p>
+
+<details>
+<summary>All screenshots</summary>
+
+<p align="center">
   <img src="docs/assets/tile-engine.png" width="396" alt="Menu-bar engine: status, token ledger, memory">
   <img src="docs/assets/tile-editor.png" width="396" alt="Code editor with the assistant">
   <br>
@@ -46,6 +53,8 @@ subscription, no account: download a model once and it works offline, with nothi
   <br>
   <img src="docs/assets/tile-browser.png" width="396" alt="Browser assistant: a side panel that acts on the page and asks before a risky step">
 </p>
+
+</details>
 
 ## Why
 

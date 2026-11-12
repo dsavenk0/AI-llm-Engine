@@ -38,6 +38,13 @@
   строка (`./llm`), которая умеет всё, что умеет приложение.
 
 <p align="center">
+  <img src="docs/assets/carousel.webp" width="720" alt="LLMBar: панель движка, браузерный ассистент, редактор кода, голосовой чат и список моделей">
+</p>
+
+<details>
+<summary>Все скриншоты</summary>
+
+<p align="center">
   <img src="docs/assets/tile-engine.png" width="396" alt="Движок в строке меню: статус, счётчик токенов, память">
   <img src="docs/assets/tile-editor.png" width="396" alt="Редактор кода с ассистентом">
   <br>
@@ -46,6 +53,8 @@
   <br>
   <img src="docs/assets/tile-browser.png" width="396" alt="Браузерный ассистент: боковая панель действует на странице и спрашивает перед рискованным шагом">
 </p>
+
+</details>
 
 ## Зачем
 
