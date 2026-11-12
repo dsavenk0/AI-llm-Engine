@@ -114,6 +114,7 @@ class CompatEngine(DecodeLoop):
 
         self.sleeping, self.last_used = False, time.time()
         self.lock = threading.Lock()
+        self.memory = memory.Manager(self, mx.clear_cache)   # what to give back under pressure, in order
         self.model = self.tok = self.rt = None
         self._load()
         self._attach_runtime()

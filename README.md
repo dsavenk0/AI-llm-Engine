@@ -411,6 +411,16 @@ default, and a pass that ends up with one request runs the ordinary path instead
 and speculation a merged pass has to give up. Requests carrying images, a reasoning block or a `response_format`
 are never merged. `--batch-max` caps a pass (8).
 
+**Who goes first.** Everything that uses the model — chats, agents, the editor, voice, the browser assistant,
+embeddings — waits in one queue. A request may say how urgent it is with the `X-Priority` header (or a `priority`
+field in the body): `interactive` runs before `normal` (the default) and `normal` before `background`, in arrival
+order within each; a request promoted one step for every 30 s it has waited, so background work is delayed, never
+starved. LLMBar's voice and the browser assistant send `interactive`. While the Mac is past its RAM limit,
+`background` requests wait (up to a minute) instead of adding to the pressure, a merged pass takes fewer requests,
+and an idle engine gives back what it can without unloading — freed buffers, restore points, then the conversation
+cache, which is written to the SSD prefix cache first. `GET /health` shows the queue (`scheduler`) and where memory
+is and what can be given back (`memory_manager`).
+
 Engine switches (also in LLMBar's settings): `--log-level error|warning|info|debug|trace` (every line is tagged
 `[request]`, `[memory]`, `[model]`, `[cache]`, `[sleep]`, `[quality]` or `[error]`), `--fallback-model off` (a request
 naming another model gets `404 model_not_found` instead of being answered by the loaded one),

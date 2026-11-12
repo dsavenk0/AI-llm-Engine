@@ -65,19 +65,20 @@ class TestFinishReason(unittest.TestCase):
 
 
 class TestAdmission(unittest.TestCase):
-    """The request-admission cap: over the limit a request is refused, releasing frees a slot, 0 = unlimited."""
+    """The request-admission cap (engine/scheduler.py): over the limit a request is refused, leaving frees a
+    slot, 0 = unlimited."""
 
     def test_cap_release_and_unlimited(self):
-        from engine.server import Admission
-        a = Admission(2)
-        self.assertTrue(a.acquire())
-        self.assertTrue(a.acquire())
-        self.assertFalse(a.acquire())           # at the cap → refused
-        a.release()
-        self.assertTrue(a.acquire())            # a freed slot is reusable
+        from engine.scheduler import Scheduler
+        a = Scheduler(2)
+        self.assertTrue(a.admit())
+        self.assertTrue(a.admit())
+        self.assertFalse(a.admit())             # at the cap → refused
+        a.leave()
+        self.assertTrue(a.admit())              # a freed slot is reusable
         self.assertEqual(a.inflight, 2)
-        u = Admission(0)
-        self.assertTrue(all(u.acquire() for _ in range(50)))   # 0 = no cap
+        u = Scheduler(0)
+        self.assertTrue(all(u.admit() for _ in range(50)))     # 0 = no cap
 
 
 class TestBatcher(unittest.TestCase):

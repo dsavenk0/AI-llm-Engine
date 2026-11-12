@@ -177,7 +177,7 @@ class EngineControl:
         """(status, json) of a POST to the engine."""
         port, key = self._base()
         req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json",
+                                     headers={"Content-Type": "application/json", "X-Priority": "interactive",
                                               **({"Authorization": f"Bearer {key}"} if key else {})})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -200,6 +200,7 @@ class EngineControl:
         sock = conn.sock
         conn.request("POST", "/v1/chat/completions", body=json.dumps(body).encode(),
                      headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                              "X-Priority": "interactive",      # someone is reading the answer in the browser
                               **({"Authorization": f"Bearer {key}"} if key else {})})
         return sock, conn.getresponse()
 

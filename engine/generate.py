@@ -140,6 +140,7 @@ class Engine(DecodeLoop):
         self.max_tokens = min(self.max_tokens, self.max_context // 2)
 
         self.lock = threading.Lock()
+        self.memory = memory.Manager(self, mx.clear_cache)   # what to give back under pressure, in order
         self.cache = None
         self.cache_tokens = []    # tokens whose effects are in self.cache
         self.snapshots = []       # [(token prefix, per-layer SSM snapshots)] — cheap restore points

@@ -5,6 +5,11 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 ## Unreleased
 
 ### Added
+- **One queue for everything that uses the model, with priorities.** Voice and the browser assistant go ahead of
+  chats, chats ahead of background agents (`X-Priority: interactive | normal | background`); waiting raises a
+  request's priority, so nothing starves. While the Mac is past its RAM limit, background requests wait, merged
+  passes take fewer requests, and an idle engine gives memory back on its own — the conversation cache is saved
+  to the SSD first. `/health` shows the queue and the memory picture.
 - **Browser Assistant can click, fill and navigate — each step only after you approve it.** Give the Safari
   extension a goal; it reads the page, the local model proposes one action, and a card on the page says
   exactly what will happen, built from the element itself rather than from the model's words. Passwords, card

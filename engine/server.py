@@ -18,6 +18,8 @@ import threading
 import time
 import uuid
 
+from engine.scheduler import RANK, Scheduler, parse_priority  # noqa: E402
+
 ENGINE = None
 ARGS = None
 JOBS = queue.Queue()
@@ -25,34 +27,6 @@ _DONE = object()
 
 
 MAX_BODY = 64 * 2**20          # bytes of one request body
-
-
-class Admission:
-    """Caps how many generation requests are in flight at once (running on the engine plus waiting for the
-    lock). Over the cap a request is refused with 503 instead of piling up unbounded threads and prompt
-    buffers — a coding agent, a chat, the editor and voice all hitting one model stay bounded. 0 = no cap.
-
-    This is the scheduler's admission half; `Batcher` below is the merging half."""
-
-    def __init__(self, limit=0):
-        self.limit = limit
-        self.n = 0
-        self.lock = threading.Lock()
-
-    def acquire(self):
-        with self.lock:
-            if self.limit and self.n >= self.limit:
-                return False
-            self.n += 1
-            return True
-
-    def release(self):
-        with self.lock:
-            self.n = max(0, self.n - 1)
-
-    @property
-    def inflight(self):
-        return self.n
 
 
 class Batcher:
@@ -63,6 +37,9 @@ class Batcher:
     together reach 75.3 tok/s — the same as one client alone (1.01x), because ~68 % of a decode step is
     reading the weights and every request reads them again. One merged pass (tests/bench_batch.py, 48 tokens
     per request) gives 1.69x at two rows, 2.52x at four and 2.45x at eight.
+
+    Which requests run, in what order, and how many rows one pass may take while memory is tight is the
+    scheduler's (engine/scheduler.py); this class only merges what it is handed.
 
     A lone request never pays for this: a pass that ends up with one row runs the ordinary path, which keeps
     the prefix cache and speculative decoding that a merged pass has to give up (and which are worth ×4.4 on
@@ -115,12 +92,14 @@ class Batcher:
                     left = deadline - time.time()
                     if left <= 0 or not self.cv.wait(timeout=left):
                         break
-                rows, self.waiting = self.waiting[:self.max_rows], self.waiting[self.max_rows:]
+                n = SCHED.rows_allowed(self.max_rows)          # fewer rows while memory is tight
+                rows, self.waiting = self.waiting[:n], self.waiting[n:]
             self._run(rows)
 
     def _run(self, rows):
         try:
-            with ENGINE.lock:
+            urgent = min((r.req.get("priority", "normal") for r in rows), key=lambda p: RANK[p])
+            with SCHED.turn(urgent, f"batch of {len(rows)}" if len(rows) > 1 else "chat"):
                 if len(rows) == 1:
                     self._solo(rows[0])
                 else:
@@ -184,13 +163,13 @@ def generate_stream(req):
     if BATCHER.takes(req):
         yield from BATCHER.submit(req)
         return
-    with ENGINE.lock:
+    with SCHED.turn(req.get("priority", "normal"), "chat"):
         yield from run_job(lambda: ENGINE.generate(req["ids"], req["media"], req["max_tokens"], req["sampling"],
                                                    req["stop"], req["should_stop"], seed=req["seed"],
                                                    thinking_open=req["thinking_open"], fmt=req["fmt"]))
 
 
-ADMISSION = Admission(0)
+SCHED = Scheduler(0)      # admission, order and memory-aware deferral for everything that uses the model
 GEN_PATHS = ("/v1/chat/completions", "/chat/completions", "/v1/messages", "/api/chat", "/api/generate")
 EMBED_PATHS = ("/v1/embeddings", "/embeddings", "/api/embed", "/api/embeddings")
 SHUTTING_DOWN = threading.Event()        # set on SIGTERM: new generation requests are refused, in-flight drain
@@ -208,6 +187,9 @@ def worker(init):
     """
     global ENGINE
     ENGINE = protocol.check(init())      # a backend that owes the protocol something stops here, by name
+    mgr = getattr(ENGINE, "memory", None)
+    if mgr is not None:
+        SCHED.pressure = mgr.state
     READY.set()
     BATCHER.start()                      # no-op unless --batch-window is set; needs ENGINE for its lock
     # how often an idle engine looks at the clock: 20 s, or a quarter of a very short idle-sleep
@@ -219,6 +201,10 @@ def worker(init):
             idle = time.time() - ENGINE.last_used
             if ARGS.idle_sleep > 0 and not ENGINE.sleeping and idle > ARGS.idle_sleep * 60:
                 ENGINE.sleep()
+            elif mgr is not None and not ENGINE.sleeping and not SCHED.locked():
+                given = mgr.relieve()          # the Mac is past its limit and nothing is running: give back
+                if given:                      # what can go without unloading (the conversation → SSD first)
+                    log(f"memory: idle under pressure, released {', '.join(given)}")
             continue
         try:
             for item in fn():
@@ -542,14 +528,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         make them wait for a reload, so it is refused with 409 unless `force` — and even then it waits for
         the running request to finish rather than cutting it off."""
         if wake:
-            with ENGINE.lock:
+            with SCHED:
                 next(run_job(lambda: iter([ENGINE.ensure_awake()])))
             return self._json(200, {"state": "awake"})
-        if ADMISSION.inflight and not force:
-            return self._json(409, {"error": {"message": f"{ADMISSION.inflight} request(s) are using the model",
+        if SCHED.inflight and not force:
+            return self._json(409, {"error": {"message": f"{SCHED.inflight} request(s) are using the model",
                                               "type": "conflict", "code": "model_in_use"},
-                                    "inflight": ADMISSION.inflight})
-        with ENGINE.lock:
+                                    "inflight": SCHED.inflight})
+        with SCHED:
             if not ENGINE.sleeping:
                 next(run_job(lambda: iter([ENGINE.sleep()])))
         return self._json(200, {"state": "sleeping"})
@@ -577,8 +563,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "backend": ENGINE.backend,
                 "steer": {"file": os.path.basename(ARGS.steer.rstrip("/")), "alpha": ARGS.steer_alpha}
                 if ARGS.steer else None,
-                "busy": ENGINE.lock.locked(),
-                "inflight": ADMISSION.inflight, "max_queue": ADMISSION.limit,
+                "busy": SCHED.locked(),
+                "inflight": SCHED.inflight, "max_queue": SCHED.limit,
                 "shutting_down": SHUTTING_DOWN.is_set(),
                 "progress": ENGINE.progress,
                 "memory_gb": {"active": round(mx.get_active_memory() / 2**30, 2),
@@ -591,6 +577,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "moe_stream": ENGINE.moe_stats() if protocol.can(ENGINE, "moe_stats") else None,
                 "wired_limit_advice_mb": ENGINE.wired_limit_advice_mb,
                 "memory_breakdown": ENGINE.memory_breakdown(),
+                "memory_manager": ENGINE.memory.report() if getattr(ENGINE, "memory", None) else None,
+                "scheduler": SCHED.snapshot(),
                 "cached_tokens": len(ENGINE.cache_tokens),
                 "requests": ENGINE.stats["requests"], "last": ENGINE.stats["last"],
             })
@@ -633,7 +621,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in GEN_PATHS:
             if SHUTTING_DOWN.is_set():
                 return self._error(503, "the server is shutting down", "server_error", "shutting_down")
-            if not ADMISSION.acquire():
+            if not SCHED.admit():
                 return self._error(503, "the server is busy — too many requests in flight; retry shortly",
                                    "server_error", "overloaded")
             try:
@@ -645,18 +633,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.chat_ollama(body)
                 return self.generate_ollama(body)     # /api/generate
             finally:
-                ADMISSION.release()
+                SCHED.leave()
         if path in EMBED_PATHS:
             if SHUTTING_DOWN.is_set():
                 return self._error(503, "the server is shutting down", "server_error", "shutting_down")
-            if not ADMISSION.acquire():
+            if not SCHED.admit():
                 return self._error(503, "the server is busy — too many requests in flight; retry shortly",
                                    "server_error", "overloaded")
             try:
                 return self.embeddings(body, ollama_wire=path.startswith("/api/"),
                                        legacy=path == "/api/embeddings")
             finally:
-                ADMISSION.release()
+                SCHED.leave()
         if path == "/api/show":
             from engine import ollama
             return self._json(200, ollama.show(self._ollama_card(), context=ENGINE.max_context,
@@ -700,7 +688,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                "invalid_request_error")
         t0 = time.time()
         try:
-            with ENGINE.lock:
+            with SCHED:
                 vectors, tokens = next(run_job(lambda: iter([ENGINE.embed(inputs)])))
         except ContextError as e:
             return self._error(400, str(e), code="context_length_exceeded")
@@ -753,7 +741,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if int(body.get("n") or 1) != 1:
                 return self._error(400, "only n=1 is supported", "invalid_request_error")
-            with ENGINE.lock:                  # wait for a running request, then free the language model
+            with SCHED:                  # wait for a running request, then free the language model
                 if not ENGINE.sleeping:
                     next(run_job(lambda: iter([ENGINE.sleep()])))
             log("images: generating with mflux (the text model stays unloaded meanwhile)")
@@ -847,7 +835,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         req = {"ids": ids, "media": media, "max_tokens": max_tokens, "sampling": sampling, "stop": stop,
                "should_stop": should_stop, "seed": body.get("seed"), "thinking_open": bool(thinking_open),
-               "fmt": fmt}
+               "fmt": fmt, "priority": parse_priority(self.headers.get("X-Priority") or body.get("priority"))}
         try:
             for item in generate_stream(req):
                 if isinstance(item, dict):
@@ -1294,7 +1282,7 @@ def main():
     except ValueError as e:
         ap.error(str(e))
     ARGS.name = ARGS.name or os.path.basename(ARGS.model.rstrip("/")).lower()
-    ADMISSION.limit = max(0, ARGS.max_queue)
+    SCHED.limit = max(0, ARGS.max_queue)
     BATCHER.window = max(0.0, ARGS.batch_window / 1000.0)
     BATCHER.max_rows = max(1, ARGS.batch_max)
 
@@ -1346,7 +1334,7 @@ def main():
         # requests use (stop/restart already has its own SIGKILL fallback if this hangs).
         SHUTTING_DOWN.set()
         grace = time.time() + max(0.0, getattr(ARGS, "shutdown_grace", 0) or 0)
-        while ADMISSION.inflight > 0 and time.time() < grace:
+        while SCHED.inflight > 0 and time.time() < grace:
             time.sleep(0.05)
         try:
             for _ in run_job(_persist_job):

@@ -572,6 +572,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             r.httpMethod = "POST"
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if !Setup.apiKey.isEmpty { r.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+            r.setValue("background", forHTTPHeaderField: "X-Priority")    // a warm-up: never ahead of a person
             r.httpBody = try? JSONSerialization.data(withJSONObject: [
                 "model": "local", "max_tokens": 1, "temperature": 0,
                 "messages": [["role": "user", "content": "."]]] as [String: Any])
@@ -822,6 +823,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !Setup.apiKey.isEmpty { req.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+        req.setValue("interactive", forHTTPHeaderField: "X-Priority")   // a person is listening: first in line
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         req.timeoutInterval = 30
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
@@ -898,6 +900,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !Setup.apiKey.isEmpty { req.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+        req.setValue("interactive", forHTTPHeaderField: "X-Priority")   // a person is listening: first in line
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["prompt": prompt])
         req.timeoutInterval = 1800
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
@@ -956,6 +959,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !Setup.apiKey.isEmpty { req.setValue("Bearer " + Setup.apiKey, forHTTPHeaderField: "Authorization") }
+        req.setValue("interactive", forHTTPHeaderField: "X-Priority")   // a person is listening: first in line
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         req.timeoutInterval = 600
         streamDone = false
