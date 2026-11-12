@@ -157,44 +157,47 @@ def _rgb(r, g, b, bg=False):
     return f"{48 if bg else 38};5;{16 + 36 * q(r) + 6 * q(g) + q(b)}"
 
 
-# "LLM" in the ANSI Shadow style: solid blocks, and box-drawing strokes for the shadow they cast
-_LOGO = [
-    "██╗     ██╗     ███╗   ███╗",
-    "██║     ██║     ████╗ ████║",
-    "██║     ██║     ██╔████╔██║",
-    "██║     ██║     ██║╚██╔╝██║",
-    "███████╗███████╗██║ ╚═╝ ██║",
-    "╚══════╝╚══════╝╚═╝     ╚═╝",
+# Lumo, the mascot: a small glowing creature grown out of LLMBar's orb — a round body with a bright rim, big eyes
+# looking towards what it says, pink cheeks, and the orb's filaments hanging below as tentacles. One character per
+# pixel; _MASCOT_COLORS says what each one is.
+_MASCOT = [
+    "......oooooooo......",
+    "....oobbbbbbbboo....",
+    "...obbbbhhbbbbbbo...",
+    "..obbbbhbbbbbbbbbo..",
+    "..obbbwwwbbbbwwwbo..",
+    ".obbbwwwwbbbwwwwbbo.",
+    ".obbbwwppbbbwwppbbo.",
+    ".obbbwwppbbbwwppbbo.",
+    ".obbbbwwbbbbbwwbbbo.",
+    ".obkkbbbbbmbbbbkkbo.",
+    "..obbbbbbbmmbbbbbo..",
+    "..obbbbbbbbbbbbbbo..",
+    "...oobbbbbbbbbboo...",
+    "....t.t..tt..t.t....",
+    "...t..t..t.t..t.t...",
+    "..t...t...t.t...t...",
+    "..t..t....t..t...t..",
+    "..g..t...t....t..g..",
+    ".....g...g....g.....",
+    "....................",
 ]
-
-
-# LLMBar's icon — "Ai>_" in a dark window with a glowing frame — in a 5×7 pixel font
-_GLYPHS = {
-    "A": [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-    "i": ["..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###."],
-    ">": ["#....", ".#...", "..#..", "...#.", "..#..", ".#...", "#...."],
-    "_": [".....", ".....", ".....", ".....", ".....", ".....", "#####"],
+_MASCOT_COLORS = {
+    "o": (0, 229, 255),        # the rim: LLMBar's cyan
+    "b": (6, 52, 64),          # the body, dark glass — the rim and eyes glow against it
+    "h": (120, 240, 255),      # a highlight on the top of the head
+    "w": (236, 252, 255),      # the whites of the eyes
+    "p": (4, 14, 18),          # pupils, looking right — towards the speech bubble
+    "k": (255, 46, 136),       # cheeks: the app's magenta
+    "m": (77, 242, 194),       # a small mint smile
+    "t": (0, 190, 214),        # tentacles: the orb's filaments
+    "g": (255, 46, 136),       # their glowing tips
 }
 
 
-def _icon():
-    """The app icon as a pixel grid (colours, or None outside the rounded frame)."""
-    frame, inside, ink, cursor = (0, 229, 255), (8, 24, 31), (77, 242, 194), (0, 229, 255)
-    w, h = 32, 16
-    grid = [[inside] * w for _ in range(h)]
-    for y in range(h):
-        for x in range(w):
-            corner = (x in (0, w - 1)) and (y in (0, h - 1))
-            if corner:
-                grid[y][x] = None                                             # rounded corners
-            elif x in (0, w - 1) or y in (0, h - 1):
-                grid[y][x] = frame
-    for n, ch in enumerate("Ai>_"):
-        for gy, row in enumerate(_GLYPHS[ch]):
-            for gx, bit in enumerate(row):
-                if bit == "#":
-                    grid[4 + gy][4 + n * 6 + gx] = cursor if ch == "_" else ink
-    return grid
+def _mascot():
+    """Lumo as a grid of colours (None where there is nothing)."""
+    return [[_MASCOT_COLORS.get(ch) for ch in row] for row in _MASCOT]
 
 
 def _pixel_lines(grid):
@@ -228,8 +231,8 @@ _TIPS = [
 
 
 def print_banner():
-    """The welcome of the interactive menu: "LLM" in shadowed block letters, LLMBar's orb beside it, a greeting
-    for the time of day and a tip. A plain line when the terminal is not a TTY, has no colour, or is narrow."""
+    """The welcome of the interactive menu: Lumo, the mascot, greets you in a speech bubble — the time of day, the
+    version, a tip. A plain line when the terminal has no colour or is narrow; nothing when it is not a TTY."""
     if not TTY:
         return
     import random
@@ -243,26 +246,31 @@ def print_banner():
         print(MINT("  Ai>_  ") + B("AI-llm-Engine") + DIM(f"  v{VERSION} · " + T("your models, your Mac, no cloud")))
         print(DIM(f"  {hello}. " + T("Tip:") + f" {tip}"))
         return
-    icon = _pixel_lines(_icon())                                              # 8 rows, 32 columns
-    top, bottom = (0, 229, 255), (77, 242, 194)                               # cyan to mint, as in LLMBar
-    shade = _rgb(23, 92, 104)
-    rows = []
-    for i, row in enumerate(_LOGO):
-        t = i / (len(_LOGO) - 1)
-        col = _rgb(*(int(a + (b - a) * t) for a, b in zip(top, bottom)))
-        rows.append("".join(f"\033[1;{col}m█\033[0m" if ch == "█" else
-                            (f"\033[{shade}m{ch}\033[0m" if ch != " " else " ") for ch in row))
-    width = len(_LOGO[0])
-    show_icon = cols >= 2 + width + 5 + 32
+    lumo = _pixel_lines(_mascot())                                            # 10 rows, 20 columns
+    # what Lumo says, in a speech bubble pointing at it
+    said = [B(f"{hello}! ") + T("I'm Lumo."),
+            MINT("Ai>_ ") + B("AI-llm-Engine") + DIM(f" v{VERSION}"),
+            DIM(T("Your models, your Mac, no cloud.")),
+            ""]
+    plain = lambda t: re.sub(r"\033\[[0-9;]*m", "", t)
+    # the tip is wrapped by words to the bubble's width — at most 60 columns, less in a narrower terminal
+    width = max(30, min(60, cols - 2 - 20 - 2 - 4))
+    import textwrap
+    for k, line in enumerate(textwrap.wrap(T("Tip:") + " " + tip, width) or [""]):
+        said.append(CY(line[:len(T("Tip:"))]) + line[len(T("Tip:")):] if k == 0 else line)
+    inner = max(len(plain(t)) for t in said)
+    frame = lambda t: f"\033[{_rgb(0, 229, 255)}m{t}\033[0m"
+    bubble = [frame("╭" + "─" * (inner + 2) + "╮")]
+    for k, t in enumerate(said):
+        tail = "◀" if k == 1 else "│"                                          # the bubble points at Lumo's eyes
+        bubble.append(frame(tail) + " " + t + " " * (inner - len(plain(t))) + " " + frame("│"))
+    bubble.append(frame("╰" + "─" * (inner + 2) + "╯"))
     print()
-    # the letters (6 rows) centred on the icon (8 rows)
-    for i in range(len(icon) if show_icon else len(rows)):
-        k = i - 1 if show_icon else i
-        left = rows[k] if 0 <= k < len(rows) else " " * width
-        print("  " + left + ("     " + icon[i] if show_icon else ""))
-    print()
-    print("  " + B(f"{hello}.") + DIM(f"  AI-llm-Engine v{VERSION} · " + T("your models, your Mac, no cloud.")))
-    print("  " + DIM(T("Tip:") + " " + tip))
+    top = 1                                                                   # the bubble starts level with the eyes
+    for i in range(max(len(lumo), top + len(bubble))):
+        left = lumo[i] if i < len(lumo) else " " * 20
+        right = bubble[i - top] if 0 <= i - top < len(bubble) else ""
+        print("  " + left + ("  " + right if right else ""))
     print()
 
 
