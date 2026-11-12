@@ -5,6 +5,7 @@
 import { api, browserName } from "../browser-adapters/api";
 import { AgentView, Autonomy } from "../core/agent-types";
 import { activityLabel } from "../core/activity";
+import { originOf } from "../core/policy";
 import { Command, PROTOCOL, ServiceError, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { isActive, renderAgent } from "./agent-view";
 import { Answer, el, metricsText, modelLabel, problemText, statusLine, updateNotice } from "./view";
@@ -72,7 +73,7 @@ function renderEmpty(t: Thread): void {
   for (const d of DEMOS[acting ? "act" : "ask"]) {
     const b = el("button", { type: "button", class: "demo", textContent: d.label });
     b.addEventListener("click", () => {
-      if (d.task) void ask(d.task);
+      if (d.task) withAccess(() => void ask(d.task!));
       else { input.value = d.text; input.focus(); autosize(); }
     });
     list.append(b);
@@ -97,6 +98,34 @@ function bubble(t: Thread, text: string, kind: string): void {
 
 function scroll(): void {
   threads.scrollTop = threads.scrollHeight;
+}
+
+// ───────────── access to the site ─────────────
+// Chrome grants nothing when the side panel opens (unlike a popup, opening it is not "activeTab"), so the panel
+// asks for the site in front at the moment the person sends — a click, the gesture the browser requires — and
+// the browser shows its own Allow prompt once per site. Called synchronously from the click, before any await.
+let currentUrl = "";
+
+function withAccess(go: () => void): void {
+  const origin = originOf(currentUrl);
+  if (!origin) { go(); return; }                          // a browser page: the background says it cannot be read
+  let request: Promise<boolean>;
+  try {
+    request = api.permissions.request({ origins: [origin + "/*"] });
+  } catch {
+    go();                                                 // no permissions API here (Safari decides by itself)
+    return;
+  }
+  request.then((ok) => {
+    if (ok) go();
+    else if (tabId !== null) {
+      const t = thread(tabId);
+      t.empty.hidden = true;
+      t.root.append(el("div", { class: "msg note bad" },
+        `LLMBar reads ${origin.replace(/^https?:\/\//, "")} only with your permission. Send again and choose Allow.`));
+      scroll();
+    }
+  }).catch(() => go());
 }
 
 // ───────────── asking ─────────────
@@ -215,8 +244,8 @@ function syncButtons(): void {
 function submit(): void {
   const text = input.value.trim();
   if (send.disabled || busy()) return;
-  if (mode.value === "ask") void ask(text ? "ask" : "summarize", text || undefined);
-  else if (text) act(text);
+  if (mode.value === "ask") withAccess(() => void ask(text ? "ask" : "summarize", text || undefined));
+  else if (text) withAccess(() => act(text));
   else return;
   input.value = "";
   autosize();
@@ -360,6 +389,7 @@ port.onMessage.addListener((ev: UiEvent) => {
     syncButtons();
   } else if (ev.kind === "tab") {
     if (ev.tabId !== tabId) return;
+    currentUrl = ev.url;
     let host = "";
     try { host = new URL(ev.url).host; } catch { host = ""; }
     tabLine.textContent = host ? `${host} — ${ev.title}` : ev.title || ev.url;

@@ -9,7 +9,8 @@
   },
   "extra_permissions": [
     "sidePanel",
-    "nativeMessaging"
+    "nativeMessaging",
+    "tabs"
   ],
   "web_accessible_resources": [
     {

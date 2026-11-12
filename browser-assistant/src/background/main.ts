@@ -136,8 +136,9 @@ async function ask(port: Port, req: Extract<UiRequest, { kind: "ask" }>): Promis
   try {
     page = await readPage(req.tabId);
   } catch {
-    send(port, { kind: "fatal", message: "This page cannot be read by extensions (a browser page, the App Store, "
-      + "or a site where access was not granted). Select text and use the context menu instead." });
+    send(port, { kind: "fatal", message: "LLMBar cannot read this page: either it is one of the browser's own pages "
+      + "(new tab, settings, the extension store), which no extension may read, or access to this site was not "
+      + "allowed — send again and choose Allow." });
     return;
   }
   if (req.selection && !page.selection) page.selection = req.selection;
