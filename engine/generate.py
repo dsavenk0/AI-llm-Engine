@@ -408,25 +408,20 @@ class Engine(DecodeLoop):
         rows = [_BatchRow(self, r) for r in reqs]
         max_new = max(r.max_tokens for r in rows)
 
-        def row_sampler(s):
-            # Sampler takes [1, L, V] and returns a lazy scalar; batched_generate hands a [V] row and
-            # needs a real int (it tests membership in eos).
-            return lambda row: int(s(row[None, None, :]).item())
-
-        samplers = [row_sampler(r.sampler) for r in rows]
+        samplers = [(lambda row, s=r.sampler: self.rt.sample_row(s, row)) for r in rows]
         stoppers = [(lambda i=i: rows[i].stopped()) for i in range(len(rows))]
 
         def token(i, tok):
             rows[i].feed(tok, on_piece, i)
 
         t0 = time.time()
-        outputs = batched_generate(self.model, [list(r["ids"]) for r in reqs], max_new=max_new, eos=self.eos,
+        outputs = batched_generate(self.rt, [list(r["ids"]) for r in reqs], max_new=max_new, eos=self.eos,
                                    samplers=samplers, should_stop=stoppers, on_token=token)
         dt = time.time() - t0
         for i, row in enumerate(rows):
             row.settle(outputs[i])          # the finish reason first: the tail is only released on "length"
             row.flush(on_piece, i)
-        mx.clear_cache()
+        self.rt.release()
         return [r.stats(dt, len(reqs[i]["ids"])) for i, r in enumerate(rows)]
 
 

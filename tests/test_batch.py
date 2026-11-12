@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mlx.core as mx  # noqa: E402
 
-from engine import batch  # noqa: E402
+from engine import batch, runtime  # noqa: E402
 from engine.model import Positions  # noqa: E402
 from tests.synth import make_bundle  # noqa: E402
 
@@ -52,12 +52,12 @@ def batched_next_logits(model, prompts):
         first.append(int(mx.argmax(lg[0, -1]).item()))
     lens = [len(p) for p in prompts]
     lmax = max(lens)
-    cache = [batch._assemble(per, i, lmax) for i in range(len(per[0]))]
+    cache = [runtime._assemble(per, i, lmax) for i in range(len(per[0]))]
     pad = mx.array([lmax - n for n in lens])
     delta = mx.array([n - lmax for n in lens])
     lk = cache[0].offset + 1
     cols = mx.arange(lk)
-    mask = mx.where(cols[None, None, None, :] < pad[:, None, None, None], batch.NEG, 0.0).astype(mx.float16)
+    mask = mx.where(cols[None, None, None, :] < pad[:, None, None, None], runtime.NEG, 0.0).astype(mx.float16)
     logits = model(mx.array([[t] for t in first]), cache, Positions(delta=delta), mask=mask)
     return logits[:, -1, :], first
 
@@ -70,19 +70,20 @@ class TestBatchedDecode(unittest.TestCase):
         make_bundle(cls.dir, seed=5, attn_interval=1)       # attention-only: every layer is full attention
         cls.eng = Engine(cls.dir, vision=False, max_context=1024, max_tokens=64, log=lambda *_: None)
         cls.model = cls.eng.model
+        cls.rt = cls.eng.rt
         cls.eos = set(cls.eng.eos)
 
     def test_batched_matches_single_for_each_request(self):
         prompts = [[20, 21, 22, 23, 24, 25], [30, 31, 32], [40, 41, 42, 43, 44]]   # ragged on purpose
         max_new = 10
         want = [greedy_single(self.model, p, max_new, self.eos) for p in prompts]
-        got = batch.batched_generate(self.model, prompts, max_new=max_new, eos=self.eos)
+        got = batch.batched_generate(self.rt, prompts, max_new=max_new, eos=self.eos)
         self.assertEqual(got, want)
 
     def test_order_is_preserved_and_streaming_fires_per_row(self):
         prompts = [[12, 13, 14], [50, 51, 52, 53]]
         seen = []
-        got = batch.batched_generate(self.model, prompts, max_new=6, eos=self.eos,
+        got = batch.batched_generate(self.rt, prompts, max_new=6, eos=self.eos,
                                      on_token=lambda i, t: seen.append((i, t)))
         # every streamed token belongs to its row, in that row's order
         for i, _ in enumerate(prompts):
@@ -92,8 +93,8 @@ class TestBatchedDecode(unittest.TestCase):
     def test_per_request_sampler_is_used(self):
         # row 0 greedy, row 1 forced to always emit token 77 — each row follows its own sampler
         prompts = [[20, 21, 22], [30, 31, 32]]
-        samplers = [batch._greedy, lambda _row: 77]
-        got = batch.batched_generate(self.model, prompts, max_new=5, eos=set(), samplers=samplers)
+        samplers = [self.rt.greedy_row, lambda _row: 77]
+        got = batch.batched_generate(self.rt, prompts, max_new=5, eos=set(), samplers=samplers)
         self.assertEqual(got[1], [77, 77, 77, 77, 77])
         self.assertNotEqual(got[0], [77, 77, 77, 77, 77])
 
@@ -104,7 +105,7 @@ class TestBatchedDecode(unittest.TestCase):
         def stop_row1():
             calls["n"] += 1
             return calls["n"] > 2                      # let a couple of tokens through, then stop row 1
-        got = batch.batched_generate(self.model, prompts, max_new=10, eos=set(),
+        got = batch.batched_generate(self.rt, prompts, max_new=10, eos=set(),
                                      should_stop=[None, stop_row1])
         self.assertLess(len(got[1]), len(got[0]))
         self.assertGreaterEqual(len(got[1]), 1)
@@ -112,7 +113,7 @@ class TestBatchedDecode(unittest.TestCase):
     def test_single_request_batch_equals_the_reference(self):
         p = [7, 8, 9, 10]
         want = greedy_single(self.model, p, 8, self.eos)
-        got = batch.batched_generate(self.model, [p], max_new=8, eos=self.eos)
+        got = batch.batched_generate(self.rt, [p], max_new=8, eos=self.eos)
         self.assertEqual(got, [want])
 
     def test_batched_forward_matches_single_for_a_hybrid_ssm_model(self):

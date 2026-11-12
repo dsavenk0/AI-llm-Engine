@@ -13,75 +13,36 @@ Works on attention and hybrid (GatedDeltaNet/SSM) native models: an attention la
 stacked, while an SSM layer's recurrent state is position-independent, so its conv tail and state are simply
 stacked over the batch. Memory is bounded by the caller (how many requests it admits at once): the batched KV
 is B × max_len, so the caller caps B.
+
+The loop below never touches an array: prefill, cache assembly, the masked lockstep step and reading a row
+are runtime methods (engine/runtime.py, `batch_*`), so a second runtime batches by implementing them.
 """
-import mlx.core as mx
-
-from .model import KVCache, Positions, SSMCache
-
-NEG = -30000.0          # additive mask value that zeroes a key in float16 softmax
 
 
-def _greedy(logits_row):
-    return int(mx.argmax(logits_row).item())
-
-
-def _assemble(caches, layer_idx, lmax):
-    """Combine one layer's per-request caches into a batched one. Attention: left-pad KV to `lmax` and stack.
-    SSM: stack the (position-independent) conv tail and recurrent state over the batch."""
-    sample = caches[0][layer_idx]
-    if isinstance(sample, KVCache):
-        ks, vs = [], []
-        for c in caches:
-            kv = c[layer_idx]
-            k, v = kv.keys[..., :kv.offset, :], kv.values[..., :kv.offset, :]
-            pad = lmax - k.shape[2]
-            if pad:
-                kz = mx.zeros((1, k.shape[1], pad, k.shape[3]), k.dtype)
-                vz = mx.zeros((1, v.shape[1], pad, v.shape[3]), v.dtype)
-                k, v = mx.concatenate([kz, k], axis=2), mx.concatenate([vz, v], axis=2)
-            ks.append(k)
-            vs.append(v)
-        merged = KVCache()
-        merged.keys, merged.values = mx.concatenate(ks, 0), mx.concatenate(vs, 0)
-        merged.offset = lmax
-        return merged
-    merged = SSMCache()
-    merged.conv = mx.concatenate([c[layer_idx].conv for c in caches], 0) if sample.conv is not None else None
-    merged.state = mx.concatenate([c[layer_idx].state for c in caches], 0) if sample.state is not None else None
-    merged.offset = lmax
-    return merged
-
-
-def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy,
+def batched_generate(rt, prompts, max_new=64, eos=(), sampler=None,
                      samplers=None, should_stop=None, on_token=None):
     """Greedy/sampled continuation of several prompts at once.
 
-    `model`: a loaded engine model (engine/model.py). `prompts`: a list of token-id lists.
-    `sampler`: a callable (logits_row [V]) -> token id applied to every row; `samplers`: a per-row list that
-    overrides it (so each request keeps its own temperature/top-p). `should_stop`: an optional per-row list of
-    callables () -> bool, checked each step, to stop a row early (a client disconnected, a stop string matched).
-    `on_token(i, tok)`: optional streaming callback. Returns a list of generated-token lists, one per prompt,
-    in order (stop tokens excluded)."""
+    `rt`: the engine's runtime (engine/runtime.py). `prompts`: a list of token-id lists.
+    `sampler`: a callable (logits_row) -> token id applied to every row, greedy by default; `samplers`: a
+    per-row list that overrides it (so each request keeps its own temperature/top-p). `should_stop`: an
+    optional per-row list of callables () -> bool, checked each step, to stop a row early (a client
+    disconnected, a stop string matched). `on_token(i, tok)`: optional streaming callback. Returns a list of
+    generated-token lists, one per prompt, in order (stop tokens excluded)."""
     B = len(prompts)
     if B == 0:
         return []
     eos = set(eos)
-    samp = samplers if samplers is not None else [sampler] * B
+    samp = samplers if samplers is not None else [sampler or rt.greedy_row] * B
     stops = should_stop if should_stop is not None else [None] * B
     # 1) prefill each request on its own (B=1): correct positions, and it tells us the per-request length
     per_caches, first = [], []
     for i, ids in enumerate(prompts):
-        cache = model.make_cache()
-        logits = model(mx.array([list(ids)]), cache, Positions(delta=0))
+        cache, row = rt.batch_prefill(ids)
         per_caches.append(cache)
-        first.append(samp[i](logits[0, -1]))
-
-    lens = [len(p) for p in prompts]
-    lmax = max(lens)
-    n_layers = len(per_caches[0])
-    cache = [_assemble(per_caches, li, lmax) for li in range(n_layers)]
-    pad = mx.array([lmax - n for n in lens])                 # padding columns at the front of each row
-    delta = mx.array([n - lmax for n in lens])               # per-row rope offset: cache.offset + delta == len
+        first.append(samp[i](row))
+    # 2) one left-padded batched cache; each row keeps its own positions
+    state = rt.batch_join(per_caches, [len(p) for p in prompts])
 
     outputs = [[] for _ in range(B)]
     done = [bool(stops[i] and stops[i]()) for i in range(B)]
@@ -97,12 +58,8 @@ def batched_generate(model, prompts, max_new=64, eos=(), sampler=_greedy,
     for _ in range(max_new - 1):
         if all(done):
             break
-        lk = cache[0].offset + 1                              # keys after this step's update
-        cols = mx.arange(lk)
-        mask = mx.where(cols[None, None, None, :] < pad[:, None, None, None], NEG, 0.0).astype(mx.float16)
-        ids = mx.array([[t] for t in cur])                   # [B, 1]
-        logits = model(ids, cache, Positions(delta=delta), mask=mask)
-        nxt = [samp[b](logits[b, -1]) for b in range(B)]
+        rows = rt.batch_step(state, cur)
+        nxt = [samp[b](rows[b]) for b in range(B)]
         for b in range(B):
             if done[b]:
                 continue

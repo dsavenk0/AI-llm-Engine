@@ -10,7 +10,7 @@ class's methods and the loop does not change. Sampling lives here because it run
 import mlx.core as mx
 import numpy as np
 
-from .model import Positions
+from .model import KVCache, Positions, SSMCache
 from .session import FormatError
 
 
@@ -173,6 +173,43 @@ def mrope_positions(ids, grids, image_token, merge):
     return pos, cur - n
 
 
+NEG = -30000.0          # additive mask value that zeroes a key in float16 softmax
+
+
+def _assemble(caches, layer_idx, lmax):
+    """Combine one layer's per-request caches into a batched one. Attention: left-pad KV to `lmax` and stack.
+    SSM: stack the (position-independent) conv tail and recurrent state over the batch."""
+    sample = caches[0][layer_idx]
+    if isinstance(sample, KVCache):
+        ks, vs = [], []
+        for c in caches:
+            kv = c[layer_idx]
+            k, v = kv.keys[..., :kv.offset, :], kv.values[..., :kv.offset, :]
+            pad = lmax - k.shape[2]
+            if pad:
+                kz = mx.zeros((1, k.shape[1], pad, k.shape[3]), k.dtype)
+                vz = mx.zeros((1, v.shape[1], pad, v.shape[3]), v.dtype)
+                k, v = mx.concatenate([kz, k], axis=2), mx.concatenate([vz, v], axis=2)
+            ks.append(k)
+            vs.append(v)
+        merged = KVCache()
+        merged.keys, merged.values = mx.concatenate(ks, 0), mx.concatenate(vs, 0)
+        merged.offset = lmax
+        return merged
+    merged = SSMCache()
+    merged.conv = mx.concatenate([c[layer_idx].conv for c in caches], 0) if sample.conv is not None else None
+    merged.state = mx.concatenate([c[layer_idx].state for c in caches], 0) if sample.state is not None else None
+    merged.offset = lmax
+    return merged
+
+
+class BatchState:
+    """A lockstep batch: the joined cache and, per row, the padding in front of it and its rope offset."""
+
+    def __init__(self, cache, pad, delta):
+        self.cache, self.pad, self.delta = cache, pad, delta
+
+
 class MlxHybridRuntime:
     name = "mlx"
 
@@ -244,6 +281,33 @@ class MlxHybridRuntime:
 
     def sample_at(self, sampler, logits, i):
         return sampler(logits[:, i:i + 1]).item()
+
+    # ── batched decode (engine/batch.py) ──
+    def batch_prefill(self, ids):
+        """One request alone, from position 0: (its cache, the last position's logits row)."""
+        cache = self.make_cache()
+        logits = self.model(mx.array([list(ids)]), cache, Positions(delta=0))
+        return cache, logits[0, -1]
+
+    def batch_join(self, caches, lens):
+        """The per-request caches, left-padded to the longest and stacked into one batch."""
+        lmax = max(lens)
+        cache = [_assemble(caches, li, lmax) for li in range(len(caches[0]))]
+        return BatchState(cache, mx.array([lmax - n for n in lens]), mx.array([n - lmax for n in lens]))
+
+    def batch_step(self, state, tokens):
+        """One token per row, every row at its own position, the padding masked: the [B, V] logits rows."""
+        cols = mx.arange(state.cache[0].offset + 1)            # keys after this step's update
+        mask = mx.where(cols[None, None, None, :] < state.pad[:, None, None, None], NEG, 0.0).astype(mx.float16)
+        logits = self.model(mx.array([[t] for t in tokens]), state.cache, Positions(delta=state.delta), mask=mask)
+        return logits[:, -1, :]
+
+    def greedy_row(self, row):
+        return int(mx.argmax(row).item())
+
+    def sample_row(self, sampler, row):
+        """A Sampler takes [1, L, V] and returns a lazy scalar; the batch loop needs a real id."""
+        return int(sampler(row[None, None, :]).item())
 
     # ── images ──
     def embed_media(self, ids, media):
