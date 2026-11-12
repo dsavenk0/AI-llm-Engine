@@ -10,13 +10,16 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   request's priority, so nothing starves. While the Mac is past its RAM limit, background requests wait, merged
   passes take fewer requests, and an idle engine gives memory back on its own — the conversation cache is saved
   to the SSD first. `/health` shows the queue and the memory picture.
-- **Browser Assistant can click, fill and navigate — each step only after you approve it.** Give the Safari
-  extension a goal; it reads the page, the local model proposes one action, and a card on the page says
-  exactly what will happen, built from the element itself rather than from the model's words. Passwords, card
-  numbers and one-time codes are never typed, CAPTCHAs are never touched, nothing is run that the model or the
-  page supplies, and a step is refused if the page moved, the element changed or something covers it. Eight steps
-  at most; Stop ends it at once; a local log (no page text, no typed values) shows what was done. Tested
-  against a simulated page and a fake browser, not yet in Safari itself.
+- **Browser Assistant: a side panel that reads the page and acts on it while you watch.** The toolbar button
+  opens a panel beside the page (Chrome's own side panel; docked into the tab in Safari, which has none) with
+  each tab's conversation, the model controls and a choice of what the assistant may do: answer about the page,
+  act asking before every step, or act on its own and stop before anything that submits a form, pays, orders,
+  sends, deletes or leaves the site. It clicks, types, picks options, presses keys, scrolls and navigates; the
+  page shows a glowing frame with Stop and an agent cursor that moves onto each element before it acts. With a
+  model that can see, 📷 sends a screenshot with a question or with every step. Passwords, card numbers and
+  one-time codes are never typed and CAPTCHAs are never touched. Dark and light themes, as in LLMBar. Works in
+  Safari, Chrome and other Chromium browsers (`./llm assistant setup` prints the steps). Tested with a simulated
+  page and a stand-in browser; not yet driven in a real Safari or Chrome.
 - **Browser Assistant (Safari, optional).** An extension that asks the model on your Mac about the page you
   are reading — a question, a summary, or Explain / Translate / Rewrite on selected text — and controls the
   model from the browser: pick it, load it, unload it, stop an answer, with LLMBar and the terminal closed.

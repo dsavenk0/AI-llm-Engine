@@ -1736,6 +1736,12 @@ def assistant_setup(service, reveal=False):
     print(T("  3. The extension's settings open: paste the token (already on the clipboard) and press Connect."))
     print(DIM(T("Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. "
                 "A permanent install needs a signed app; see docs/safari-assistant/README.md.")))
+    if "chromium" in versions:
+        print()
+        print(B(T("Chrome, Edge, Brave, Arc and other Chromium browsers — two steps:")))
+        print(T("  1. Open chrome://extensions (edge://extensions in Edge), turn on “Developer mode”, press "
+                "“Load unpacked” and choose:") + f" {os.path.join(service.EXT_HOME, 'chromium')}")
+        print(T("  2. Click the extension's toolbar button: the side panel opens; its ⚙︎ settings take the token."))
     if reveal:
         subprocess.run(["open", "-R", os.path.join(folder, "manifest.json")], capture_output=True)
     return True

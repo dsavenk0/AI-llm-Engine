@@ -8,8 +8,8 @@
 // is reported, never retried blindly; a task ends after a handful of steps or two failures in a row. The page,
 // the service, the tabs and the clock are handed in, so all of it runs under test without a browser.
 
-import { Action, AgentView, AuditEntry, ElementInfo, PageSnapshot, Preview, StepView, TaskState } from "../core/agent-types";
-import { MAX_FAILURES, MAX_STEPS, originOf, previewFor, refusal, summarize } from "../core/policy";
+import { Action, AgentView, AuditEntry, Autonomy, ElementInfo, PageSnapshot, Preview, StepView, TaskState } from "../core/agent-types";
+import { MAX_FAILURES, MAX_STEPS, MAX_STEPS_AUTO, originOf, previewFor, refusal, summarize } from "../core/policy";
 import { Binding, TERMINAL, transition } from "../core/task";
 import type { Expect, Outcome, Verdict } from "../content/agent-core";
 
@@ -22,12 +22,14 @@ export interface PageBridge {
   inspect(tabId: number, ref: string, expect: Expect): Promise<Verdict>;
   click(tabId: number, ref: string, expect: Expect): Promise<Outcome>;
   fill(tabId: number, ref: string, value: string, expect: Expect): Promise<Outcome>;
+  scroll(tabId: number, direction: "up" | "down", ref?: string): Promise<Outcome>;
+  press(tabId: number, key: string, ref: string | undefined, expect: Expect): Promise<Outcome>;
 }
 
 export interface Deps {
   page: PageBridge;
   step(req: { session: string; goal: string; snapshot: PageSnapshot; history: { summary: string; result: string }[];
-    requestId: string }, signal: AbortSignal): Promise<{ action: Action }>;
+    requestId: string; screenshot?: string | null }, signal: AbortSignal): Promise<{ action: Action }>;
   cancelStep(requestId: string, session: string): Promise<void>;
   tab(tabId: number): Promise<{ url: string; loading: boolean } | null>;      // null: the tab is gone
   navigate(tabId: number, url: string): Promise<void>;
@@ -36,6 +38,7 @@ export interface Deps {
   audit(entry: AuditEntry): void;
   session(tabId: number): string;
   id(): string;
+  capture?(tabId: number): Promise<string>;                                    // a picture of the tab, for a model that sees
 }
 
 interface Proposal { action: Action; preview: Preview; live: Record<string, ElementInfo>; snapshot: PageSnapshot }
@@ -44,7 +47,7 @@ type Decision = "approve" | "reject" | "cancel";
 interface Task {
   id: string; bind: Binding; goal: string; state: TaskState;
   steps: StepView[]; history: { summary: string; result: string }[];
-  stepsLeft: number; failures: number;
+  stepsLeft: number; failures: number; autonomy: Autonomy; see: boolean;
   proposal?: Proposal; message?: string; needsAccess?: string;
   abort: AbortController; requestId: string;
   waiter: ((d: Decision | { reply: string } | "resume") => void) | null;
@@ -59,8 +62,10 @@ export class AgentRunner {
     if (!t) return null;
     return {
       id: t.id, tabId: t.bind.tabId, goal: t.goal, state: t.state, origin: t.bind.origin, steps: t.steps.slice(-8),
-      stepsLeft: t.stepsLeft, proposal: t.state === "approval_required" && t.proposal ? { action: t.proposal.action, preview: t.proposal.preview } : undefined,
+      stepsLeft: t.stepsLeft, autonomy: t.autonomy, proposal: t.state === "approval_required" && t.proposal ? { action: t.proposal.action, preview: t.proposal.preview } : undefined,
       message: t.message, needsAccess: t.needsAccess,
+      doing: t.proposal && (t.state === "executing" || t.state === "verifying" || t.state === "approval_required")
+        ? t.proposal.preview.title : undefined,
     };
   }
 
@@ -87,13 +92,13 @@ export class AgentRunner {
   }
 
   /** Begin a task on a tab. Resolves once it is running; the task goes on in the background. */
-  async start(tabId: number, goal: string): Promise<AgentView> {
+  async start(tabId: number, goal: string, autonomy: Autonomy = "ask", see = false): Promise<AgentView> {
     if (this.active(tabId)) throw new Error("a task is already running on this tab");
     const tab = await this.d.tab(tabId);
     const origin = tab ? originOf(tab.url) : "";
     if (!origin) throw new Error("the agent works only on http and https pages");
     const t: Task = { id: this.d.id(), bind: { tabId, origin }, goal: goal.trim().slice(0, 2000), state: "requested", steps: [],
-                      history: [], stepsLeft: MAX_STEPS, failures: 0, abort: new AbortController(), requestId: this.d.id(), waiter: null };
+                      history: [], stepsLeft: autonomy === "auto" ? MAX_STEPS_AUTO : MAX_STEPS, failures: 0, autonomy, see, abort: new AbortController(), requestId: this.d.id(), waiter: null };
     if (!t.goal) throw new Error("say what to do");
     this.tasks.set(tabId, t);
     this.log(t, "start", t.goal.slice(0, 80));
@@ -147,8 +152,12 @@ export class AgentRunner {
     this.go(t, "planning");
     let snapshot: PageSnapshot | null = null;
     while (!this.stopped(t)) {
-      if (t.stepsLeft <= 0) return this.fail(t, `I stopped after ${MAX_STEPS} steps without finishing. Tell me where to go on from.`);
+      if (t.stepsLeft <= 0) {
+        const n = t.autonomy === "auto" ? MAX_STEPS_AUTO : MAX_STEPS;
+        return this.fail(t, `I stopped after ${n} steps without finishing. Tell me where to go on from.`);
+      }
       if (t.failures >= MAX_FAILURES) return this.fail(t, "Two steps in a row did not work, so I stopped rather than guess. " + (t.steps.at(-1)?.result || ""));
+      t.proposal = undefined;                              // what it was doing is over: the next look begins
       if (t.state !== "planning") this.go(t, "planning");
 
       // where is the tab? (a click or the page itself may have moved it)
@@ -175,10 +184,15 @@ export class AgentRunner {
         }
       }
 
+      // with "let the model see the page" on, a picture of the tab goes with the element list; a picture that
+      // cannot be taken (the tab is behind another, the browser refused) is skipped, never a reason to stop
+      let screenshot: string | null = null;
+      if (t.see && this.d.capture) screenshot = await this.d.capture(tabId).catch(() => null);
+      if (this.stopped(t)) return;
       let action: Action;
       try {
         action = (await this.d.step({ session: this.d.session(tabId), goal: t.goal, snapshot, history: t.history.slice(-6),
-                                      requestId: t.requestId }, t.abort.signal)).action;
+                                      requestId: t.requestId, screenshot }, t.abort.signal)).action;
       } catch (e) {
         if (this.stopped(t) || t.abort.signal.aborted) return;
         return this.fail(t, `The model could not decide the next step: ${e instanceof Error ? e.message : String(e)}`);
@@ -208,10 +222,27 @@ export class AgentRunner {
         snapshot = { ...snapshot, elements: [...snapshot.elements, ...found.elements.filter((e) => !have.has(e.ref))] };
         continue;                                          // same page, same references: ask again with the find results in
       }
+      if (action.action === "scroll" || action.action === "wait") {
+        // looking, not changing: no question to ask. The next step reads the page afresh.
+        let result = "done";
+        if (action.action === "scroll") {
+          const r = await this.d.page.scroll(tabId, action.direction, action.ref).catch((e) => ({ ok: false, error: String(e) } as Outcome));
+          result = r.ok ? (r.readback || "scrolled") : `could not scroll: ${r.error}`;
+          this.record(t, summarize(action, {}), result, r.ok);
+        } else {
+          await new Promise((r) => setTimeout(r, Math.max(1, Math.min(10, action.seconds)) * 1000));
+          if (this.stopped(t)) return;
+          this.record(t, summarize(action, {}), "waited", true);
+        }
+        t.stepsLeft -= 1;
+        snapshot = null;
+        continue;
+      }
 
       // an action that changes something: look at the live elements, then ask
       const expect: Expect = { generation: snapshot.generation, url: snapshot.url };
       const refs = action.action === "click" || action.action === "fill" ? [action.ref]
+        : action.action === "press" ? (action.ref ? [action.ref] : [])
         : action.action === "fill_form" ? action.fields.map((f) => f.ref) : [];
       const live: Record<string, ElementInfo> = {};
       let problem = "";
@@ -230,10 +261,14 @@ export class AgentRunner {
       const preview = previewFor(action, live, snapshot.url);
       t.proposal = { action, preview, live, snapshot };
       this.log(t, "propose", `${summarize(action, live)} (${preview.risk})`);
-      this.go(t, "approval_required");
-      const decision = await this.waitFor<Decision>(t);
+      let decision: Decision;
+      if (t.autonomy === "auto" && preview.risk === "low") {
+        decision = "approve";                              // low risk, and the person chose to let those go ahead
+      } else {
+        this.go(t, "approval_required");
+        decision = await this.waitFor<Decision>(t);
+      }
       if (decision === "cancel" || this.stopped(t)) return;
-      t.proposal = undefined;
       if (decision === "reject") {
         this.log(t, "reject", summarize(action, live));
         this.record(t, summarize(action, live), "declined by the user", true);
@@ -245,7 +280,7 @@ export class AgentRunner {
         snapshot = null;
         continue;
       }
-      this.log(t, "approve", summarize(action, live));
+      this.log(t, "approve", (t.state === "approval_required" ? "" : "on its own: ") + summarize(action, live));
       this.go(t, "executing");
       const outcome = await this.execute(t, action, live, snapshot, expect);
       if (this.stopped(t)) return;
@@ -294,6 +329,18 @@ export class AgentRunner {
           return { ok: true, text: "the page navigated" };
         }
         if (!r.ok) return { ok: false, text: r.error || "the click did not go through" };
+        if (r.urlChanged) await this.d.settle(tabId);
+        return { ok: true, text: r.urlChanged ? "the page address changed" : (r.mutations || 0) > 0 ? "the page changed" : "nothing visibly changed" };
+      }
+      if (action.action === "press") {
+        let r: Outcome;
+        try {
+          r = await this.d.page.press(tabId, action.key, action.ref, expect);
+        } catch {
+          await this.d.settle(tabId);                      // Enter sent a form and the page unloaded
+          return { ok: true, text: "the page navigated" };
+        }
+        if (!r.ok) return { ok: false, text: r.error || "the key did not go through" };
         if (r.urlChanged) await this.d.settle(tabId);
         return { ok: true, text: r.urlChanged ? "the page address changed" : (r.mutations || 0) > 0 ? "the page changed" : "nothing visibly changed" };
       }

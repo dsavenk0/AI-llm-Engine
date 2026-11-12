@@ -1,5 +1,5 @@
 // What the assistant reads from a page. Injected with scripting.executeScript({ func }) into the active tab,
-// only after a user gesture (the popup opened, a context-menu click) — so the function is serialised and
+// only after a user gesture (the side panel's button, a context-menu click) — so the function is serialised and
 // must not use anything from outside its own body.
 //
 // It reads what a person can see: the selection, and the text of the main content (the <main> / <article>

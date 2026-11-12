@@ -53,6 +53,7 @@ export interface Shared {
   selection_chars: number;
   selection_chars_total: number;
   selection_truncated: boolean;
+  screenshot?: boolean;
 }
 
 export type ChatEvent =
@@ -72,17 +73,19 @@ export interface ServiceError {
 }
 
 // What the UI pages and the in-page panel say to the background, and what it says back.
-import { AgentView } from "./agent-types";
+import { AgentView, Autonomy } from "./agent-types";
 
 export type UiRequest =
   | { kind: "subscribe" }
-  | { kind: "agent-start"; tabId: number; goal: string }
+  | { kind: "agent-start"; tabId: number; goal: string; autonomy?: Autonomy; see?: boolean }
   | { kind: "agent-approve" } | { kind: "agent-reject" } | { kind: "agent-cancel" } | { kind: "agent-resume" }
   | { kind: "agent-reply"; text: string }
   | { kind: "command"; command: Command; confirm?: boolean }
   | { kind: "ask"; tabId: number; task: Task; question?: string; lang?: string; tone?: string; thinking?: boolean;
-      selectionOnly?: boolean; selection?: string }
-  | { kind: "cancel" };
+      selectionOnly?: boolean; selection?: string; screenshot?: boolean }
+  | { kind: "cancel" }
+  | { kind: "watch"; tabId: number }
+  | { kind: "undock" };                        // the docked panel (Safari) closes itself          // the side panel follows the active tab of its window
 
 export type Command =
   | { op: "start" } | { op: "stop" } | { op: "load" } | { op: "unload" }
@@ -93,5 +96,7 @@ export type UiEvent =
   | { kind: "command-result"; ok: boolean; error?: ServiceError; command: Command }
   | { kind: "chat"; event: ChatEvent }
   | { kind: "page"; title: string; url: string; chars: number }
+  | { kind: "shot"; dataUrl: string }                   // the screenshot that went with a question, to show it
   | { kind: "agent"; view: AgentView | null }
+  | { kind: "tab"; tabId: number; title: string; url: string }
   | { kind: "fatal"; message: string };

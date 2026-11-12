@@ -7,7 +7,7 @@ import { NEXT, sameBinding, TERMINAL, transition, TransitionError } from "../src
 const el = (over: Partial<ElementInfo> = {}): ElementInfo => ({
   ref: "e1", tag: "button", role: "button", name: "Details", type: "", value: "", placeholder: "", href: "", disabled: false,
   checked: false, required: false, options: [], dup: 0, sensitive: false, blocked: false, inForm: false, formAction: "",
-  formSensitive: false, ...over });
+  formSensitive: false, formSearch: false, ...over });
 const PAGE = "https://shop.example/cart";
 
 test("secrets are recognised by type, autocomplete and by what a person would call the field", () => {
@@ -123,4 +123,24 @@ test("the task table: every state's exits are written down, and nothing leaves a
   assert.equal(sameBinding({ tabId: 4, origin: "https://a.example" }, 4, "https://a.example"), true);
   assert.equal(sameBinding({ tabId: 4, origin: "https://a.example" }, 5, "https://a.example"), false);
   assert.equal(sameBinding({ tabId: 4, origin: "https://a.example" }, 4, "https://b.example"), false);
+});
+
+test("submitting a search form is not flagged; submitting any other form is", () => {
+  const search = el({ type: "submit", inForm: true, formSearch: true, name: "Go", formAction: "https://shop.example/s" });
+  const order = el({ type: "submit", inForm: true, formSearch: false, name: "Go", formAction: "https://shop.example/o" });
+  assert.equal(clickRisk(search, PAGE).risk, "low");
+  assert.equal(clickRisk(order, PAGE).risk, "high");
+  const pay = el({ type: "submit", inForm: true, formSearch: true, name: "Pay now" });
+  assert.equal(clickRisk(pay, PAGE).risk, "high");                       // the words still count
+});
+
+test("key presses: only listed keys, never into a secret field, Enter in a form is risky", () => {
+  const field = el({ ref: "e2", role: "textbox", tag: "input", name: "Message", inForm: true });
+  const live = { e2: field };
+  assert.equal(refusal({ action: "press", key: "F5" as any, why: "" }, {}, PAGE), "the key F5 is not allowed");
+  assert.equal(previewFor({ action: "press", key: "Enter", ref: "e2", why: "" }, live, PAGE).risk, "high");
+  assert.equal(previewFor({ action: "press", key: "Escape", ref: "e2", why: "" }, live, PAGE).risk, "low");
+  const secret = { e2: { ...field, sensitive: true } };
+  assert.match(refusal({ action: "press", key: "Enter", ref: "e2", why: "" }, secret, PAGE)!, /never fills/);
+  assert.equal(summarize({ action: "scroll", direction: "down" }, {}), "scroll down");
 });

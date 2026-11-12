@@ -21,16 +21,24 @@ if (process.argv.includes("--tests")) {
     rmSync(out, { recursive: true, force: true });
     mkdirSync(out, { recursive: true });
     await build({ ...common, outdir: out, entryPoints: {
-      background: join(root, "src/background/main.ts"), popup: join(root, "src/ui/popup.ts"),
-      options: join(root, "src/ui/options.ts") } });
+      background: join(root, "src/background/main.ts"),
+      options: join(root, "src/ui/options.ts"), sidepanel: join(root, "src/ui/sidepanel.ts") } });
     // the panel is injected with scripting.executeScript({files}), which runs classic scripts
     await build({ ...common, format: "iife", outdir: out, entryPoints: {
-      panel: join(root, "src/content/panel.ts"), "agent-page": join(root, "src/content/agent-page.ts") } });
+      panel: join(root, "src/content/panel.ts"), "agent-page": join(root, "src/content/agent-page.ts"),
+      dock: join(root, "src/content/dock.ts") } });
+    // the browser's file overrides the base, except `permissions`, which it adds to
+    const base = read("manifests/base.json"), own = read(`manifests/${browser}.json`);
+    const permissions = [...base.permissions, ...(own.extra_permissions || [])];
+    delete own.extra_permissions;
     writeFileSync(join(out, "manifest.json"),
-      JSON.stringify({ ...read("manifests/base.json"), ...read(`manifests/${browser}.json`), version }, null, 2) + "\n");
-    for (const page of ["popup.html", "options.html"]) cpSync(join(root, "src/ui", page), join(out, page));
-    writeFileSync(join(out, "popup.css"), readFileSync(join(root, "src/ui/base.css"), "utf8")
-      + readFileSync(join(root, "src/ui/popup.css"), "utf8") + readFileSync(join(root, "src/ui/agent.css"), "utf8"));
+      JSON.stringify({ ...base, ...own, permissions, version }, null, 2) + "\n");
+    cpSync(join(root, "src/ui/options.html"), join(out, "options.html"));
+    writeFileSync(join(out, "options.css"), readFileSync(join(root, "src/ui/base.css"), "utf8")
+      + readFileSync(join(root, "src/ui/options.css"), "utf8"));
+    cpSync(join(root, "src/ui/sidepanel.html"), join(out, "sidepanel.html"));
+    writeFileSync(join(out, "sidepanel.css"), readFileSync(join(root, "src/ui/base.css"), "utf8")
+      + readFileSync(join(root, "src/ui/agent.css"), "utf8") + readFileSync(join(root, "src/ui/sidepanel.css"), "utf8"));
     cpSync(join(root, "icons"), join(out, "icons"), { recursive: true });
     console.log(`built dist/${browser} (v${version})`);
   }

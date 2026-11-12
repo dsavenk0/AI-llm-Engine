@@ -20,6 +20,7 @@ export interface ElementInfo {
   inForm: boolean;
   formAction: string;        // the form's destination, absolute
   formSensitive: boolean;    // the form it sits in holds a sensitive field
+  formSearch: boolean;       // the form is a search box: submitting it only looks something up
 }
 
 export interface PageSnapshot {
@@ -38,10 +39,24 @@ export type Action =
   | { action: "fill_form"; fields: { ref: string; value: string }[]; why: string }
   | { action: "navigate"; url: string; why: string }
   | { action: "find"; query: string }
+  | { action: "scroll"; direction: "up" | "down"; ref?: string }
+  | { action: "press"; key: Key; ref?: string; why: string }
+  | { action: "wait"; seconds: number }
   | { action: "ask_user"; question: string }
   | { action: "done"; answer: string };
 
 export type Risk = "low" | "high";
+
+/** The keys the agent may press — navigation and confirmation keys, never text or shortcuts. */
+export const KEYS = ["Enter", "Tab", "Escape", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp",
+  "Home", "End", "Backspace", "Space"] as const;
+export type Key = typeof KEYS[number];
+
+/** How much the agent may do without asking. "ask": every step that changes something waits for approval.
+ *  "auto": low-risk steps (scrolling, finding, typing into ordinary fields, links within the site) go ahead on
+ *  their own; anything the policy marks high-risk — submitting, paying, ordering, sending, deleting, leaving
+ *  the site, a form holding a password or card — still stops and asks, every time. */
+export type Autonomy = "ask" | "auto";
 
 /** What the person is asked to approve. Built from the live element, never from the model's words. */
 export interface Preview {
@@ -70,9 +85,11 @@ export interface AgentView {
   origin: string;
   steps: StepView[];
   stepsLeft: number;
+  autonomy: Autonomy;
   proposal?: { action: Action; preview: Preview };
   message?: string;           // the final answer, a question for the person, or what went wrong
   needsAccess?: string;       // an origin the extension may not read yet
+  doing?: string;             // the step being approved, done or checked right now, as the person was shown it
 }
 
 export interface AuditEntry {

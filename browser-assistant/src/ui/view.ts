@@ -1,4 +1,4 @@
-// What the popup and the in-page panel share: turning a snapshot into words and buttons, and rendering a
+// What the side panel and the in-page panel share: turning a snapshot into words and buttons, and rendering a
 // streamed answer. Plain DOM — small enough that a framework would be most of the bundle.
 
 import { ChatEvent, ModelInfo, Shared, Snapshot } from "../core/protocol";

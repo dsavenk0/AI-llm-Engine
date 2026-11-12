@@ -6,13 +6,13 @@ import { AgentRunner, Deps } from "../src/background/agent";
 
 const el = (ref: string, over: Partial<ElementInfo> = {}): ElementInfo => ({
   ref, tag: "button", role: "button", name: ref, type: "", value: "", placeholder: "", href: "", disabled: false, checked: false,
-  required: false, options: [], dup: 0, sensitive: false, blocked: false, inForm: false, formAction: "", formSensitive: false, ...over });
+  required: false, options: [], dup: 0, sensitive: false, blocked: false, inForm: false, formAction: "", formSensitive: false, formSearch: false, ...over });
 const URL0 = "https://shop.example/cart";
 const snap = (els: ElementInfo[], over: Partial<PageSnapshot> = {}): PageSnapshot =>
   ({ generation: 1, url: URL0, title: "Cart", text: "", elements: els, captcha: false, truncated: false, ...over });
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
-async function until(cond: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 200 && !cond(); i++) await tick(2);
+async function until(cond: () => boolean, what: string, rounds = 200): Promise<void> {
+  for (let i = 0; i < rounds && !cond(); i++) await tick(2);
   assert.ok(cond(), `timed out waiting for: ${what}`);
 }
 
@@ -33,6 +33,8 @@ function world(script: Action[], elements: ElementInfo[] = [el("e1", { name: "Ad
       inspect: async (_t, ref) => w.failInspect ? { ok: false, error: w.failInspect } : { ok: true, info: w.elements.find((e) => e.ref === ref)! },
       click: async (_t, ref) => { w.clicks.push(ref); return w.clickOutcome(); },
       fill: async (_t, ref, value) => { w.fills.push([ref, value]); return { ok: true, readback: value }; },
+      scroll: async (_t, dir) => { w.log.push("scroll " + dir); return { ok: true }; },
+      press: async (_t, key, ref) => { w.log.push(`press ${key} ${ref ?? ""}`.trim()); return { ok: true, mutations: 1 }; },
     },
     step: async (_req, signal) => {
       w.steps++;
@@ -268,4 +270,83 @@ test("a failed fill reports which fields were done and which was not", async () 
   await until(() => w.r.view(1)!.steps.length > 0, "the result");
   assert.equal(w.r.view(1)!.steps[0].ok, false);
   assert.match(w.r.view(1)!.steps[0].result, /filled Name, then could not fill City: read-only/);
+});
+
+// ───────────── acting on its own ─────────────
+test("in auto mode a low-risk step goes ahead unasked and a risky one still waits for the person", async () => {
+  const w = world([click("e1"), click("e3")], [el("e1", { name: "Next page" }),
+    el("e3", { name: "Place order", type: "submit", inForm: true, formAction: "https://shop.example/order" })]);
+  await w.r.start(1, "Order it", "auto");
+  await until(() => state(w) === "approval_required", "the risky step");
+  assert.deepEqual(w.clicks, ["e1"]);                                          // the harmless one was done unasked
+  assert.equal(w.r.view(1)!.proposal!.preview.risk, "high");
+  assert.equal(w.r.view(1)!.autonomy, "auto");
+  assert.deepEqual(w.clicks, ["e1"]);                                          // and the order has not been placed
+  w.r.approve(1);
+  await until(() => state(w) === "completed", "completion");
+  assert.deepEqual(w.clicks, ["e1", "e3"]);
+  const approvals = w.audit.filter((a) => a.kind === "approve").map((a) => a.what);
+  assert.match(approvals[0], /^on its own: /);
+  assert.doesNotMatch(approvals[1], /^on its own: /);
+});
+
+test("in auto mode a search form is submitted unasked, but not one that sends anything else", async () => {
+  const search = el("e1", { name: "Search", type: "submit", inForm: true, formSearch: true, formAction: "https://shop.example/s" });
+  const w = world([click("e1")], [search]);
+  await w.r.start(1, "Find pizza", "auto");
+  await until(() => state(w) === "completed", "completion");
+  assert.deepEqual(w.clicks, ["e1"]);
+});
+
+test("scroll and wait need no approval in either mode and count as steps", async () => {
+  const w = world([{ action: "scroll", direction: "down" }, { action: "wait", seconds: 1 }]);
+  w.r.start(1, "Read on");
+  await until(() => state(w) === "completed", "completion", 1500);         // the wait really waits a second
+  assert.ok(w.log.includes("scroll down"));
+  assert.equal(w.r.view(1)!.steps.length, 3);                                  // scroll, wait, finish
+  assert.ok(!w.audit.some((a) => a.kind === "propose"));
+});
+
+test("a key press is proposed like a click; Enter in an ordinary form is risky, in a search box it is not", async () => {
+  const w = world([{ action: "press", key: "Enter", ref: "e2", why: "send it" }],
+    [el("e2", { role: "textbox", tag: "input", name: "Message", inForm: true })]);
+  await w.r.start(1, "Send", "auto");
+  await until(() => state(w) === "approval_required", "the proposal");
+  assert.equal(w.r.view(1)!.proposal!.preview.title, "Press Enter");
+  assert.equal(w.r.view(1)!.proposal!.preview.risk, "high");
+  w.r.approve(1);
+  await until(() => state(w) === "completed", "completion");
+  assert.ok(w.log.includes("press Enter e2"));
+  const s = world([{ action: "press", key: "Enter", ref: "e2", why: "search" }],
+    [el("e2", { role: "textbox", tag: "input", name: "Search", inForm: true, formSearch: true })]);
+  await s.r.start(1, "Search", "auto");
+  await until(() => state(s) === "completed", "completion");
+  assert.ok(s.log.includes("press Enter e2"));
+});
+
+test("auto mode gets more steps than ask mode", async () => {
+  const { MAX_STEPS_AUTO } = await import("../src/core/policy");
+  const w = world([]);
+  assert.equal((await w.r.start(1, "x", "auto")).stepsLeft, MAX_STEPS_AUTO);
+});
+
+test("with seeing on, each step sends a screenshot; one that cannot be taken is skipped, not fatal", async () => {
+  const shots: (string | null | undefined)[] = [];
+  const w = world([{ action: "scroll", direction: "down" }]);
+  const d = (w.r as any).d;
+  const step = d.step;
+  d.step = async (req: any, s: AbortSignal) => { shots.push(req.screenshot); return step(req, s); };
+  let n = 0;
+  d.capture = async () => { if (++n === 2) throw new Error("behind another tab"); return "data:image/jpeg;base64,AAAA"; };
+  await w.r.start(1, "Look", "ask", true);
+  await until(() => state(w) === "completed", "completion");
+  assert.deepEqual(shots, ["data:image/jpeg;base64,AAAA", null]);
+  shots.length = 0;
+  const off = world([]);
+  const s2 = (off.r as any).d.step;
+  (off.r as any).d.step = async (req: any, s: AbortSignal) => { shots.push(req.screenshot); return s2(req, s); };
+  (off.r as any).d.capture = async () => "data:image/jpeg;base64,BBBB";
+  await off.r.start(1, "Look");
+  await until(() => state(off) === "completed", "completion");
+  assert.deepEqual(shots, [null]);                                             // off: never taken
 });

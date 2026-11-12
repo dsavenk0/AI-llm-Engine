@@ -6,9 +6,10 @@
 // passwords, card numbers and one-time codes are never typed, CAPTCHAs are never touched, and the extension
 // will not steer the browser to the local assistant or engine.
 
-import { Action, ElementInfo, Preview, Risk } from "./agent-types";
+import { Action, ElementInfo, KEYS, Preview, Risk } from "./agent-types";
 
 export const MAX_STEPS = 8;
+export const MAX_STEPS_AUTO = 20;         // acting on its own takes more, smaller steps between two questions
 export const MAX_FAILURES = 2;
 export const MAX_VALUE = 2000;
 
@@ -59,7 +60,8 @@ export function originOf(url: string): string {
 export function clickRisk(el: ElementInfo, pageUrl: string): { risk: Risk; reasons: string[] } {
   const reasons: string[] = [];
   if (CONSEQUENTIAL.test(el.name)) reasons.push(`its label says “${el.name.slice(0, 40)}”, which usually has a lasting effect`);
-  if (el.type === "submit" || (el.inForm && el.role === "button" && el.type !== "button" && el.type !== "reset")) {
+  const submits = el.type === "submit" || (el.inForm && el.role === "button" && el.type !== "button" && el.type !== "reset");
+  if (submits && !el.formSearch) {          // a search box only looks something up; any other form sends what is in it
     reasons.push("it submits a form" + (el.formAction ? ` to ${originOf(el.formAction) || el.formAction}` : ""));
   }
   if (el.formSensitive) reasons.push("its form holds a password, card or one-time-code field");
@@ -121,6 +123,9 @@ export function summarize(action: Action, live: Record<string, ElementInfo>): st
     case "fill_form": return `fill ${action.fields.map((f) => d(f.ref)).join(", ")}`;
     case "navigate": return `go to ${action.url}`;
     case "find": return `look for “${action.query}”`;
+    case "scroll": return action.ref ? `scroll to ${d(action.ref)}` : `scroll ${action.direction}`;
+    case "press": return `press ${action.key}${action.ref ? ` in ${d(action.ref)}` : ""}`;
+    case "wait": return `wait ${action.seconds}s`;
     case "ask_user": return `ask: ${action.question}`;
     case "done": return "finish";
   }
@@ -163,6 +168,15 @@ export function previewFor(action: Action, live: Record<string, ElementInfo>, pa
     if (action.why) lines.push(`Why: ${short(action.why, 160)}`);
     return { title: "Open a page", lines, risk: v.risk, reasons: v.reasons, destination: v.url };
   }
+  if (action.action === "press") {
+    const el = action.ref ? live[action.ref] : undefined;
+    const lines = [`On ${host}: press ${action.key}${el ? ` in the ${describeElement(el)}` : ""}.`];
+    if (action.why) lines.push(`Why: ${short(action.why, 160)}`);
+    const reasons: string[] = [];
+    if (action.key === "Enter" && (!el || (el.inForm && !el.formSearch))) reasons.push("Enter may send what is in the form");
+    if (el?.formSensitive) reasons.push("its form holds a password, card or one-time-code field");
+    return { title: `Press ${action.key}`, lines, risk: reasons.length ? "high" : "low", reasons };
+  }
   return { title: action.action, lines: [], risk: "low", reasons: [] };
 }
 
@@ -172,7 +186,9 @@ export function refusal(action: Action, live: Record<string, ElementInfo>, pageU
     const v = navigationRisk(action.url, pageUrl);
     return v.allowed ? null : v.error || "not allowed";
   }
+  if (action.action === "press" && !(KEYS as readonly string[]).includes(action.key)) return `the key ${action.key} is not allowed`;
   const refs = action.action === "click" || action.action === "fill" ? [action.ref]
+    : action.action === "press" ? (action.ref ? [action.ref] : [])
     : action.action === "fill_form" ? action.fields.map((f) => f.ref) : [];
   for (const ref of refs) {
     const el = live[ref];

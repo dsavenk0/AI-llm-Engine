@@ -58,7 +58,7 @@ function open(): void {
       answer.fail(ev.message);
       stop.hidden = true;
     } else if (ev.kind === "state" && !ev.connected && ev.problem && ev.problem !== "connecting") {
-      answer.fail("The assistant is not connected. Open the extension's popup to set it up.");
+      answer.fail("The assistant is not connected. Open the side panel (the toolbar button) to set it up.");
       stop.hidden = true;
     }
   });

@@ -69,11 +69,11 @@ export class Client {
   /** One task about a page, streamed. Resolves when the answer ends, however it ends. */
   async chat(req: {
     session: string; task: Task; question?: string; page: PageContext; lang?: string; tone?: string;
-    thinking?: boolean;
+    thinking?: boolean; image?: string;
   }, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
     const body = {
       session: req.session, task: req.task, question: req.question, lang: req.lang, tone: req.tone,
-      thinking: req.thinking, selection: req.page.selection,
+      thinking: req.thinking, selection: req.page.selection, image: req.image,
       page: { title: req.page.title, url: req.page.url, text: req.page.text },
     };
     const r = await fetch(this.url("/v1/assistant/chat"), {
@@ -90,11 +90,11 @@ export class Client {
 
   /** The model's next action for this page and goal. `requestId` names the call so it can be cancelled. */
   async agentStep(req: { session: string; goal: string; snapshot: PageSnapshot; history: { summary: string; result: string }[];
-    requestId: string }, signal: AbortSignal): Promise<{ action: Action; attempts: number }> {
+    requestId: string; screenshot?: string | null }, signal: AbortSignal): Promise<{ action: Action; attempts: number }> {
     const r = await fetch(this.url("/v1/assistant/agent/step"), {
       method: "POST", headers: this.headers(), signal,
       body: JSON.stringify({ session: req.session, goal: req.goal, snapshot: req.snapshot, history: req.history,
-                             request_id: req.requestId }),
+                             request_id: req.requestId, screenshot: req.screenshot || undefined }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new ServiceFailure(r.status, data.error || { code: "http_" + r.status, message: `the service answered ${r.status}` });

@@ -199,9 +199,63 @@ test("a field that does not keep the value is reported as a failure, not as succ
 
 test("a page's own script cannot reach the agent, and the agent takes no code or selectors", () => {
   const p = page(`<button id="b">Go</button>`);
-  assert.deepEqual(Object.keys(p.agent).sort(), ["click", "fill", "find", "generation", "inspect", "snapshot"]);
+  assert.deepEqual(Object.keys(p.agent).sort(), ["click", "fill", "find", "generation", "inspect", "press", "rectOf", "scroll", "snapshot"]);
   const s = p.agent.snapshot();
   for (const evil of ["button", "#b", "javascript:alert(1)", "e1; alert(1)", "../e1"]) {
     assert.equal(p.agent.inspect(evil, { generation: s.generation, url: s.url }).ok, false, evil);
   }
+});
+
+// ───────────── scrolling, keys, search forms ─────────────
+test("a search form is told apart from one that sends something", () => {
+  const { agent } = page(`<form role="search" action="/s"><input aria-label="Find" name="q"><button>Go</button></form>
+    <form action="/order"><input aria-label="Name"><button>Order</button></form>`);
+  const s = agent.snapshot();
+  const by = (n: string) => s.elements.find((e) => e.name === n)!;
+  assert.equal(by("Go").formSearch, true);
+  assert.equal(by("Order").formSearch, false);
+});
+
+test("Enter in a form field submits that form, as a person's Enter would; other keys only reach the page's handlers", async () => {
+  const { agent, doc, win } = page(`<form action="/s"><input aria-label="Find"></form>`);
+  const s = agent.snapshot();
+  const form = doc.querySelector("form")!;
+  let submitted = 0;
+  form.addEventListener("submit", (e: Event) => { e.preventDefault(); submitted++; });
+  const keys: string[] = [];
+  doc.addEventListener("keydown", (e: any) => keys.push(e.key));
+  const expect = { generation: s.generation, url: win.location.href };
+  assert.equal((await agent.press("ArrowDown", "e1", expect)).ok, true);
+  assert.equal(submitted, 0);
+  assert.equal((await agent.press("Enter", "e1", expect)).ok, true);
+  assert.equal(submitted, 1);
+  assert.deepEqual(keys, ["ArrowDown", "Enter"]);
+  assert.equal((await agent.press("a", "e1", expect)).ok, false);              // not a key it may press
+});
+
+test("no key is pressed into a password field", async () => {
+  const { agent, win } = page(`<input type="password" aria-label="Password">`);
+  const s = agent.snapshot();
+  const pw = s.elements.find((e) => e.name === "Password");
+  if (!pw) return;                                                              // not listed at all: nothing to press into
+  const r = await agent.press("Enter", pw.ref, { generation: s.generation, url: win.location.href });
+  assert.equal(r.ok, false);
+});
+
+test("scrolling moves the page and says when it is already at the end", async () => {
+  const { agent, doc, win } = page(`<p>long</p>`);
+  let top = 0;
+  Object.defineProperty(doc.documentElement, "scrollHeight", { configurable: true, get: () => 5000 });
+  Object.defineProperty(doc.documentElement, "clientHeight", { configurable: true, get: () => 800 });
+  Object.defineProperty(doc.documentElement, "scrollTop", { configurable: true, get: () => top,
+    set: (v: number) => { top = Math.max(0, Math.min(4200, v)); } });
+  Object.defineProperty(doc, "scrollingElement", { configurable: true, get: () => doc.documentElement });
+  Object.defineProperty(win, "innerHeight", { configurable: true, get: () => 800 });
+  const down = await agent.scroll("down");
+  assert.equal(down.ok, true);
+  assert.ok(top > 0);
+  const up = await agent.scroll("up");
+  assert.equal(up.ok, true);
+  const again = await agent.scroll("up");
+  assert.equal(again.readback, "already at the top");
 });

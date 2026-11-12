@@ -22,6 +22,7 @@ export interface BrowserApi {
     openOptionsPage(): Promise<void>;
     getURL(path: string): string;
   };
+  action?: { onClicked: Event<(tab: Tab) => void> };
   storage: {
     local: {
       get(keys: string | string[]): Promise<Record<string, any>>;
@@ -32,8 +33,11 @@ export interface BrowserApi {
     query(q: { active?: boolean; currentWindow?: boolean }): Promise<Tab[]>;
     get(id: number): Promise<Tab & { status?: string }>;
     update(id: number, props: { url?: string }): Promise<Tab>;
-    onUpdated: Event<(id: number, change: { status?: string; url?: string }, tab: Tab) => void>;
+    onUpdated: Event<(id: number, change: { status?: string; url?: string; title?: string }, tab: Tab) => void>;
     onRemoved: Event<(id: number) => void>;
+    onActivated: Event<(info: { tabId: number; windowId: number }) => void>;
+    /** A picture of the visible part of the window's active tab (needs <all_urls> or activeTab). */
+    captureVisibleTab(windowId: number | undefined, options: { format: "jpeg" | "png"; quality?: number }): Promise<string>;
   };
   permissions: {
     contains(p: { origins: string[] }): Promise<boolean>;
@@ -42,6 +46,10 @@ export interface BrowserApi {
   scripting: {
     executeScript(details: { target: { tabId: number }; func?: (...a: any[]) => unknown; files?: string[];
       args?: unknown[] }): Promise<{ result?: unknown }[]>;
+  };
+  /** Chromium only (Chrome 114+): the docked side panel. Elsewhere the same page is docked into the tab. */
+  sidePanel?: {
+    setPanelBehavior(b: { openPanelOnActionClick: boolean }): Promise<void>;
   };
   contextMenus: {
     create(props: { id: string; title: string; contexts: string[] }): void;

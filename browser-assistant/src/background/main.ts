@@ -1,5 +1,5 @@
-// The background script: the only code that holds the token and talks to the assistant service. The popup
-// and the in-page panel connect to it over runtime ports; it reads the page they ask about, streams the
+// The background script: the only code that holds the token and talks to the assistant service. The side panel
+// (Chrome's own, or docked into the tab) and the in-page answer panel connect to it over runtime ports; it reads the page they ask about, streams the
 // answer back, and keeps one state stream open while any of them is listening.
 
 import { api, browserName, Port } from "../browser-adapters/api";
@@ -7,7 +7,9 @@ import { Client, ServiceFailure, Settings } from "../core/client";
 import { ChatEvent, Command, DEFAULT_SERVICE, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { extractPage, Extracted } from "../content/extract";
 import { AgentRunner } from "./agent";
-import { bridge } from "./agent-bridge";
+import { captureTab, CaptureError } from "./capture";
+import { bridge, overlay } from "./agent-bridge";
+import { overlayFor } from "../core/activity";
 import { AgentView, AuditEntry } from "../core/agent-types";
 
 const MAX_PAGE_CHARS = 200_000;      // what is read from a page; the service cuts it to the model's context
@@ -18,7 +20,7 @@ async function settings(): Promise<Settings> {
   return { service: (s.service as string) || DEFAULT_SERVICE, token: (s.token as string) || "" };
 }
 
-// ───────────── state: one stream, shared by every open popup and panel ─────────────
+// ───────────── state: one stream, shared by every open side panel and in-page panel ─────────────
 const listeners = new Set<Port>();
 type StateEvent = Extract<UiEvent, { kind: "state" }>;
 let last: StateEvent = { kind: "state", state: null, connected: false, problem: "connecting" };
@@ -116,12 +118,22 @@ async function ask(port: Port, req: Extract<UiRequest, { kind: "ask" }>): Promis
   }
   if (req.selection && !page.selection) page.selection = req.selection;
   if (req.selectionOnly) page.text = "";
+  let image: string | undefined;
+  if (req.screenshot) {
+    try {
+      image = await captureTab(req.tabId);
+      send(port, { kind: "shot", dataUrl: image });
+    } catch (e) {
+      send(port, { kind: "fatal", message: e instanceof CaptureError ? e.message : `No screenshot: ${String(e)}` });
+      return;
+    }
+  }
   send(port, { kind: "page", title: page.title, url: page.url, chars: page.text.length + page.selection.length });
   const run: Running = { id: null, abort: new AbortController(), session };
   running.set(port, run);
   try {
     await new Client(await settings()).chat({
-      session, task: req.task, question: req.question, lang: req.lang, tone: req.tone, thinking: req.thinking,
+      session, task: req.task, question: req.question, lang: req.lang, tone: req.tone, thinking: req.thinking, image,
       page: { title: page.title, url: page.url, text: page.text, selection: page.selection },
     }, (ev: ChatEvent) => {
       if (ev.type === "start") run.id = ev.id;
@@ -151,7 +163,7 @@ async function cancel(port: Port): Promise<void> {
 }
 
 // ───────────── the browser agent ─────────────
-const portTab = new Map<Port, number>();           // which tab a popup or panel is about
+const portTab = new Map<Port, number>();           // which tab a side panel or in-page panel is about
 
 async function audit(entry: AuditEntry): Promise<void> {
   try {
@@ -172,8 +184,17 @@ async function tabInfo(id: number): Promise<{ url: string; loading: boolean } | 
   }
 }
 
+// With a side panel open the approval card lives there; the in-page panel is only for Safari and context menus.
+const sidePanels = (): Port[] => [...listeners].filter((p) => p.name === "sidepanel");
+const pageBridge = { ...bridge, panelShown: async (tabId: number) => sidePanels().length > 0 || bridge.panelShown(tabId) };
+
+function sendTab(port: Port, tabId: number): void {
+  void api.tabs.get(tabId).then((t) => send(port, { kind: "tab", tabId, title: t.title || "", url: t.url || "" }))
+    .catch(() => undefined);
+}
+
 const runner = new AgentRunner({
-  page: bridge,
+  page: pageBridge,
   step: async (req, signal) => new Client(await settings()).agentStep(req, signal),
   cancelStep: async (id, session) => new Client(await settings()).cancel(id, session),
   tab: tabInfo,
@@ -188,13 +209,38 @@ const runner = new AgentRunner({
   },
   notify: (tabId: number, view: AgentView | null) => {
     for (const [port, tab] of portTab) if (tab === tabId) send(port, { kind: "agent", view });
+    void overlay(tabId, overlayFor(view)).catch(() => undefined);     // the frame on the page itself
   },
   audit: (e) => { void audit(e); },
   session: (tabId) => `${browserName}-${tabId}-${BOOT}`,
+  capture: (tabId) => captureTab(tabId),
   id: () => crypto.randomUUID(),
 });
 
 api.tabs.onRemoved.addListener((id) => runner.cancel(id));             // a closed tab ends its task
+api.tabs.onUpdated.addListener((id, change) => {
+  if (change.title === undefined && change.url === undefined && change.status !== "complete") return;
+  for (const [port, tab] of portTab) if (tab === id && port.name === "sidepanel") sendTab(port, id);
+  // a new page in a tab the agent is driving: put the frame back once the page agent is there again
+  if (change.status === "complete" && runner.active(id)) void overlay(id, overlayFor(runner.view(id))).catch(() => undefined);
+});
+
+// The toolbar button opens the side panel: Chrome's own where the browser has one, otherwise the same page docked
+// into the tab (Safari has no side panel API for extensions, and some Chromium browsers leave it out).
+const DOCK_ID = "ai-llm-engine-assistant-dock";
+async function dock(tabId: number): Promise<void> {
+  await api.scripting.executeScript({ target: { tabId }, files: ["dock.js"] });
+}
+async function undock(tabId: number): Promise<void> {
+  await api.scripting.executeScript({ target: { tabId }, args: [DOCK_ID], func: (id: string) => {
+    document.getElementById(id)?.remove();
+    document.documentElement.style.removeProperty("margin-right");
+  } });
+}
+if (api.sidePanel) void api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+api.action?.onClicked.addListener((tab) => {
+  if (tab.id !== undefined) void dock(tab.id).catch(() => undefined);    // a browser page: nothing can be docked there
+});
 
 // ───────────── the context menu and the in-page panel ─────────────
 interface Pending { task: Task; selection?: string; selectionOnly: boolean }
@@ -228,17 +274,24 @@ api.contextMenus.onClicked.addListener(async (info, tab) => {
 
 // ───────────── ports ─────────────
 api.runtime.onConnect.addListener((port: Port) => {
-  if (port.name !== "popup" && port.name !== "panel" && port.name !== "options") return;
+  if (port.name === "overlay") {
+    // the Stop on the page's working-here pill: it can stop the agent on its own tab and do nothing else
+    const own = port.sender?.tab?.id;
+    port.onMessage.addListener((msg: UiRequest) => { if (msg.kind === "agent-cancel" && own !== undefined) runner.cancel(own); });
+    return;
+  }
+  if (port.name !== "panel" && port.name !== "options" && port.name !== "sidepanel") return;
   const tabId = port.sender?.tab?.id;
   port.onMessage.addListener(async (msg: UiRequest) => {
-    // which tab the agent messages of this port are about: a panel lives in one; a popup is about the active one
+    // which tab the agent messages of this port are about: an in-page panel lives in one; the side panel follows the active one
     const agentTab = async (): Promise<number | undefined> =>
       tabId ?? portTab.get(port) ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
     if (msg.kind === "agent-start") {
       portTab.set(port, msg.tabId);
       try {
-        send(port, { kind: "agent", view: await runner.start(msg.tabId, msg.goal) });
-        await bridge.showPanel(msg.tabId).catch(() => undefined);
+        send(port, { kind: "agent", view: await runner.start(msg.tabId, msg.goal, msg.autonomy === "auto" ? "auto" : "ask",
+                                                                msg.see === true) });
+        if (port.name !== "sidepanel") await bridge.showPanel(msg.tabId).catch(() => undefined);
       } catch (e) {
         send(port, { kind: "fatal", message: e instanceof Error ? e.message : String(e) });
       }
@@ -252,6 +305,17 @@ api.runtime.onConnect.addListener((port: Port) => {
       else if (msg.kind === "agent-cancel") runner.cancel(t);
       else if (msg.kind === "agent-resume") runner.resume(t);
       else runner.reply(t, msg.text);
+      return;
+    }
+    if (msg.kind === "undock") {
+      if (tabId !== undefined) await undock(tabId).catch(() => undefined);
+      return;
+    }
+    if (msg.kind === "watch") {
+      // the side panel follows the active tab of its window: its agent card and page line switch with it
+      portTab.set(port, msg.tabId);
+      send(port, { kind: "agent", view: runner.view(msg.tabId) });
+      sendTab(port, msg.tabId);
       return;
     }
     if (msg.kind === "subscribe") {
@@ -284,7 +348,7 @@ api.runtime.onConnect.addListener((port: Port) => {
   port.onDisconnect.addListener(() => {
     listeners.delete(port);
     portTab.delete(port);                // a page navigating away drops its panel's port: that does not stop the agent
-    void cancel(port);                 // a closed popup must not leave the model generating for nobody
+    void cancel(port);                 // a closed panel must not leave the model generating for nobody
     if (!listeners.size && stream) {
       stream.abort();
       stream = null;

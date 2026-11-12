@@ -127,6 +127,9 @@ export function createAgent(win: Window & typeof globalThis) {
                                      id: el.getAttribute("id") || "", hint: `${name} ${placeholder}` });
     const form = (el as HTMLInputElement).form || el.closest("form");
     let formSensitive = false;
+    const formSearch = !!form && (form.getAttribute("role") === "search" || !!form.closest("[role=search]")
+      || !!form.querySelector("input[type=search]") || /search|поиск|query|\bq\b/i.test(form.getAttribute("action") || "")
+      || /search|поиск/i.test(`${form.getAttribute("name") || ""} ${form.id} ${form.className}`));
     if (form) {
       for (const f of Array.from(form.querySelectorAll("input,textarea"))) {
         if (sensitiveReason({ type: (f.getAttribute("type") || "").toLowerCase(), autocomplete: f.getAttribute("autocomplete") || "",
@@ -143,7 +146,7 @@ export function createAgent(win: Window & typeof globalThis) {
       required: (el as HTMLInputElement).required === true,
       options: tag === "select" ? Array.from((el as HTMLSelectElement).options).slice(0, 10).map((o) => collapse(o.text).slice(0, 40)) : [],
       dup: 0, sensitive: secret !== null, blocked: !!el.closest(CAPTCHA),
-      inForm: !!form, formAction: form ? absolute(form.getAttribute("action") || win.location.href) : "", formSensitive,
+      inForm: !!form, formAction: form ? absolute(form.getAttribute("action") || win.location.href) : "", formSensitive, formSearch,
     };
   }
 
@@ -308,7 +311,82 @@ export function createAgent(win: Window & typeof globalThis) {
     return { ok: true, readback: readback.slice(0, 80) };
   }
 
-  return { snapshot, find, inspect, click, fill, generation: () => generation };
+  // ───────────── scrolling and keys ─────────────
+  /** The thing that actually scrolls: the page, or — in an app whose page never moves — its largest scrolling box. */
+  function scroller(): Element | null {
+    const page = doc.scrollingElement;
+    if (page && page.scrollHeight > win.innerHeight + 4) return page;
+    let best: Element | null = null, area = 0;
+    for (const el of Array.from(doc.querySelectorAll("*"))) {
+      if (el.scrollHeight <= el.clientHeight + 4) continue;
+      const st = win.getComputedStyle(el);
+      if (st.overflowY !== "auto" && st.overflowY !== "scroll") continue;
+      const r = el.getBoundingClientRect();
+      if (r.width * r.height > area) { best = el; area = r.width * r.height; }
+    }
+    return best || page;
+  }
+
+  /** Scroll by most of a screen, or bring a listed element into view. Changes nothing on the page. */
+  async function scroll(direction: "up" | "down", ref?: string): Promise<Outcome> {
+    if (ref) {
+      const el = refs.get(ref)?.el.deref();
+      if (!el || !el.isConnected) return { ok: false, error: `${ref} is not on the page any more` };
+      (el as HTMLElement).scrollIntoView?.({ block: "center" });
+      await settle(150, 600);
+      return { ok: true };
+    }
+    const box = scroller();
+    if (!box) return { ok: false, error: "nothing on this page scrolls" };
+    const before = box.scrollTop;
+    const by = Math.round((box === doc.scrollingElement ? win.innerHeight : box.clientHeight) * 0.85);
+    box.scrollTop = before + (direction === "down" ? by : -by);
+    await settle(200, 1200);                                  // lazy lists load more as they come into view
+    const moved = box.scrollTop !== before;
+    return { ok: true, readback: moved ? "" : direction === "down" ? "already at the bottom" : "already at the top" };
+  }
+
+  const KEY_CODES: Record<string, string> = { Enter: "Enter", Tab: "Tab", Escape: "Escape", ArrowDown: "ArrowDown",
+    ArrowUp: "ArrowUp", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", PageDown: "PageDown", PageUp: "PageUp",
+    Home: "Home", End: "End", Backspace: "Backspace", Space: "Space" };
+
+  /** One key on a listed element (or whatever has focus). Enter in a form field submits that form, the way a
+   *  person's Enter would; the other keys are delivered as key events for the page's own handlers. */
+  async function press(key: string, ref: string | undefined, expect: Expect): Promise<Outcome> {
+    if (!(key in KEY_CODES)) return { ok: false, error: `the key ${key} is not one the agent may press` };
+    let target: Element | null = doc.activeElement;
+    if (ref) {
+      const r = resolve(ref, expect);
+      if ("error" in r) return { ok: false, error: r.error };
+      if (r.info.sensitive) return { ok: false, error: "the agent does not type into password, card or code fields" };
+      if (r.info.blocked) return { ok: false, error: "that is part of a CAPTCHA" };
+      target = r.el;
+      (target as HTMLElement).focus?.();
+    }
+    if (!target) target = doc.body;
+    const before = win.location.href;
+    const done = settle(250, 2000);
+    const init = { key: key === "Space" ? " " : key, code: KEY_CODES[key], bubbles: true, cancelable: true, composed: true };
+    const go = target!.dispatchEvent(new win.KeyboardEvent("keydown", init));
+    target!.dispatchEvent(new win.KeyboardEvent("keyup", init));
+    const form = (target as HTMLInputElement).form;
+    if (go && key === "Enter" && form && target!.tagName === "INPUT") {
+      if (typeof form.requestSubmit === "function") form.requestSubmit(); else form.submit();
+    }
+    const mutations = await done;
+    return { ok: true, urlChanged: win.location.href !== before, mutations };
+  }
+
+  /** Where a listed element is on screen (brought into view first) — for the visible cursor, nothing else. */
+  function rectOf(ref: string): { x: number; y: number; w: number; h: number } | null {
+    const el = refs.get(ref)?.el.deref();
+    if (!el || !el.isConnected) return null;
+    (el as HTMLElement).scrollIntoView?.({ block: "center" });
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }
+
+  return { snapshot, find, inspect, click, fill, scroll, press, rectOf, generation: () => generation };
 }
 
 export type PageAgent = ReturnType<typeof createAgent>;

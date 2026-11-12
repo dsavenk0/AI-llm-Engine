@@ -6,13 +6,14 @@
 
 import { api } from "../browser-adapters/api";
 import type { PageBridge } from "./agent";
+import type { OverlayState } from "../content/overlay";
 
 export const PANEL_ID = "ai-llm-engine-assistant-panel";
 
 // Runs inside the page (it is serialised by executeScript): it must use nothing from this file.
 function dispatch(method: string, args: unknown[]): unknown {
   const agent = (globalThis as unknown as Record<string, Record<string, (...a: unknown[]) => unknown>>).__llmAssistantAgent;
-  const allowed = ["snapshot", "find", "inspect", "click", "fill", "generation"];
+  const allowed = ["snapshot", "find", "inspect", "click", "fill", "scroll", "press", "generation", "overlay"];
   if (!agent || allowed.indexOf(method) < 0) return { __missing: true };
   return agent[method](...args);
 }
@@ -45,4 +46,12 @@ export const bridge: PageBridge = {
   inspect: (tabId, ref, expect) => call(tabId, "inspect", [ref, expect]),
   click: (tabId, ref, expect) => call(tabId, "click", [ref, expect]),
   fill: (tabId, ref, value, expect) => call(tabId, "fill", [ref, value, expect]),
+  scroll: (tabId, direction, ref) => call(tabId, "scroll", [direction, ref]),
+  press: (tabId, key, ref, expect) => call(tabId, "press", [key, ref, expect]),
 };
+
+/** Show or clear the working-here frame on a tab. Only on a tab whose page agent is already installed — the
+ *  overlay never installs anything by itself, so a tab the extension may not read simply shows nothing. */
+export async function overlay(tabId: number, state: OverlayState): Promise<void> {
+  await call(tabId, "overlay", [state]);
+}

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLMBar Assistant</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+<header class="top">
+  <img src="icons/icon-48.png" alt="" width="22" height="22" class="logo">
+  <span class="brand">LLMBar <span>Assistant</span></span>
+  <span class="spacer"></span>
+  <button id="model-chip" type="button" class="chip" aria-expanded="false" aria-controls="model-sheet" title="Model and engine">
+    <span id="dot" class="dot" aria-hidden="true"></span><span id="model-name">Connecting…</span><span aria-hidden="true">▾</span>
+  </button>
+  <button id="theme" type="button" class="icon" title="Theme: follows the system" aria-label="Theme">◐</button>
+  <button id="clear" type="button" class="icon" title="New conversation for this tab" aria-label="New conversation">⟲</button>
+  <button id="settings" type="button" class="icon" title="Settings" aria-label="Settings">⚙︎</button>
+  <button id="undock" type="button" class="icon" title="Close the panel" aria-label="Close the panel" hidden>✕</button>
+</header>
+
+<section id="model-sheet" class="sheet" hidden aria-label="Model and engine">
+  <label for="model">Model — the default for every client on this Mac</label>
+  <select id="model"></select>
+  <div id="controls" class="row"></div>
+  <div id="metrics" class="dim small"></div>
+  <div id="note" class="bad small" role="alert"></div>
+</section>
+
+<div class="modebar">
+  <label for="mode" class="sr">What the assistant may do</label>
+  <select id="mode">
+    <option value="ask">Ask about the page</option>
+    <option value="act-ask">Act on the page — ask before every step</option>
+    <option value="act-auto">Act on the page — ask before anything risky</option>
+  </select>
+</div>
+
+<div id="problem" class="banner bad" role="alert" hidden></div>
+<div id="update" class="banner warn" role="status" hidden></div>
+
+<main id="threads" aria-live="polite"></main>
+
+<footer class="composer">
+  <div id="tab" class="tabline dim small" title="The tab the assistant reads and acts on"></div>
+  <div class="box">
+    <textarea id="input" rows="2" aria-label="Message"></textarea>
+    <div class="row">
+      <button id="see" type="button" class="pill-toggle small" aria-pressed="false"
+              title="Let the model see a screenshot of the page (needs a model with vision)">📷 Screenshot</button>
+      <label class="toggle small" title="The model thinks before answering: better on hard questions, slower">
+        <input id="thinking" type="checkbox"> Reason first</label>
+      <span class="spacer"></span>
+      <button id="stop" type="button" class="round stop" title="Stop" aria-label="Stop" hidden><i></i></button>
+      <button id="send" type="button" class="round send" title="Send (Enter)" aria-label="Send">↑</button>
+    </div>
+  </div>
+  <div class="foot dim small">Runs on this Mac. Nothing is sent to a cloud. The model can be wrong — check what matters.</div>
+</footer>
+<script type="module" src="sidepanel.js"></script>
+</body>
+</html>

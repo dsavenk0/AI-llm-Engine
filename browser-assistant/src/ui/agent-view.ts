@@ -75,7 +75,7 @@ export function renderAgent(root: HTMLElement, v: AgentView | null, h: AgentHand
     root.append(el("div", { class: "agent-reply" }, box, send));
   } else if (v.state === "waiting_for_access") {
     root.append(el("div", { class: "agent-ask" }, v.message || "The extension needs access to this site."),
-                el("div", { class: "note" }, "Open the extension's toolbar popup and press Allow."));
+                el("div", { class: "note" }, "Press Allow in the side panel."));
   } else if (v.message) {
     root.append(el("div", { class: v.state === "failed" ? "note bad" : "agent-ask" }, v.message));
   }
