@@ -13,7 +13,24 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 FINAL="$ROOT/LLMBar.app"
-VERSION="${VERSION:-1.2}"
+# llm.py is the single source of truth: keep the app, widget and bundled CLI on the same version.
+VERSION="$(python3 - "$ROOT/llm.py" <<'PY'
+import ast
+import pathlib
+import sys
+
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "VERSION" for target in node.targets
+    ):
+        print(ast.literal_eval(node.value))
+        break
+else:
+    raise SystemExit("VERSION assignment not found in llm.py")
+PY
+)"
+if [ -z "$VERSION" ]; then echo "could not read VERSION from $ROOT/llm.py" >&2; exit 1; fi
 INSTALL=0
 OFFLINE=0
 SIGN_ARG=""

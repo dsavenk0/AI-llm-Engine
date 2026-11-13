@@ -2149,7 +2149,10 @@ struct ContentView: View {
     /// Fit under the menu bar on small screens (the panel window must stay on screen).
     static var scrollHeight: CGFloat {
         let visible = NSScreen.main?.visibleFrame.height ?? 800
-        return max(260, min(520, visible - 210))
+        // Keep room for the readiness and update banners. They arrive asynchronously after the window
+        // has measured its initial content and its size is frozen; without this reserve they push the
+        // footer below the bottom edge on short displays.
+        return max(220, min(520, visible - 300))
     }
 
     var statusColor: Color { e.busy != nil ? HUD.amber : (e.sleeping ? HUD.cyan.opacity(0.6) : (e.running ? HUD.phosphor : HUD.dim)) }
@@ -2354,7 +2357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.isOpaque = false
             w.backgroundColor = .clear  // let the vibrancy blur the desktop behind the panel
             hosting = NSHostingView(rootView: AnyView(ContentView(e: engine, mon: monitor)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).ignoresSafeArea()))
+                .ignoresSafeArea().clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))))
             w.delegate = self  // closes on Esc or when focus leaves
             window = w
             installContent()

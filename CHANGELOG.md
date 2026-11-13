@@ -20,6 +20,7 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
   be used, and a developer-id DMG is signed, notarized and stapled when a notary profile is set.
 
 ### Fixed
+- **Safari pairing now fills its token from LLMBar**, and the panel keeps its footer visible when status banners arrive after launch. The app and bundled CLI also share one build version.
 - **Developer ID builds kept the widget and the Safari extension working**: they were re-signed without their
   sandbox, which stops an extension from loading.
 - **The engine log no longer fills with tracebacks** when a client hangs up (a closed panel, a cancelled request).

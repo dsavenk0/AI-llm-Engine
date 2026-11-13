@@ -7,10 +7,25 @@ import { DEFAULT_SERVICE, PROTOCOL } from "../core/protocol";
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const service = $<HTMLInputElement>("service"), token = $<HTMLInputElement>("token"), result = $("result");
 
+async function pairFromApp(): Promise<string> {
+  if (!api.runtime.sendNativeMessage) return "";
+  try {
+    const reply = await api.runtime.sendNativeMessage("local.llm_engine.assistant", { kind: "token" });
+    if (reply?.ok && typeof reply.token === "string" && reply.token.length >= 24) {
+      await api.storage.local.set({ token: reply.token });
+      return reply.token;
+    }
+  } catch {
+    // The extension may be running outside LLMBar; the manual clipboard flow remains available.
+  }
+  return "";
+}
+
 async function load(): Promise<void> {
   const s = await api.storage.local.get(["service", "token"]);
   service.value = (s.service as string) || DEFAULT_SERVICE;
-  token.value = (s.token as string) || "";
+  token.value = (s.token as string) || await pairFromApp();
+  if (token.value) say("Paired with LLMBar. Press Connect.", true);
 }
 
 function say(text: string, ok: boolean): void {
@@ -28,6 +43,10 @@ async function save(): Promise<void> {
   // the service is local by design: the token and page text must never be sent to another machine
   if (url.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(url.hostname)) {
     return say("The service must be on this Mac: http://127.0.0.1:<port>.", false);
+  }
+  if (!token.value.trim()) token.value = await pairFromApp();
+  if (!token.value.trim()) {
+    return say("LLMBar did not provide a token. In LLMBar, open Tools → Browser Assistant · Safari, then paste the copied token here.", false);
   }
   const settings = { service: url.origin, token: token.value.trim() };
   const c = new Client(settings);
