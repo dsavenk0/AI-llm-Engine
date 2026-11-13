@@ -1,6 +1,6 @@
 # Browser Assistant
 
-An optional browser extension — Safari, Chrome and other Chromium browsers — with a side panel that asks the
+An optional browser extension — Safari, Firefox, Chrome and other Chromium browsers — with a side panel that asks the
 model running on your Mac about the page you are reading, or lets it read, click, type and navigate on the page
 while you watch, asking before anything that submits, pays or sends. It also controls that model — pick it, load
 it, unload it, stop an answer — without LLMBar or a terminal open.
@@ -35,6 +35,13 @@ browser). It opens the browser's extensions page, shows the folder in Finder and
 turn on *Developer mode*, *Load unpacked*, ⌘⇧G, paste, Open. The extension's ID is fixed by a key in its manifest,
 so the host recognises it wherever the folder is. Each Tools row shows the version it installs (`0.1.0 (c51b127)`:
 the release, then the commit; the panel's foot shows the same).
+
+**Firefox: Tools ▸ Browser Assistant · Firefox.** LLMBar prepares `…/browser-assistant/firefox`, registers the
+pairing host in `~/Library/Application Support/Mozilla/NativeMessagingHosts`, and opens Firefox's
+`about:debugging` page. Choose *This Firefox* → *Load Temporary Add-on…* and select the `manifest.json` in that
+folder (its path is copied to the clipboard). The extension opens in Firefox's native sidebar and gets its token
+from the host. Firefox removes temporary add-ons when it quits, so load it again after restarting Firefox. A
+permanent install requires publishing and signing the add-on through Mozilla Add-ons.
 
 
 
@@ -173,7 +180,7 @@ services' own APIs.
 | LLMBar ▸ Tools ▸ Browser Assistant | implemented; the app type-checks, was not rebuilt or run |
 | Update of the extension's files when LLMBar updates | implemented, tested |
 | Chrome / Chromium build | builds from the same source (`dist/chromium`), side panel included; **never loaded in Chrome** |
-| Firefox | not built; it has a sidebar of its own (`sidebar_action`), so a build is mostly a manifest |
+| Firefox | built from the shared source with a native `sidebar_action`, Gecko extension ID and Firefox native-messaging registration; temporary installation through `about:debugging`; **not yet exercised in a live Firefox** |
 | Safari extension inside LLMBar.app; Tools ▸ Browser Assistant opens Safari on it | implemented; built and registered with macOS (`pluginkit` lists it); ad-hoc signed, so Safari needs *Allow Unsigned Extensions* until it is signed with an Apple Development / Developer ID certificate. **Not yet enabled in Safari by its author** |
 | Native messaging: the extension gets the token from LLMBar | implemented (reads the token file only); **untested in Safari** |
 | Google Sheets, Excel Online | planned (Phases 3 – 4) — need OAuth client registrations |
@@ -187,7 +194,7 @@ services' own APIs.
 picks it up with the app — nothing to re-add. The service still updates itself: when it notices its own code
 changed on disk it exits when nobody is mid-answer, and launchd starts the new one.
 
-**A temporary or unpacked extension (Safari without LLMBar, Chrome).** Its files live in Application Support,
+**A temporary or unpacked extension (Safari without LLMBar, Firefox, Chrome).** Its files live in Application Support,
 so an update that replaces the app cannot leave the browser pointing at files that are gone. On start the service
 compares the shipped extension with that copy and replaces it; the side panel then says a newer version is
 installed and where — reload it in the browser (Safari: add the folder again; Chrome: the reload button in
@@ -208,7 +215,7 @@ cd browser-assistant
 npm install          # two tools: typescript, esbuild
 npm run check        # type-check
 npm test             # unit tests
-npm run build        # dist/safari and dist/chromium
+npm run build        # dist/safari, dist/chromium and dist/firefox
 ```
 
 `./build-app.sh` builds the extension into the app when Node.js is installed, and skips it otherwise.

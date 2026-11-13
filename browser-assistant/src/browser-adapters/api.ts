@@ -55,6 +55,10 @@ export interface BrowserApi {
   sidePanel?: {
     setPanelBehavior(b: { openPanelOnActionClick: boolean }): Promise<void>;
   };
+  /** Firefox only: open the persistent browser sidebar from a user gesture. */
+  sidebarAction?: {
+    open(): Promise<void>;
+  };
   contextMenus: {
     create(props: { id: string; title: string; contexts: string[] }): void;
     removeAll(): Promise<void>;

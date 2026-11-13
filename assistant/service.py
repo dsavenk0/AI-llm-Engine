@@ -72,7 +72,7 @@ def sync_extension(built=None, home=None):
     import shutil
     built, home = built or EXT_BUILT, home or EXT_HOME
     out = {}
-    for browser in ("safari", "chromium"):
+    for browser in ("safari", "chromium", "firefox"):
         src, dst = os.path.join(built, browser), os.path.join(home, browser)
         if not os.path.isfile(os.path.join(src, "manifest.json")):
             if os.path.isfile(os.path.join(dst, "manifest.json")):
@@ -255,7 +255,7 @@ class Assistant:
         can replace the files while this service keeps running, and an extension reloads itself when it sees a
         newer one here (browser-assistant/src/background/main.ts)."""
         out = dict(self.extension)
-        for browser in ("safari", "chromium"):
+        for browser in ("safari", "chromium", "firefox"):
             v = _manifest_version(os.path.join(EXT_HOME, browser))
             if v:
                 out[browser] = v

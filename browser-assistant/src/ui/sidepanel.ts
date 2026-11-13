@@ -1,4 +1,4 @@
-// The side panel (Chrome): one place beside the page to ask about it, or to let the model act on it while you
+// The browser side panel: one place beside the page to ask about it, or to let the model act on it while you
 // watch. It follows the active tab of its window — each tab keeps its own conversation — and, like every other
 // page of the extension, holds no token: everything goes through the background script.
 
@@ -510,10 +510,11 @@ function renderState(ev: Extract<UiEvent, { kind: "state" }>): void {
   $("model-name").textContent = state.model.name || (state.engine.state === "ready" ? "No model" : line.text);
   chip.title = line.text;
   $("metrics").textContent = metricsText(state);
-  const notice = updateNotice(state, MINE, browserName === "chromium" ? "chromium" : "safari", PROTOCOL, ev.app);
+  const target = browserName === "chromium" ? "chromium" : browserName === "firefox" ? "firefox" : "safari";
+  const notice = updateNotice(state, MINE, target, PROTOCOL, ev.app);
   $("update").hidden = !notice;
   $("update").textContent = notice;
-  if (notice && browserName === "chromium" && !ev.app) {
+  if (notice && (browserName === "chromium" || browserName === "firefox") && !ev.app) {
     // the update waits for this click: reloading on its own would close the panel mid-conversation
     const now = el("button", { type: "button", class: "primary", textContent: "Update now" });
     now.style.marginLeft = "8px";

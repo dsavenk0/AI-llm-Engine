@@ -1,6 +1,6 @@
-// Tools ▸ Browser Assistant: install what an app may install, then hand the person straight to the one switch
-// only they may flip. The Safari extension ships inside LLMBar.app (Contents/PlugIns/LLMBar Assistant.appex),
-// so Safari lists it; Apple lets an app open Safari ▸ Settings ▸ Extensions on it, never tick it.
+// Tools ▸ Browser Assistant: install what an app may install, then hand the person the remaining browser step.
+// The Safari extension ships inside LLMBar.app; Chromium and Firefox load their prepared extension from
+// Application Support.
 
 import AppKit
 import SafariServices
@@ -83,10 +83,26 @@ enum BrowserAssistantSetup {
         return known.first { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0.1) != nil }
     }
 
+    /// Firefox's temporary add-on flow is handled by about:debugging; Firefox does not accept an app-installed
+    /// unpacked extension, so the person loads the prepared manifest once per browser session.
+    static var firefox: (name: String, id: String, page: String)? {
+        let id = "org.mozilla.firefox"
+        guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil else { return nil }
+        return ("Firefox", id, "about:debugging#/runtime/this-firefox")
+    }
+
     /// The extension's version in the folder a Chromium browser loads (Application Support), if it is there.
     static var chromiumVersion: String? {
         let manifest = (NSHomeDirectory() as NSString)
             .appendingPathComponent("Library/Application Support/AI-llm-Engine/browser-assistant/chromium/manifest.json")
+        guard let d = FileManager.default.contents(atPath: manifest),
+              let m = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        return (m["version_name"] as? String) ?? (m["version"] as? String)
+    }
+
+    static var firefoxVersion: String? {
+        let manifest = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/AI-llm-Engine/browser-assistant/firefox/manifest.json")
         guard let d = FileManager.default.contents(atPath: manifest),
               let m = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
         return (m["version_name"] as? String) ?? (m["version"] as? String)
@@ -130,6 +146,35 @@ enum BrowserAssistantSetup {
                         Затем нажмите кнопку расширения на панели: откроется боковая панель и подключится сама.
                         Уже загружено? Нажмите там ↻ у расширения, чтобы подхватить эту версию.
                         """))
+            }
+        }
+    }
+
+    /// Firefox requires the user to load a temporary add-on. LLMBar installs its native host and prepares the
+    /// extension first, then opens Firefox's Add-ons Debugging page with the manifest path on the clipboard.
+    static func runFirefox() {
+        guard let browser = firefox else { return }
+        CLI.run(["assistant", "setup", "--firefox"]) { code, out in
+            DispatchQueue.main.async {
+                guard code == 0 else {
+                    alert(L("The browser assistant could not be set up", "Не удалось настроить браузерный ассистент"),
+                          String(out.suffix(600)))
+                    return
+                }
+                let manifest = (NSHomeDirectory() as NSString)
+                    .appendingPathComponent("Library/Application Support/AI-llm-Engine/browser-assistant/firefox/manifest.json")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(manifest, forType: .string)
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: manifest)])
+                let script = "tell application id \"\(browser.id)\" to open location \"\(browser.page)\""
+                var err: NSDictionary?
+                NSAppleScript(source: script)?.executeAndReturnError(&err)
+                if err != nil, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.id) {
+                    NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+                }
+                alert(L("Load the Firefox extension", "Загрузите расширение в Firefox"),
+                      L("In about:debugging, choose “This Firefox” → “Load Temporary Add-on…”. Press ⌘⇧G and paste the manifest path from the clipboard. Firefox removes temporary add-ons when it quits; repeat this step after restarting Firefox.",
+                        "На странице about:debugging выберите «Этот Firefox» → «Загрузить временное дополнение…». Нажмите ⌘⇧G и вставьте путь к манифесту из буфера обмена. После выхода Firefox удаляет временные дополнения — загрузите его снова после перезапуска."))
             }
         }
     }

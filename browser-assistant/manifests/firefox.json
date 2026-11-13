@@ -1,0 +1,23 @@
+{
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module",
+    "persistent": false
+  },
+  "sidebar_action": {
+    "default_title": "LLMBar Assistant",
+    "default_panel": "sidepanel.html",
+    "open_at_install": false
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "llmbar-assistant@local.llm-engine"
+    }
+  },
+  "extra_permissions": [
+    "nativeMessaging",
+    "tabs"
+  ]
+}

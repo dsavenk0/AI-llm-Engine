@@ -1813,6 +1813,13 @@ struct ToolsTab: View {
                         BrowserAssistantSetup.runChromium()
                     }
                 }
+                if let browser = BrowserAssistantSetup.firefox {
+                    tool("globe", L("Browser assistant · \(browser.name)", "Браузерный ассистент · \(browser.name)"),
+                         L("Prepares the temporary install", "Подготовит временную установку")
+                         + (BrowserAssistantSetup.firefoxVersion.map { " · v\($0)" } ?? "")) {
+                        BrowserAssistantSetup.runFirefox()
+                    }
+                }
                 // an inline list, like the model settings: a Menu in this style lost the row's padding and chevron
                 Button(action: { connectOpen.toggle() }) {
                     HStack(spacing: 10) {

@@ -1,10 +1,11 @@
-"""The Chromium browsers' half of pairing: a native-messaging host that hands the extension the service's token, so
-nobody pastes it. (Safari gets the same answer from the handler inside LLMBar.app.)
+"""The Chromium and Firefox half of pairing: a native-messaging host that hands the extension the service's token.
+Safari gets the same answer from the handler inside LLMBar.app.
 
 Chrome starts this program when the extension calls `chrome.runtime.sendNativeMessage("local.llm_engine.assistant",
-{"kind": "token"})`, but only for the extension ID named in the host manifest (`allowed_origins`), which
-`./llm assistant setup` writes into each installed Chromium browser's NativeMessagingHosts folder. Messages are
-JSON preceded by their length (4 bytes, native byte order). It answers "token" and nothing else, then exits.
+{"kind": "token"})`, but only for the extension ID named in the host manifest (`allowed_origins` for Chromium,
+`allowed_extensions` for Firefox), which `./llm assistant setup` writes into each installed browser's
+NativeMessagingHosts folder. Messages are JSON preceded by their length (4 bytes, native byte order). It answers
+"token" and nothing else, then exits.
 """
 import json
 import os
@@ -13,6 +14,7 @@ import sys
 
 NAME = "local.llm_engine.assistant"
 EXTENSION_ID = "acoaldoejdbigghamllanabnpamijfnh"     # fixed by the "key" in browser-assistant/manifests/chromium.json
+FIREFOX_EXTENSION_ID = "llmbar-assistant@local.llm-engine"  # fixed by browser_specific_settings.gecko.id
 MAX_MESSAGE = 64 * 1024
 
 
@@ -51,10 +53,12 @@ def write_message(stream, obj):
     stream.flush()
 
 
-def manifest(executable):
-    """The host manifest a Chromium browser reads to find this program, and which extension may start it."""
-    return {"name": NAME, "description": "LLMBar browser assistant: pairing", "path": executable, "type": "stdio",
-            "allowed_origins": [f"chrome-extension://{EXTENSION_ID}/"]}
+def manifest(executable, browser="chromium"):
+    """A browser's host manifest: where to find this app, and which one extension may start it."""
+    allowed = ({"allowed_extensions": [FIREFOX_EXTENSION_ID]} if browser == "firefox"
+               else {"allowed_origins": [f"chrome-extension://{EXTENSION_ID}/"]})
+    return {"name": NAME, "description": "LLMBar browser assistant: pairing", "path": executable,
+            "type": "stdio", **allowed}
 
 
 # where each Chromium browser looks for host manifests (only browsers whose profile folder exists are written)
@@ -62,8 +66,9 @@ BROWSER_DIRS = ("Google/Chrome", "Google/Chrome Beta", "Chromium", "Microsoft Ed
                 "Vivaldi")
 
 
-def install(home, python=None, support=None):
-    """Write the launcher and the host manifest for every installed Chromium browser; returns their names."""
+def install(home, python=None, support=None, firefox=False):
+    """Write the launcher and host manifest for each installed browser; returns their names."""
+    default_support = support is None
     support = support or os.path.expanduser("~/Library/Application Support")
     os.makedirs(home, exist_ok=True)
     launcher = os.path.join(home, "native-host")
@@ -82,6 +87,15 @@ def install(home, python=None, support=None):
         with open(os.path.join(hosts, NAME + ".json"), "w") as f:
             json.dump(manifest(launcher), f, indent=2)
         done.append(browser.split("/")[-1])
+    # Firefox's host manifests live in Mozilla's application-support directory, separately from its profile.
+    firefox_app = default_support and any(os.path.exists(p) for p in (
+        "/Applications/Firefox.app", os.path.expanduser("~/Applications/Firefox.app")))
+    if firefox or firefox_app or os.path.isdir(os.path.join(support, "Firefox", "Profiles")):
+        hosts = os.path.join(support, "Mozilla", "NativeMessagingHosts")
+        os.makedirs(hosts, exist_ok=True)
+        with open(os.path.join(hosts, NAME + ".json"), "w") as f:
+            json.dump(manifest(launcher, "firefox"), f, indent=2)
+        done.append("Firefox")
     return done
 
 

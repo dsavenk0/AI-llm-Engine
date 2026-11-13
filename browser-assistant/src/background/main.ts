@@ -56,10 +56,11 @@ let stream: AbortController | null = null;
 // LLMBar.app (Safari) the extension comes with the app, so this does not apply.
 const MINE = api.runtime.getManifest().version;
 let reloading = false;
+const extensionTarget = browserName === "chromium" ? "chromium" : browserName === "firefox" ? "firefox" : "safari";
 
 async function maybeReload(s: Snapshot | null): Promise<void> {
   if (!s || appInfo || reloading) return;
-  const folder = s.extension.versions[browserName === "chromium" ? "chromium" : "safari"];
+  const folder = s.extension.versions[extensionTarget];
   if (!folder || !newerVersion(folder, MINE)) return;
   if (running.size || runner.anyActive()) return;            // after the current answer or task, not in the middle
   // A reload closes the side panel and its conversation: while one is open, wait — it shows that an update is
@@ -229,6 +230,16 @@ async function cancel(port: Port): Promise<void> {
 
 // ───────────── the browser agent ─────────────
 const portTab = new Map<Port, number>();           // which tab a side panel or in-page panel is about
+const portWindow = new Map<Port, number>();         // Firefox's native sidebar is shared by tabs in its window
+
+api.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  for (const [port, win] of portWindow) {
+    if (port.name !== "sidepanel" || win !== windowId) continue;
+    portTab.set(port, tabId);
+    send(port, { kind: "agent", view: runner.view(tabId) });
+    sendTab(port, tabId);
+  }
+});
 
 async function audit(entry: AuditEntry): Promise<void> {
   try {
@@ -290,8 +301,8 @@ api.tabs.onUpdated.addListener((id, change) => {
   if (change.status === "complete" && runner.active(id)) void overlay(id, overlayFor(runner.view(id))).catch(() => undefined);
 });
 
-// The toolbar button opens the side panel: Chrome's own where the browser has one, otherwise the same page docked
-// into the tab (Safari has no side panel API for extensions, and some Chromium browsers leave it out).
+// The toolbar button opens the browser's own side panel when available (Chromium or Firefox); Safari and
+// Chromium browsers without one dock the same page into the tab.
 const DOCK_ID = "ai-llm-engine-assistant-dock";
 async function dock(tabId: number): Promise<void> {
   await api.scripting.executeScript({ target: { tabId }, files: ["dock.js"] });
@@ -304,7 +315,8 @@ async function undock(tabId: number): Promise<void> {
 }
 if (api.sidePanel) void api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
 api.action?.onClicked.addListener((tab) => {
-  if (tab.id !== undefined) void dock(tab.id).catch(() => undefined);    // a browser page: nothing can be docked there
+  if (api.sidebarAction) void api.sidebarAction.open().catch(() => undefined);
+  else if (tab.id !== undefined) void dock(tab.id).catch(() => undefined);  // browsers without a native sidebar dock it into the page
 });
 
 // ───────────── the context menu and the in-page panel ─────────────
@@ -347,6 +359,8 @@ api.runtime.onConnect.addListener((port: Port) => {
   }
   if (port.name !== "panel" && port.name !== "options" && port.name !== "sidepanel") return;
   const tabId = port.sender?.tab?.id;
+  const senderWindow = port.sender?.tab?.windowId;
+  if (port.name === "sidepanel" && senderWindow !== undefined) portWindow.set(port, senderWindow);
   port.onMessage.addListener(async (msg: UiRequest) => {
     // which tab the agent messages of this port are about: an in-page panel lives in one; the side panel follows the active one
     const agentTab = async (): Promise<number | undefined> =>
@@ -393,6 +407,8 @@ api.runtime.onConnect.addListener((port: Port) => {
       const t = tabId ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
       if (t !== undefined) {
         portTab.set(port, t);
+        const active = (await api.tabs.get(t));
+        if (active.windowId !== undefined) portWindow.set(port, active.windowId);
         send(port, { kind: "agent", view: runner.view(t) });
       }
       if (!stream) void follow();
@@ -417,6 +433,7 @@ api.runtime.onConnect.addListener((port: Port) => {
   port.onDisconnect.addListener(() => {
     listeners.delete(port);
     portTab.delete(port);                // a page navigating away drops its panel's port: that does not stop the agent
+    portWindow.delete(port);
     void cancel(port);                 // a closed panel must not leave the model generating for nobody
     if (!listeners.size && stream) {
       stream.abort();

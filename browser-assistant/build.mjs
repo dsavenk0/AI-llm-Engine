@@ -26,7 +26,7 @@ if (process.argv.includes("--tests")) {
   const dirty = git("status --porcelain -- .") ? "+" : "";
   const version = `${base}.${count}`;
   const versionName = sha ? `${base} (${sha}${dirty})` : base;
-  for (const browser of ["safari", "chromium"]) {
+  for (const browser of ["safari", "chromium", "firefox"]) {
     const out = join(root, "dist", browser);
     rmSync(out, { recursive: true, force: true });
     mkdirSync(out, { recursive: true });
@@ -41,8 +41,12 @@ if (process.argv.includes("--tests")) {
     const baseManifest = read("manifests/base.json"), own = read(`manifests/${browser}.json`);
     const permissions = [...baseManifest.permissions, ...(own.extra_permissions || [])];
     delete own.extra_permissions;
-    writeFileSync(join(out, "manifest.json"),
-      JSON.stringify({ ...baseManifest, ...own, permissions, version, version_name: versionName }, null, 2) + "\n");
+    const manifest = { ...baseManifest, ...own, permissions, version, version_name: versionName };
+    // Chrome-specific WAR hardening is not needed on Firefox and is not part of its manifest schema.
+    if (browser === "firefox") {
+      for (const resource of manifest.web_accessible_resources || []) delete resource.use_dynamic_url;
+    }
+    writeFileSync(join(out, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
     cpSync(join(root, "src/ui/options.html"), join(out, "options.html"));
     writeFileSync(join(out, "options.css"), readFileSync(join(root, "src/ui/base.css"), "utf8")
       + readFileSync(join(root, "src/ui/options.css"), "utf8"));

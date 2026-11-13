@@ -1729,7 +1729,7 @@ def service_plist():
 
 ASSISTANT_LABEL = "com.ai-llm-engine.assistant"
 ASSISTANT_AGENT = os.path.join(HOME, "Library", "LaunchAgents", ASSISTANT_LABEL + ".plist")
-ASSISTANT_EXT = os.path.join(BASE, "browser-assistant", "dist", "safari")
+ASSISTANT_EXT = os.path.join(BASE, "browser-assistant", "dist")
 
 
 def assistant_plist():
@@ -1767,7 +1767,7 @@ def assistant_cmd(cfg, args):
             pass
         return True
     if action == "setup":
-        return assistant_setup(service, reveal="--reveal" in args)
+        return assistant_setup(service, reveal="--reveal" in args, firefox="--firefox" in args)
     if action == "install":
         service.load_or_create_token()
         os.makedirs(os.path.dirname(ASSISTANT_AGENT), exist_ok=True)
@@ -1797,11 +1797,15 @@ def assistant_cmd(cfg, args):
         hello = http_json(f"http://127.0.0.1:{service.PORT}/v1/assistant/hello", timeout=1)
     except Exception:
         hello = None
+    extension_folders = {
+        browser: os.path.join(service.EXT_HOME, browser)
+        for browser in ("safari", "chromium", "firefox")
+        if os.path.isfile(os.path.join(service.EXT_HOME, browser, "manifest.json"))
+    }
     st = {"service_installed": os.path.exists(ASSISTANT_AGENT), "service_running": bool(hello),
           "port": service.PORT, "token_file": os.path.exists(service.TOKEN_FILE),
-          "extension_folder": (os.path.join(service.EXT_HOME, "safari")
-                               if os.path.exists(os.path.join(service.EXT_HOME, "safari", "manifest.json")) else None),
-          "extension_version": service._manifest_version(os.path.join(service.EXT_HOME, "safari")) or None,
+          "extensions": {browser: {"folder": folder, "version": service._manifest_version(folder)}
+                         for browser, folder in extension_folders.items()},
           "engine_running": bool(health(cfg, 1))}
     if as_json:
         print(json.dumps(st)); return True
@@ -1809,19 +1813,22 @@ def assistant_cmd(cfg, args):
     print(f"{ok if st['service_installed'] else no} " + T("Service installed (starts at login)"))
     print(f"{ok if st['service_running'] else no} " + T("Service answering on 127.0.0.1:{port}").format(port=service.PORT))
     print(f"{ok if st['engine_running'] else no} " + T("Engine running"))
-    if st["extension_folder"]:
-        print(f"{ok} " + T("Extension files:") + f" {st['extension_folder']} (v{st['extension_version']})")
+    if extension_folders:
+        for browser, folder in extension_folders.items():
+            version = service._manifest_version(folder)
+            print(f"{ok} " + T("Extension files:") + f" {browser}: {folder} (v{version})")
     else:
         print(f"{no} " + T("Extension files are not installed"))
-    if not (st["service_installed"] and st["extension_folder"]):
+    if not (st["service_installed"] and extension_folders):
         print(DIM(T("Set everything up with: ./llm assistant setup")))
     return True
 
 
-def assistant_setup(service, reveal=False):
+def assistant_setup(service, reveal=False, firefox=False):
     """Everything that can be done for the user, then the steps only they can take. Idempotent: run again
     after an update and it brings the extension's files up to date."""
-    if not os.path.isfile(os.path.join(ASSISTANT_EXT, "manifest.json")):
+    if not all(os.path.isfile(os.path.join(ASSISTANT_EXT, browser, "manifest.json"))
+               for browser in ("safari", "chromium", "firefox")):
         # a source checkout: build it if the tools are here (an app bundle ships it built)
         src = os.path.join(BASE, "browser-assistant")
         if os.path.isfile(os.path.join(src, "package.json")) and shutil.which("npm"):
@@ -1830,11 +1837,12 @@ def assistant_setup(service, reveal=False):
                 if subprocess.run(step, cwd=src).returncode != 0:
                     print(R(T("The extension could not be built."))); return False
     versions = service.sync_extension()
-    if "safari" not in versions:
+    if not versions:
         print(R(T("The extension is not built and Node.js is not installed — install Node.js (brew install node) "
                   "and run this again."))); return False
-    folder = os.path.join(service.EXT_HOME, "safari")
-    print(G("✓ ") + T("Extension files:") + f" {folder} (v{versions['safari']})")
+    for browser, version in versions.items():
+        folder = os.path.join(service.EXT_HOME, browser)
+        print(G("✓ ") + T("Extension files:") + f" {folder} (v{version})")
     if not assistant_cmd(None, ["install"]):
         return False
     tok = service.load_or_create_token()
@@ -1843,25 +1851,35 @@ def assistant_setup(service, reveal=False):
         print(G("✓ ") + T("Pairing token copied to the clipboard."))
     except (OSError, subprocess.SubprocessError):
         print(T("Pairing token:") + f" {tok}")
-    print()
-    print(B(T("Three steps in Safari — only you can take them:")))
-    print(T("  1. Safari ▸ Settings ▸ Advanced: turn on “Show features for web developers”."))
-    print(T("  2. Safari ▸ Settings ▸ Developer: “Add Temporary Extension…” and choose the folder above."))
-    print(T("  3. The extension's settings open: paste the token (already on the clipboard) and press Connect."))
-    print(DIM(T("Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. "
-                "A permanent install needs a signed app; see docs/safari-assistant/README.md.")))
-    if "chromium" in versions:
+    if "safari" in versions:
+        print()
+        print(B(T("Three steps in Safari — only you can take them:")))
+        print(T("  1. Safari ▸ Settings ▸ Advanced: turn on “Show features for web developers”."))
+        print(T("  2. Safari ▸ Settings ▸ Developer: “Add Temporary Extension…” and choose: ")
+              + os.path.join(service.EXT_HOME, "safari"))
+        print(T("  3. The extension pairs with the app automatically. If needed, paste the token from the clipboard."))
+        print(DIM(T("Safari forgets a temporary extension when it quits — repeat step 2 after restarting Safari. "
+                    "A permanent install needs a signed app; see docs/safari-assistant/README.md.")))
+    if "chromium" in versions or "firefox" in versions:
         from assistant import native_host
-        browsers = native_host.install(service.EXT_HOME)       # lets the extension fetch the token by itself
+        browsers = native_host.install(service.EXT_HOME, firefox=firefox)  # native host hands browsers the token
         if browsers:
             print(G("✓ ") + T("Pairing set up for:") + " " + ", ".join(browsers))
+    if "chromium" in versions:
         print()
         print(B(T("Chrome, Edge, Brave, Arc and other Chromium browsers — two steps:")))
         print(T("  1. Open chrome://extensions (edge://extensions in Edge), turn on “Developer mode”, press "
                 "“Load unpacked” and choose:") + f" {os.path.join(service.EXT_HOME, 'chromium')}")
         print(T("  2. Click the extension's toolbar button: the side panel opens and connects by itself."))
+    if "firefox" in versions:
+        print()
+        print(B(T("Firefox — temporary extension:")))
+        print(T("  1. Open about:debugging#/runtime/this-firefox, then “Load Temporary Add-on…”"))
+        print(T("  2. Choose:") + f" {os.path.join(service.EXT_HOME, 'firefox', 'manifest.json')}")
+        print(DIM(T("Firefox removes temporary add-ons when it quits. Load it again after restarting Firefox.")))
     if reveal:
-        subprocess.run(["open", "-R", os.path.join(folder, "manifest.json")], capture_output=True)
+        reveal_browser = "safari" if "safari" in versions else next(iter(versions))
+        subprocess.run(["open", "-R", os.path.join(service.EXT_HOME, reveal_browser, "manifest.json")], capture_output=True)
     return True
 
 

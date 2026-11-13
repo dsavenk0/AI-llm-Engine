@@ -77,6 +77,7 @@ if [ -f "$ROOT/browser-assistant/package.json" ] && command -v npm >/dev/null 2>
     mkdir -p "$APP/Contents/Resources/llm/browser-assistant"
     ditto "$ROOT/browser-assistant/dist/safari" "$APP/Contents/Resources/llm/browser-assistant/dist/safari"
     ditto "$ROOT/browser-assistant/dist/chromium" "$APP/Contents/Resources/llm/browser-assistant/dist/chromium"
+    ditto "$ROOT/browser-assistant/dist/firefox" "$APP/Contents/Resources/llm/browser-assistant/dist/firefox"
   else
     echo "  (the extension did not build — the app is made without it)"
   fi

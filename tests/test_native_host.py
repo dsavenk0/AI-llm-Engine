@@ -61,6 +61,23 @@ class TestNativeHost(unittest.TestCase):
         h = hashlib.sha256(base64.b64decode(key)).hexdigest()[:32]
         self.assertEqual("".join(chr(ord("a") + int(c, 16)) for c in h), native_host.EXTENSION_ID)
 
+    def test_firefox_install_registers_its_gecko_extension_id(self):
+        support = os.path.join(self.dir, "support")
+        home = os.path.join(self.dir, "data", "browser-assistant")
+        done = native_host.install(home, python=sys.executable, support=support, firefox=True)
+        self.assertEqual(done, ["Firefox"])
+
+        host = os.path.join(support, "Mozilla", "NativeMessagingHosts", native_host.NAME + ".json")
+        with open(host) as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["allowed_extensions"], [native_host.FIREFOX_EXTENSION_ID])
+        self.assertNotIn("allowed_origins", manifest)
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "browser-assistant", "manifests", "firefox.json")) as f:
+            addon = json.load(f)
+        self.assertEqual(addon["browser_specific_settings"]["gecko"]["id"], native_host.FIREFOX_EXTENSION_ID)
+
 
 if __name__ == "__main__":
     unittest.main()
