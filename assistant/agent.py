@@ -21,13 +21,16 @@ MAX_FIELDS = 6
 MAX_VALUE = 2000
 MAX_HISTORY = 6
 REF = re.compile(r"^e\d{1,5}$")
-ACTIONS = ("click", "fill", "fill_form", "navigate", "find", "scroll", "press", "wait", "ask_user", "done")
+ACTIONS = ("click", "fill", "fill_form", "navigate", "find", "scroll", "press", "visual_click", "visual_type",
+           "visual_press", "workspace_sheets_write", "workspace_docs_append", "workspace_drive_create",
+           "workspace_gmail_draft", "workspace_calendar_create", "wait", "ask_user", "done")
 KEYS = ("Enter", "Tab", "Escape", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End",
         "Backspace", "Space")
 
 SYSTEM = (
     "You control a web browser for the user, one step at a time. You are given the user's goal, what the "
-    "current page contains and what has been done so far. Reply with exactly one JSON object and nothing else.\n"
+    "current page contains and what has been done so far. If an image is attached, inspect it for visual details; "
+    "do not claim you cannot see it. Reply with exactly one JSON object and nothing else.\n"
     "Actions:\n"
     '  {"action":"click","ref":"e12","why":"…"}\n'
     '  {"action":"fill","ref":"e3","value":"…","why":"…"}\n'
@@ -39,12 +42,22 @@ SYSTEM = (
     '  {"action":"press","key":"Enter","ref":"e3","why":"…"}   (keys: ' + ", ".join(KEYS) + "; ref optional — "
     "e.g. Enter in a search box, ArrowDown in a suggestion list, Escape to close a dialog)\n"
     '  {"action":"wait","seconds":2}   (1–10: the page is still loading or updating)\n'
+    '  {"action":"visual_click","x":0.42,"y":0.61,"label":"New note","why":"…"}   (only when a screenshot is attached and no listed DOM element is usable)\n'
+    '  {"action":"visual_type","x":0.42,"y":0.61,"label":"selected empty cell","value":"…","empty":true,"why":"…"}   (only for a visible empty field or selected empty spreadsheet cell)\n'
+    '  {"action":"visual_press","key":"Enter","why":"…"}   (only after a visual action when a screenshot is attached)\n'
+    '  {"action":"workspace_sheets_write","spreadsheet_id":"…","cell":"Sheet1!B4","value":"…","overwrite":false,"why":"…"}\n'
+    '  {"action":"workspace_docs_append","document_id":"…","text":"…","why":"…"}\n'
+    '  {"action":"workspace_drive_create","name":"…","text":"…","why":"…"}\n'
+    '  {"action":"workspace_gmail_draft","to":"…","subject":"…","body":"…","why":"…"}   (creates a draft; never sends)\n'
+    '  {"action":"workspace_calendar_create","summary":"…","start":"ISO 8601","end":"ISO 8601","time_zone":"Europe/Madrid","why":"…"}\n'
     '  {"action":"ask_user","question":"…"}   (the goal is ambiguous, several elements could match, or you need a '
     "value you were not given)\n"
     '  {"action":"done","answer":"…"}   (the goal is achieved, or cannot be)\n'
     "Rules:\n"
-    "- Use only refs from the element list. One action per reply. fill also picks an option in a list (value = the "
-    "option's text).\n"
+    "- Prefer refs from the element list. Use workspace_* for exact Google data operations only when the page says "
+    "the connector is connected and the goal supplies every value. Use a visual_* action only when the screenshot shows a target that is "
+    "not available in that list (for example a canvas application). x and y are fractions of the screenshot, "
+    "between 0 and 1. One action per reply. fill also picks an option in a list (value = the option's text).\n"
     "- Never invent personal details, addresses, card numbers or passwords; ask the user instead.\n"
     "- Never enter passwords, card numbers or one-time codes. Do not touch CAPTCHAs.\n"
     "- Do not buy, pay, send, delete or submit unless the goal asks for exactly that — and even then the user "
@@ -118,7 +131,7 @@ def _fence(text):
     return prompts._clean(text, 100000)[0]
 
 
-def build_messages(goal, snapshot, history, screenshot=None):
+def build_messages(goal, snapshot, history, screenshot=None, visual_description=None, workspace_connected=False):
     goal = (goal or "").strip()
     if not goal:
         raise AgentError("a goal is needed")
@@ -127,6 +140,7 @@ def build_messages(goal, snapshot, history, screenshot=None):
     snap = clean_snapshot(snapshot)
     lines = [_element_line(e) for e in snap["elements"]]
     page = [f"URL: {snap['url']}", f"Title: {snap['title']}"]
+    page.append("Google Workspace connector: " + ("connected" if workspace_connected else "not connected; do not use workspace_* actions"))
     if snap["captcha"]:
         page.append("A CAPTCHA is on this page: do not interact with it; tell the user to solve it.")
     page.append("Elements you can use:" + ("\n" + "\n".join(lines) if lines else " none"))
@@ -134,6 +148,9 @@ def build_messages(goal, snapshot, history, screenshot=None):
         page.append("(the list was cut: use find to look for something that is not in it)")
     if snap["text"]:
         page.append("Visible text:\n" + snap["text"])
+    if visual_description:
+        page.append("Visual description from Apple's on-device image recognition (approximate; the screenshot "
+                    "pixels were not sent to this text-only model):\n" + _fence(visual_description))
     done = []
     for h in (history or [])[-MAX_HISTORY:]:
         if isinstance(h, dict):
@@ -141,7 +158,8 @@ def build_messages(goal, snapshot, history, screenshot=None):
     user = (f"Goal: {goal}\n\nSo far:\n" + ("\n".join(done) if done else "nothing yet") +
             "\n\n<page>\n" + _fence("\n".join(page)) + "\n</page>\n\n" +
             ("A screenshot of the visible part of the page is attached: use it to see the layout and what the list "
-             "cannot show (images, maps, grids, charts), but act only through refs from the list.\n\n" if screenshot else "") +
+             "cannot show (images, maps, grids, charts). Prefer listed refs; use visual_* only for a visible target "
+             "that has no usable ref.\n\n" if screenshot else "") +
             "What is the next single action?")
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompts.with_image(user, screenshot)}], snap
 
@@ -180,7 +198,7 @@ def parse_action(text):
     return obj
 
 
-def validate(action, snapshot):
+def validate(action, snapshot, allow_visual=False):
     """The action in a normalised form, or AgentError. `snapshot` is a cleaned snapshot: every ref must be one
     the model was shown, every URL must be http(s), every field must be a ref/value pair of bounded size."""
     kind = action.get("action")
@@ -240,6 +258,50 @@ def validate(action, snapshot):
         out = {"action": "press", "key": key, "why": why}
         if action.get("ref") is not None:
             out["ref"] = ref_of(action.get("ref"))
+        return out
+    if kind in ("visual_click", "visual_type"):
+        if not allow_visual:
+            raise AgentError("a visual action needs a screenshot from a vision model")
+        try:
+            x, y = float(action.get("x")), float(action.get("y"))
+        except (TypeError, ValueError):
+            raise AgentError("a visual action needs numeric x and y coordinates") from None
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            raise AgentError("visual coordinates must be between 0 and 1")
+        label = _str(action.get("label"), 120).strip()
+        if not label:
+            raise AgentError("a visual action needs a short visible label")
+        out = {"action": kind, "x": round(x, 4), "y": round(y, 4), "label": label, "why": why}
+        if kind == "visual_type":
+            out["value"] = value_of(action.get("value"))
+            out["empty"] = action.get("empty") is True
+        return out
+    if kind == "visual_press":
+        if not allow_visual:
+            raise AgentError("a visual action needs a screenshot from a vision model")
+        key = action.get("key")
+        if key not in KEYS:
+            raise AgentError(f"visual_press takes one of: {', '.join(KEYS)}")
+        return {"action": "visual_press", "key": key, "why": why}
+    if kind.startswith("workspace_"):
+        def named(name, limit=2000):
+            value = action.get(name)
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise AgentError(f"{kind} needs {name} as 1 to {limit} characters")
+            return value.strip() if name not in ("text", "body", "value") else value
+        out = {"action": kind, "why": why}
+        if kind == "workspace_sheets_write":
+            out.update(spreadsheet_id=named("spreadsheet_id", 200), cell=named("cell", 120),
+                       value=named("value"), overwrite=action.get("overwrite") is True)
+        elif kind == "workspace_docs_append":
+            out.update(document_id=named("document_id", 200), text=named("text", 10_000))
+        elif kind == "workspace_drive_create":
+            out.update(name=named("name", 200), text=named("text", 20_000))
+        elif kind == "workspace_gmail_draft":
+            out.update(to=named("to", 1000), subject=named("subject", 300), body=named("body", 20_000))
+        elif kind == "workspace_calendar_create":
+            out.update(summary=named("summary", 300), start=named("start", 100), end=named("end", 100),
+                       time_zone=str(action.get("time_zone") or "")[:80])
         return out
     if kind == "wait":
         try:

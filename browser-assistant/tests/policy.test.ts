@@ -144,3 +144,14 @@ test("key presses: only listed keys, never into a secret field, Enter in a form 
   assert.match(refusal({ action: "press", key: "Enter", ref: "e2", why: "" }, secret, PAGE)!, /never fills/);
   assert.equal(summarize({ action: "scroll", direction: "down" }, {}), "scroll down");
 });
+
+test("vision actions are bound to a service ticket and preserve overwrite confirmation", () => {
+  const empty: Action = { action: "visual_type", x: .5, y: .5, label: "selected empty cell", value: "42", empty: true, why: "fill it", ticket: "t" };
+  assert.equal(refusal(empty, {}, PAGE), null);
+  assert.equal(previewFor(empty, {}, PAGE).risk, "low");
+  const replace: Action = { ...empty, label: "A1", empty: false };
+  assert.equal(previewFor(replace, {}, PAGE).risk, "high");
+  assert.match(refusal({ ...empty, ticket: "" }, {}, PAGE) || "", /ticket/);
+  const send: Action = { action: "visual_click", x: .5, y: .5, label: "Send", why: "", ticket: "t" };
+  assert.equal(previewFor(send, {}, PAGE).risk, "high");
+});

@@ -13,6 +13,8 @@ What reaches it is trusted only after four checks: the Host is loopback (DNS reb
 present, is a browser extension and never a web page, the bearer token matches, and the body is bounded.
 See docs/safari-assistant/PROTOCOL.md for the wire format.
 """
+import base64
+import hashlib
 import http.client
 import http.server
 import json
@@ -21,13 +23,14 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
 
-from . import agent, describe, prompts
+from . import agent, automation, describe, prompts, workspace
 
 PROTOCOL = 1
 PORT = 8093
@@ -40,6 +43,37 @@ KEEP_AWAKE_S = 240.0          # how often an open side panel tells the engine it
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT_BUILT = os.path.join(ROOT, "browser-assistant", "dist")      # what this copy of the code ships
 EXT_HOME = os.path.join(HOME, "browser-assistant")                # what the browser is pointed at
+
+
+def _frame_meta(image, supplied):
+    """Opaque frame identity plus the extension's tiny perceptual signature; never retains screenshot bytes."""
+    if not image: return None
+    try: raw = base64.b64decode(image.split(",", 1)[1], validate=True)
+    except Exception: raise Conflict("bad_request", "invalid screenshot encoding") from None
+    supplied = supplied if isinstance(supplied, dict) else {}
+    width, height = supplied.get("width"), supplied.get("height")
+    signature = supplied.get("signature")
+    if not isinstance(width, int) or not 0 <= width <= 10_000: width = 0
+    if not isinstance(height, int) or not 0 <= height <= 10_000: height = 0
+    if not isinstance(signature, str) or not re_full_hex(signature, 34): signature = ""
+    return {"id": hashlib.sha256(raw).hexdigest()[:24], "bytes": len(raw), "width": width, "height": height,
+            "signature": signature}
+
+
+def re_full_hex(value, max_len):
+    return 1 <= len(value) <= max_len and all(c in "0123456789abcdef" for c in value.lower())
+
+
+def _frame_changed(before, after):
+    if not before or not after: return True
+    if before["width"] and after["width"] and (before["width"], before["height"]) != (after["width"], after["height"]):
+        return True
+    a, b = before.get("signature", ""), after.get("signature", "")
+    if a and b and len(a) == len(b):
+        different = sum((int(x, 16) ^ int(y, 16)).bit_count() for x, y in zip(a, b))
+        if different / (len(a) * 4) > 0.34: return True
+    lo, hi = sorted((max(1, before["bytes"]), max(1, after["bytes"])))
+    return hi / lo > 1.7
 
 
 # ───────────────────────────── the extension's files ─────────────────────────────
@@ -156,6 +190,58 @@ class EngineControl:
     def health(self):
         return self.llm.health(self.cfg(), timeout=1.5)
 
+    def vision_model(self):
+        """Configured vision role, or the largest installed vision model that safely fits memory."""
+        try:
+            from harness import conductor
+            spec, _ = conductor.resolve_roles(self.llm.BASE, local=None)
+            name = (spec.get("vision") or {}).get("local")
+        except Exception:
+            name = None
+        for model in self.models():
+            if name and model["vision"] and model["supported"] and (model["name"] == name or model["path"] == name):
+                return model["path"]
+        choices = [m for m in self.models() if m["vision"] and m["supported"] and m["fits"]]
+        return max(choices, key=lambda m: (m["favorite"], m["size_gb"]), default={}).get("path")
+
+    def vision_source(self):
+        try:
+            from harness import conductor
+            raw = conductor.load_mapping(self.llm.BASE).get("vision")
+            configured = raw.get("local") if isinstance(raw, dict) else None
+        except Exception: configured = None
+        return "configured" if configured else "automatic"
+
+    def install_vision_model(self):
+        """Find and download a compatible Qwen vision model that fits this Mac. Called only by the explicit
+        install button; searches current Hub metadata instead of baking a repository revision into the app."""
+        existing = self.vision_model()
+        if existing:
+            return existing
+        choices = []
+        errors = []
+        for query in ("Qwen3.5-VL-4B-Instruct", "Qwen3-VL-4B-Instruct", "Qwen3-VL-2B-Instruct"):
+            try:
+                found = self.llm.hf_search(query, limit=12)
+            except Exception as e:
+                errors.append(str(e)); continue
+            choices.extend(x for x in found if x.get("compatible") and x.get("fits") and x.get("size"))
+            if choices: break
+        if not choices:
+            raise RuntimeError("no compatible vision model that fits this Mac was found" +
+                               (f": {errors[-1]}" if errors else ""))
+        # Search results are popularity-sorted. Prefer a complete local result, then the first current, fitting
+        # result; do not silently choose a larger model merely because more RAM happens to be free today.
+        choice = next((x for x in choices if x.get("local")), choices[0])
+        ok, out = self.run(["pull", choice["id"]], timeout=7200)
+        if not ok:
+            raise RuntimeError(out or "the vision model download failed")
+        self._models_at = 0
+        model = self.vision_model()
+        if not model:
+            raise RuntimeError("the downloaded model is not supported as a vision model")
+        return model
+
     def pid_alive(self):
         return bool(self.llm.read_pid(self.llm.ENGINE_PID))
 
@@ -249,6 +335,12 @@ class Assistant:
         self.extension = {}         # {browser: version installed in EXT_HOME} — what an extension should be
         self.watchers = 0           # open event streams: a side panel (or popup) someone has in front of them
         self.kept_awake = 0.0
+        self.automation = automation.Automation(ROOT, HOME)
+        self.workspace = workspace.Workspace(HOME, ROOT)
+        self.visual_actions = {}  # opaque ticket -> action issued by agent_step; expires in a few seconds
+        self.workspace_actions = {}  # opaque ticket -> narrow Workspace operation issued by agent_step
+        self.workspace_undos = {}    # one-use, in-memory reversals; never OAuth credentials
+        self.vision_lock = threading.Lock()
 
     def installed_versions(self):
         """The extension's version in each browser's folder, read now: `llm assistant setup` or an LLMBar update
@@ -307,8 +399,21 @@ class Assistant:
                 "per_session_model": False,
                 "per_session_model_reason": "the engine serves one model at a time: a different model for one "
                                             "session would mean switching it for every client",
+                "hands": self.automation.status(),
+                "eyes": {"model": getattr(self.control, "vision_model", lambda: None)(),
+                         "source": getattr(self.control, "vision_source", lambda: "automatic")()},
+                "workspace": self.workspace.status(),
+                "dictation": {"installed": self._dictation_available(), "local": True},
             },
         }
+
+    @staticmethod
+    def _dictation_available():
+        try:
+            from engine import audio
+            return audio.whisper_available()
+        except Exception:
+            return False
 
     def refresh(self):
         core = self._core()
@@ -502,14 +607,76 @@ class Assistant:
         session = str(req.get("session") or "")[:64]
         if not session:
             raise Conflict("bad_request", "a session id is needed")
+        if self.op == "vision":
+            raise Conflict("busy", "the vision model is examining a page; try again in a moment", operation="vision")
         h = self.control.health()
         if not h:
             raise Conflict("engine_offline", "the engine is not running — start it first")
+        restore = None
+        role_locked = False
+        # The configured vision role can be a different local model.  Local models take turns: while it is
+        # loaded we refuse other assistant work, then restore the person's text-model default in finally.
+        image_for_role = req.get("screenshot")
+        vision_path = getattr(self.control, "vision_model", lambda: None)() if image_for_role and not h.get("vision") else None
+        if vision_path and vision_path != self.control.default():
+            if not self.vision_lock.acquire(blocking=False):
+                vision_path = None
+            else:
+                role_locked = True
+                try:
+                    self._guard(session, False, "switching to the vision model")
+                    restore = self.control.default()
+                    self._begin("vision")
+                    ok, out = self.control.run(["use", vision_path])
+                    h = self.control.health() or h
+                    if not ok or not h.get("vision"):
+                        # Continue with the original model plus local OCR instead of leaving the service wedged.
+                        if restore and self.control.default() == vision_path:
+                            restored, restore_out = self.control.run(["use", restore])
+                            if not restored:
+                                out = (out + "\n" if out else "") + (restore_out or "could not restore the text model")
+                        self._end(out or "could not load the configured vision model")
+                        self.vision_lock.release()
+                        role_locked, restore = False, None
+                except Conflict:
+                    self.vision_lock.release(); role_locked = False; raise
+                except Exception as e:
+                    if restore and self.control.default() == vision_path:
+                        try: self.control.run(["use", restore])
+                        except Exception: pass
+                    if self.op == "vision":
+                        self._end(f"could not load the configured vision model: {e}")
+                    self.vision_lock.release(); role_locked = False
+                    raise Conflict("engine_error", "could not load the configured vision model") from None
+
+        def restore_text_role():
+            nonlocal role_locked
+            if not role_locked:
+                return
+            error = None
+            try:
+                # Do not silently overwrite a model choice someone made while the visual step ran.
+                if restore and self.control.default() == vision_path:
+                    ok, out = self.control.run(["use", restore])
+                    if not ok:
+                        error = out or "could not restore the text model"
+            finally:
+                self._end(error)
+                self.vision_lock.release()
+                role_locked = False
         try:
-            # a screenshot only reaches a model that can see; for any other it is dropped, and the reply says so
-            shot = prompts.image_url(req.get("screenshot")) if h.get("vision") else None
-            messages, snap = agent.build_messages(req.get("goal"), req.get("snapshot"), req.get("history"), shot)
+            image = prompts.image_url(req.get("screenshot"))
+            frame_meta = _frame_meta(image, req.get("frame"))
+            # A vision model receives the pixels. For a text-only model, provide local OCR and scene labels so
+            # the agent can still use visible text and controls instead of silently ignoring the screenshot.
+            shot = image if h.get("vision") else None
+            visual_description = None
+            if image and not h.get("vision"):
+                visual_description = describe.as_text(describe.describe([image]), True)
+            messages, snap = agent.build_messages(req.get("goal"), req.get("snapshot"), req.get("history"),
+                                                  shot, visual_description, self.workspace.status().get("connected", False))
         except (agent.AgentError, prompts.PromptError) as e:
+            restore_text_role()
             raise Conflict("bad_request", str(e)) from None
         g = Generation(session)
         rid = req.get("request_id")
@@ -525,8 +692,22 @@ class Assistant:
                 if g.cancelled:
                     raise Conflict("cancelled", "stopped")
                 try:
-                    return {"action": agent.validate(agent.parse_action(text), snap), "attempts": attempt,
-                            "saw_screenshot": shot is not None}
+                    action = agent.validate(agent.parse_action(text), snap, allow_visual=shot is not None)
+                    if action["action"].startswith("visual_"):
+                        ticket = secrets.token_urlsafe(24)
+                        with self.lock:
+                            self.visual_actions[ticket] = {"at": time.time(), "session": session,
+                                                           "url": snap["url"], "tab_id": req.get("tab_id"),
+                                                           "frame": frame_meta, "action": action}
+                        action = dict(action, ticket=ticket)
+                    elif action["action"].startswith("workspace_"):
+                        ticket = secrets.token_urlsafe(24)
+                        with self.lock:
+                            self.workspace_actions[ticket] = {"at": time.time(), "session": session,
+                                                              "url": snap["url"], "action": action}
+                        action = dict(action, ticket=ticket)
+                    return {"action": action, "attempts": attempt,
+                            "saw_screenshot": shot is not None, "described_screenshot": visual_description is not None}
                 except agent.AgentError as e:
                     problem = str(e)
                     messages = messages + [
@@ -538,12 +719,188 @@ class Assistant:
             with self.lock:
                 self.gens.pop(g.id, None)
             self.refresh()
+            restore_text_role()
+
+    def visual_execute(self, req):
+        """Run a short-lived visual action through the private macOS helper.
+
+        A ticket can only have been produced by this service for the same browser session and page.  The extension
+        cannot ask the helper to move or type arbitrary input, and the helper independently refuses a background
+        or non-browser window.
+        """
+        session = str(req.get("session") or "")[:64]
+        ticket = str(req.get("ticket") or "")[:128]
+        now = time.time()
+        with self.lock:
+            item = self.visual_actions.pop(ticket, None)
+            # Bound memory even when a client abandons a task.
+            self.visual_actions = {k: v for k, v in self.visual_actions.items() if now - v["at"] < 20}
+        if not item or item["session"] != session or now - item["at"] > 12:
+            raise Conflict("stale_visual_action", "that visual step expired; look at the page again")
+        if str(req.get("url") or "") != item["url"]:
+            raise Conflict("stale_visual_action", "the page changed since the visual step was proposed")
+        if req.get("tab_id") != item.get("tab_id"):
+            raise Conflict("stale_visual_action", "the active tab changed since the visual step was proposed")
+        fresh = req.get("screenshot")
+        if not isinstance(fresh, str) or not fresh.startswith("data:image/") or len(fresh) > MAX_BODY:
+            raise Conflict("bad_request", "a fresh screenshot is required before a visual action")
+        try: fresh_image = prompts.image_url(fresh)
+        except prompts.PromptError as e: raise Conflict("bad_request", str(e)) from None
+        fresh_meta = _frame_meta(fresh_image, req.get("frame"))
+        if _frame_changed(item.get("frame"), fresh_meta):
+            raise Conflict("stale_visual_action", "the visible page changed substantially; look at it again")
+        browser = str(req.get("browser") or "")
+        # The helper resolves the active member of the Chromium family itself, so Edge/Brave/Arc/Vivaldi cannot
+        # be impersonated by a stale browser name from the extension.
+        bundles = {"safari": "com.apple.Safari", "chromium": "chromium", "firefox": "org.mozilla.firefox"}
+        bundle = bundles.get(browser)
+        if not bundle:
+            raise Conflict("bad_request", "unknown browser for visual action")
+        action = item["action"]
+        try:
+            if action["action"] == "visual_click":
+                body = {"action": "click", "bundle": bundle, "x": action["x"], "y": action["y"]}
+            elif action["action"] == "visual_type":
+                # Focus a visible target first.  The value is never logged by this service.
+                focus = self.automation.request({"action": "click", "bundle": bundle, "x": action["x"], "y": action["y"]})
+                if not focus.get("ok"):
+                    return {"ok": False, "error": focus.get("error") or "could not focus the visual target"}
+                body = {"action": "type", "bundle": bundle, "value": action["value"]}
+            elif action["action"] == "visual_press":
+                body = {"action": "press", "bundle": bundle, "key": action["key"]}
+            else:
+                raise Conflict("bad_action", "this is not a visual action")
+            out = self.automation.request(body)
+        except automation.AutomationError as e:
+            return {"ok": False, "error": str(e), "route": "macos"}
+        return {"ok": bool(out.get("ok")), "error": out.get("error"), "route": out.get("route") or "macos"}
+
+    def workspace_configure(self, req):
+        try: return self.workspace.configure(req.get("client_id"))
+        except workspace.WorkspaceError as e: raise Conflict("workspace", str(e)) from None
+
+    def accessibility_settings(self):
+        try: return self.automation.open_settings()
+        except OSError as e: raise Conflict("automation", f"could not open Accessibility settings: {e}") from None
+
+    def workspace_authorize(self, req):
+        try: return self.workspace.authorize(req.get("scopes") if isinstance(req.get("scopes"), list) else [])
+        except workspace.WorkspaceError as e: raise Conflict("workspace", str(e)) from None
+
+    def workspace_disconnect(self):
+        return self.workspace.disconnect()
+
+    def vision_configure(self, req):
+        path = str(req.get("path") or "")
+        model = next((m for m in self.control.models() if m["path"] == path and m["vision"] and m["supported"]), None)
+        if not model: raise Conflict("bad_request", "choose an installed vision-capable model")
+        from harness import conductor
+        conductor.set_role(ROOT, "vision", {"local": path})
+        return {"model": path, "source": "configured"}
+
+    def vision_install(self):
+        try:
+            path = self.control.install_vision_model()
+            from harness import conductor
+            conductor.set_role(ROOT, "vision", {"local": path})
+            return {"model": path, "source": "configured"}
+        except Exception as e:
+            raise Conflict("vision_install", str(e)) from None
+
+    def workspace_execute(self, req):
+        session, ticket = str(req.get("session") or "")[:64], str(req.get("ticket") or "")[:128]
+        now = time.time()
+        with self.lock:
+            item = self.workspace_actions.pop(ticket, None)
+            self.workspace_actions = {k: v for k, v in self.workspace_actions.items() if now - v["at"] < 300}
+        if not item or item["session"] != session or now - item["at"] > 300:
+            raise Conflict("stale_workspace_action", "that Workspace step expired; ask the model to prepare it again")
+        if str(req.get("url") or "") != item["url"]:
+            raise Conflict("stale_workspace_action", "the page changed since the Workspace step was proposed")
+        try: out = self.workspace.execute(item["action"])
+        except workspace.WorkspaceError as e: raise Conflict("workspace", str(e)) from None
+        undo, label = out.pop("_undo", None), out.pop("_undo_label", None)
+        if undo:
+            opaque = secrets.token_urlsafe(24)
+            with self.lock:
+                self.workspace_undos[opaque] = {"at": now, "session": session, "record": undo}
+            out.update(undo=opaque, undo_label=label or "Undo Workspace change")
+        return out
+
+    def workspace_undo(self, req):
+        session, token = str(req.get("session") or "")[:64], str(req.get("undo") or "")[:128]
+        now = time.time()
+        with self.lock:
+            item = self.workspace_undos.pop(token, None)
+            self.workspace_undos = {k: v for k, v in self.workspace_undos.items() if now - v["at"] < 600}
+        if not item or item["session"] != session or now - item["at"] > 600:
+            raise Conflict("stale_workspace_action", "that undo expired or was already used")
+        try: return self.workspace.undo(item["record"])
+        except workspace.WorkspaceError as e: raise Conflict("workspace", str(e)) from None
+
+    def forget_session(self, req):
+        session = str(req.get("session") or "")[:64]
+        if not session: raise Conflict("bad_request", "a session id is needed")
+        with self.lock:
+            before = len(self.visual_actions) + len(self.workspace_actions) + len(self.workspace_undos)
+            self.visual_actions = {k: v for k, v in self.visual_actions.items() if v["session"] != session}
+            self.workspace_actions = {k: v for k, v in self.workspace_actions.items() if v["session"] != session}
+            self.workspace_undos = {k: v for k, v in self.workspace_undos.items() if v["session"] != session}
+            removed = before - len(self.visual_actions) - len(self.workspace_actions) - len(self.workspace_undos)
+        return {"forgotten": removed}
+
+    def audio_setup(self):
+        """Install the optional local audio environment after an explicit click in the extension."""
+        if self._dictation_available():
+            return {"ready": True}
+        ok, out = self.control.run(["setup", "--audio"], timeout=1800)
+        if not ok or not self._dictation_available():
+            raise Conflict("audio", out or "could not install local dictation")
+        self.refresh()
+        return {"ready": True}
+
+    def transcribe(self, req):
+        """Decode one bounded browser recording, transcribe it locally, and always erase the temporary file."""
+        encoded = req.get("audio")
+        if not isinstance(encoded, str) or not encoded.startswith("data:audio/") or "," not in encoded:
+            raise Conflict("bad_request", "audio must be an audio data URL")
+        header, payload = encoded.split(",", 1)
+        mime = header[5:].split(";", 1)[0].lower()
+        suffixes = {"audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "audio/mpeg": ".mp3",
+                    "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/aac": ".aac"}
+        if mime not in suffixes or ";base64" not in header.lower():
+            raise Conflict("bad_request", "unsupported audio recording format")
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (ValueError, TypeError):
+            raise Conflict("bad_request", "invalid audio encoding") from None
+        if not raw or len(raw) > 5 * 2**20:
+            raise Conflict("bad_request", "the recording must be between 1 byte and 5 MB")
+        from engine import audio
+        if not audio.whisper_available():
+            raise Conflict("audio_not_installed", "local dictation is not installed yet")
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="llmbar-dictation-", suffix=suffixes[mime], delete=False) as f:
+                os.chmod(f.name, 0o600)
+                f.write(raw)
+                path = f.name
+            result = audio.transcribe(path)
+            return {"text": result.get("text") or "", "language": result.get("language")}
+        except audio.AudioError as e:
+            raise Conflict("audio", str(e)) from None
+        finally:
+            if path:
+                try: os.unlink(path)
+                except OSError: pass
 
     def chat(self, req, emit):
         """Run one task. `emit(event)` sends one event to the client and returns False once it has gone."""
         session = str(req.get("session") or "")[:64]
         if not session:
             raise Conflict("bad_request", "a session id is needed")
+        if self.op == "vision":
+            raise Conflict("busy", "the vision model is examining a page; try again in a moment", operation="vision")
         h = self.control.health()
         if not h:
             raise Conflict("engine_offline", "the engine is not running — start it first")
@@ -738,6 +1095,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         a = self.server.assistant
         if path == "/v1/assistant/state":
             return self._json(200, a.refresh())
+        if path == "/v1/assistant/workspace/status":
+            return self._json(200, a.workspace.status())
         if path == "/v1/assistant/events":
             self._start_stream()
             with a.lock:
@@ -798,6 +1157,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(200, a.cancel(path.split("/")[-2], session))
             if path == "/v1/assistant/agent/step":
                 return self._json(200, a.agent_step(body))
+            if path == "/v1/assistant/agent/visual/execute":
+                return self._json(200, a.visual_execute(body))
+            if path == "/v1/assistant/accessibility/settings":
+                return self._json(200, a.accessibility_settings())
+            if path == "/v1/assistant/workspace/configure":
+                return self._json(200, a.workspace_configure(body))
+            if path == "/v1/assistant/vision/configure":
+                return self._json(200, a.vision_configure(body))
+            if path == "/v1/assistant/vision/install":
+                return self._json(200, a.vision_install())
+            if path == "/v1/assistant/workspace/authorize":
+                return self._json(202, a.workspace_authorize(body))
+            if path == "/v1/assistant/workspace/disconnect":
+                return self._json(200, a.workspace_disconnect())
+            if path == "/v1/assistant/workspace/execute":
+                return self._json(200, a.workspace_execute(body))
+            if path == "/v1/assistant/workspace/undo":
+                return self._json(200, a.workspace_undo(body))
+            if path == "/v1/assistant/session/forget":
+                return self._json(200, a.forget_session(body))
+            if path == "/v1/assistant/audio/setup":
+                return self._json(200, a.audio_setup())
+            if path == "/v1/assistant/audio/transcribe":
+                return self._json(200, a.transcribe(body))
             if path == "/v1/assistant/chat":
                 started = []
 
@@ -816,7 +1199,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         except Conflict as e:
             code = {"model_in_use": 409, "busy": 409, "stale": 409, "not_yours": 403, "engine_offline": 503,
-                    "unknown_model": 404, "bad_action": 422, "cancelled": 409, "engine_error": 502}.get(e.code, 400)
+                    "unknown_model": 404, "bad_action": 422, "cancelled": 409, "engine_error": 502,
+                    "stale_visual_action": 409, "stale_workspace_action": 409, "workspace": 422,
+                    "audio": 422, "audio_not_installed": 501, "vision_install": 502}.get(e.code, 400)
             return self._error(code, e.code, e.message, **e.extra,
                                **({"state": a.snapshot()} if e.code in ("stale", "model_in_use", "busy") else {}))
         self._error(404, "not_found", "unknown path")

@@ -76,10 +76,12 @@ Below it, **what the assistant may do**:
 | Act on the page — ask before every step | the agent proposes one step at a time; nothing is clicked, typed or opened until you approve it |
 | Act on the page — ask before anything risky | the agent works while you watch; steps the policy marks low-risk go ahead on their own, and anything that **submits a form, pays, orders, sends, deletes, leaves the site, replaces text you typed, or touches a form with a password or card** stops and waits for your approval — every time |
 
-**📷 Screenshot** (models with vision only): in *Ask*, a picture of the visible part of the tab goes with the
-question and is shown in the conversation; in the *Act* modes, the model sees the page at every step — the
-layout, images, maps and grids the element list cannot describe. It is off by default: a picture costs prefill
-time on every step. The first time it asks the browser for access to the sites it photographs.
+**📷 Screenshot.** In *Ask*, a question about what is visible automatically attaches a picture of the tab; the
+button can attach one to any question. In *Act*, the same button or a goal about visual content sends a picture
+with each step. Vision models receive the pixels. A text-only model gets a local Apple Vision description (scene
+labels and recognized text), which is useful for text and controls but less reliable for layout and photographs.
+Screenshots are off for other requests because each one adds prefill time. The first capture asks the browser for
+permission to photograph sites.
 
 **Conversations.** A follow-up question carries the tab's conversation so far (its last exchanges, never the page
 text twice). Each tab's conversation is kept in the extension — it comes back when the panel reopens, after a
@@ -143,10 +145,36 @@ tab), and any site the task moves to once you press **Allow** in the panel. **Wh
 extension's settings, keeps the last 200 steps — what was proposed, approved (by you or on its own), refused and
 done, and on which site, never page text and never a typed value.
 
-**Apps that draw on a canvas** (Google Sheets and Docs, Figma, maps) have no elements to list where their content
-is. With a vision model and 📷 on, the agent sees them and can use their menus, toolbars and keys, but it cannot
-reliably edit cells there; tables are a job for the planned Sheets / Excel connectors, which work through the
-services' own APIs.
+**Apps that draw on a canvas** (Google Sheets and Docs, Google Keep, Figma, maps) have no elements to list where
+their content is. With a vision model and 📷 on, the agent can see their controls. When it cannot find a safe DOM
+target it proposes a visual action: LLMBar uses macOS Accessibility to move the real pointer, click or type in the
+active browser only. The agent card identifies the current route as **DOM**, **vision**, **macOS** or **Workspace**.
+The Hands banner reports whether Accessibility is enabled and opens the correct System Settings page. A visible
+empty selected Sheets cell may be filled automatically in the low-risk mode;
+an existing or uncertain cell waits for approval. Keep notes follow the same path: create, type, then verify the
+new card on a fresh screenshot.
+
+**Dictation.** Focus an ordinary text field on the page, then press the microphone in the assistant composer.
+The extension remembers that exact field before recording, sends a bounded clip only to the loopback service,
+and local Whisper inserts the recognised text at the saved caret. The temporary recording is always removed.
+Password, card, one-time-code, CAPTCHA, disabled and read-only fields are refused. If the target disappears while
+speech is recognised, the text is placed in the assistant composer instead of being lost. The first click can
+install the optional audio environment after confirmation; Whisper weights download on first use.
+
+When no compatible vision model is installed, **Find and install eyes** searches current Hub metadata, chooses a
+supported model that fits the Mac, downloads it after confirmation and assigns the Conductor's `vision` role.
+Until then, Apple Vision OCR remains available. Image requests follow the same on-demand pattern: the model can
+express the intent before mflux exists, while installation and model download still require visible approval.
+
+**Google Workspace.** Release builders can embed the public Desktop OAuth client ID with
+`LLMBAR_GOOGLE_CLIENT_ID`. Until a build includes that ID, the OAuth controls stay hidden and the agent continues
+through DOM, vision and Accessibility without asking for Auth. The connector code remains in place and appears
+automatically when configured. Sign-in uses a one-time localhost callback and PKCE. The refresh token stays in macOS Keychain; the
+extension, web pages and model never receive it, and the settings page automatically confirms when Keychain has
+the connection. The first connector release can write one Sheets cell, append Docs text, create a Drive document,
+create a Gmail draft (never send it) and create a Calendar event. Each is a fixed named operation rather than an
+arbitrary Google request and offers an in-memory, one-use Undo. Gmail read access is not requested. Google Keep
+continues through the browser route because it has no equivalent public Workspace API.
 
 ## What it can and cannot see
 
@@ -159,7 +187,9 @@ services' own APIs.
   waits for you, in either acting mode.
 * A screenshot is taken only with 📷 on, of the visible part of the tab in front, scaled to at most 1280 pixels
   wide, and goes only to a model that can see — the service drops it for any other.
-* Nothing is logged: not page text, not questions, not answers, not screenshots.
+* Nothing is logged: not page text, not questions, not answers, not screenshots. Conversation storage contains
+  only question/answer text. Screenshot bytes live for one request; deleting a conversation also tells the local
+  service to discard that tab session's remaining visual, Workspace and undo tickets.
 
 ## Feature matrix
 
@@ -170,22 +200,25 @@ services' own APIs.
 | Extension: side panel (Chrome's own; docked into the tab in Safari and elsewhere), settings, context menu | implemented; type-checked and bundled; the panel rendered headless with a stand-in browser API, light and dark |
 | **Extension running inside Safari** | **not tested** — no browser was driven; first run is on your Mac |
 | Selected-text actions, page Q&A, streaming, cancel | implemented (see the line above) |
-| Browser actions: click, fill, fill form, navigate, find, scroll, key presses, wait; approval card; audit log | implemented; **tested without a browser** — the page agent in jsdom (fake layout), the conductor with a fake page, tab and service, the policy rules, the service endpoint over HTTP (64 + 21 tests). **Not driven in Safari or Chrome** |
+| Browser actions: click, fill, fill form, navigate, find, scroll, key presses, wait; approval card; audit log; Undo for field fills | implemented; type-checked and covered by page-agent, runner, policy and service tests. **Not driven in a real browser in this checkout** |
 | Acting on its own with approval before risky steps | implemented, tested as above |
 | Working-here frame, Stop on the page, agent cursor | implemented; rendered headless on a test page |
-| Screenshots for vision models (questions and agent steps) | implemented; validated by the service; **never taken by a real browser** |
+| Screenshots for vision models (questions and agent steps) | implemented for Safari, Firefox and Chromium; text-only models get a local Apple Vision description |
+| Microphone dictation into a selected page field | implemented with local Whisper, sensitive-field guards, 30-second/5-MB bounds, immediate temporary-file cleanup and composer fallback |
+| On-demand image / vision preparation | implemented with explicit approval; image requests can prepare mflux, and settings can discover a compatible fitting vision model |
 | Per-site access for the agent after it leaves the page it started on | implemented through `permissions.request` from the panel; **whether Safari grants it that way is unverified** — if not, allow the site in Safari ▸ Settings ▸ Websites |
-| Sites with the page in iframes, shadow DOM, canvas | **not covered** by the element list: the agent lists the top document's ordinary elements only; with a vision model and 📷 it *sees* canvas apps but acts on them only through their listed controls and keys |
+| Sites with the page in iframes, shadow DOM, canvas | not covered by the top-document element list; the vision route can instead ground a short-lived native macOS action in the fresh frame |
 | Model picker, load / unload / stop, conflict confirmation | implemented (same) |
-| LLMBar ▸ Tools ▸ Browser Assistant | implemented; the app type-checks, was not rebuilt or run |
+| LLMBar ▸ Tools ▸ Browser Assistant | implemented; the complete app bundle builds successfully |
 | Update of the extension's files when LLMBar updates | implemented, tested |
 | Chrome / Chromium build | builds from the same source (`dist/chromium`), side panel included; **never loaded in Chrome** |
 | Firefox | built from the shared source with a native `sidebar_action`, Gecko extension ID and Firefox native-messaging registration; temporary installation through `about:debugging`; **not yet exercised in a live Firefox** |
 | Safari extension inside LLMBar.app; Tools ▸ Browser Assistant opens Safari on it | implemented; built and registered with macOS (`pluginkit` lists it); ad-hoc signed, so Safari needs *Allow Unsigned Extensions* until it is signed with an Apple Development / Developer ID certificate. **Not yet enabled in Safari by its author** |
 | Native messaging: the extension gets the token from LLMBar | implemented (reads the token file only); **untested in Safari** |
-| Google Sheets, Excel Online | planned (Phases 3 – 4) — need OAuth client registrations |
-| Email assistant (Gmail, Outlook Web) | planned (Phase 5) |
-| Mailbox access through Gmail API / Microsoft Graph | planned (Phase 6) — needs OAuth client registrations |
+| Vision-guided canvas apps and real macOS actions | implemented: one-use visual tickets, fresh screenshots, active-browser check and Accessibility helper; requires manual verification in Safari, Chrome and Firefox |
+| Google Keep / Sheets / Docs / Drive / Gmail / Calendar web UI | implemented through the hybrid DOM + vision + macOS route; high-risk changes still ask first |
+| Google Workspace OAuth | implemented but dormant until the release embeds its public client ID; Desktop OAuth PKCE, one-time state and macOS Keychain token storage remain in place |
+| Google Workspace named operations and Undo | implemented for Sheets cell write, Docs append, Drive document create, Gmail draft and Calendar event; mocked API tests cover routing, validation and reversal |
 | Per-session model override | not possible on this engine: one model at a time. The service says so (`per_session_model: false`) |
 
 ## Packaging and updates

@@ -269,6 +269,25 @@ class Tools:
         import time
         if not self.images_ep:
             return "error: image generation is not available"
+        try:
+            with urllib.request.urlopen(self.images_ep.health_url, timeout=1.5) as r:
+                ready = json.load(r).get("images") is True
+        except (OSError, ValueError):
+            ready = False
+        if not ready:
+            if not self._approve(_call_id, "run", command="Install and enable local image generation",
+                                 dangerous="downloads the optional mflux package and model weights, then restarts the local engine"):
+                return "error: the user declined to prepare local image generation"
+            import llm
+            from engine import images
+            if not images.tool_path(llm.DATA) and not llm.setup_images():
+                return "error: local image generation could not be installed"
+            cfg = llm.load_cfg()
+            if not cfg.get("images_api"):
+                cfg["images_api"] = True
+                llm.save_cfg(cfg)
+            if not llm.restart(cfg, interactive=False):
+                return "error: image generation was installed but the local engine did not restart"
         prompt = str(prompt).strip()
         if not prompt:
             return "error: a prompt is required"
@@ -546,15 +565,9 @@ def complete(engine_port, messages, max_tokens=800, think=False):
 
 
 def _images_endpoint(engine_port):
-    """The local engine's Endpoint when it reports image generation as ready (one cheap /health call), else None."""
+    """The local engine endpoint. The image tool can prepare its optional backend after explicit approval."""
     ep = as_endpoint(engine_port)
-    if ep.remote:
-        return None
-    try:
-        with urllib.request.urlopen(ep.health_url, timeout=1.5) as r:
-            return ep if json.load(r).get("images") is True else None
-    except (OSError, ValueError):
-        return None
+    return None if ep.remote else ep
 
 
 def _previous_answer(messages):

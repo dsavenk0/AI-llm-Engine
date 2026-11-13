@@ -6,7 +6,10 @@ import AppKit
 import SwiftUI
 
 struct KnowledgePage: View {
-    @ObservedObject var e: EngineState
+    /// The same manager is used in two places: the compact LLMBar Tools page and the editor's Chat section.
+    /// Both surfaces operate on KnowledgeStore.shared, so there is still only one index and one command path.
+    private let e: EngineState?
+    private let onExit: (() -> Void)?
     /// Snapshots only (`--module panel --tab 4 --page knowledge --library … --query …`): what to show opened.
     static var preset: (library: String, query: String)?
 
@@ -18,6 +21,16 @@ struct KnowledgePage: View {
     @State private var searched = false
     @State private var loaded = false
 
+    init(e: EngineState) {
+        self.e = e
+        self.onExit = nil
+    }
+
+    init(onExit: @escaping () -> Void) {
+        self.e = nil
+        self.onExit = onExit
+    }
+
     private var library: KnowledgeLibrary? { store.libraries.first { $0.id == openID } }
 
     var body: some View {
@@ -27,7 +40,10 @@ struct KnowledgePage: View {
                     Button(action: goBack) {
                         HStack(spacing: 4) {
                             Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
-                            Text(library == nil ? L("Tools", "Тулзы") : L("Libraries", "Библиотеки")).font(HUD.mono(10, .semibold))
+                            Text(library == nil
+                                 ? (onExit == nil ? L("Tools", "Тулзы") : L("Chats", "Чаты"))
+                                 : L("Libraries", "Библиотеки"))
+                                .font(HUD.mono(10, .semibold))
                         }
                         .padding(.vertical, 4).padding(.trailing, 10)
                         .contentShape(Rectangle())           // the whole label is clickable, not only the glyphs
@@ -59,9 +75,11 @@ struct KnowledgePage: View {
     private func goBack() {
         if library != nil {
             openID = nil
+        } else if let onExit {
+            onExit()
         } else {
             openID = nil
-            e.toolsPage = nil
+            e?.toolsPage = nil
         }
     }
 

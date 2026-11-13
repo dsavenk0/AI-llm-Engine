@@ -106,6 +106,7 @@ final class Workspace: ObservableObject {
     @Published var fatal: String?
     @Published var engine: EngineInfo?
     @Published var mode: LayoutMode = .chat
+    @Published var chatDestination: ChatDestination = .chats
     @Published var tree: [String: [TreeEntry]] = [:]
     @Published var expanded: Set<String> = [""]
     @Published var open: [OpenFile] = []

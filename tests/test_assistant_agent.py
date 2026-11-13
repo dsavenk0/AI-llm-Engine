@@ -129,6 +129,16 @@ class TestValidate(unittest.TestCase):
         self.bad({"action": "find", "query": "  "}, "something to look for")
         self.bad({"action": "ask_user", "question": ""}, "needs a question")
 
+    def test_visual_actions_need_real_vision_and_bounded_coordinates(self):
+        action = {"action": "visual_type", "x": 0.25, "y": 0.75, "label": "empty cell", "value": "hello",
+                  "empty": True, "why": "selected"}
+        with self.assertRaisesRegex(agent.AgentError, "needs a screenshot"):
+            agent.validate(action, self.snap)
+        out = agent.validate(action, self.snap, allow_visual=True)
+        self.assertEqual((out["x"], out["y"], out["empty"]), (0.25, 0.75, True))
+        with self.assertRaisesRegex(agent.AgentError, "between 0 and 1"):
+            agent.validate(dict(action, x=1.1), self.snap, allow_visual=True)
+
 
 class ScriptedEngine(http.server.ThreadingHTTPServer):
     """Answers each chat with the next scripted reply (streamed in two pieces), and keeps the requests."""
@@ -295,3 +305,22 @@ class TestNewActionsAndScreenshots(unittest.TestCase):
             with self.assertRaises(prompts.PromptError):
                 prompts.image_url(bad)
         self.assertIsNone(prompts.image_url(None))
+
+
+class TestVisualLifetime(unittest.TestCase):
+    def test_a_substantially_changed_frame_is_stale(self):
+        original = {"width": 1200, "height": 800, "bytes": 100_000, "signature": "0" * 34}
+        self.assertFalse(service._frame_changed(original, dict(original, signature="0" * 33 + "1")))
+        self.assertTrue(service._frame_changed(original, dict(original, signature="f" * 34)))
+        self.assertTrue(service._frame_changed(original, dict(original, width=1000)))
+
+    def test_forgetting_a_session_drops_every_short_lived_ticket(self):
+        a = service.Assistant(FakeControl())
+        now = time.time()
+        a.visual_actions = {"mine": {"session": "tab-1", "at": now}, "other": {"session": "tab-2", "at": now}}
+        a.workspace_actions = {"mine-w": {"session": "tab-1", "at": now}, "other-w": {"session": "tab-2", "at": now}}
+        a.workspace_undos = {"mine-u": {"session": "tab-1", "at": now}, "other-u": {"session": "tab-2", "at": now}}
+        self.assertEqual(a.forget_session({"session": "tab-1"})["forgotten"], 3)
+        self.assertEqual(set(a.visual_actions), {"other"})
+        self.assertEqual(set(a.workspace_actions), {"other-w"})
+        self.assertEqual(set(a.workspace_undos), {"other-u"})

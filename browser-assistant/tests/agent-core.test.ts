@@ -175,6 +175,45 @@ test("fill sets the value the way a framework notices, reads it back, and fires 
   assert.equal(notes.ok, true);
 });
 
+test("a filled field can be undone once, but not after the person changes it again", async () => {
+  const p = page(`<input aria-label="Name" value="before">`);
+  const s = p.agent.snapshot(), input = p.doc.querySelector("input") as HTMLInputElement;
+  const r = await p.agent.fill(s.elements[0].ref, "assistant", { generation: s.generation, url: s.url });
+  assert.equal(typeof r.undo, "string");
+  assert.equal((await p.agent.undo(r.undo!)).ok, true);
+  assert.equal(input.value, "before");
+  assert.equal((await p.agent.undo(r.undo!)).ok, false);                         // one use
+
+  const again = await p.agent.fill(s.elements[0].ref, "assistant", { generation: s.generation, url: s.url });
+  input.value = "person";
+  assert.match((await p.agent.undo(again.undo!)).error || "", /changed again/);
+  assert.equal(input.value, "person");
+});
+
+test("dictation remembers the selected page field, inserts at its caret, and can be undone", async () => {
+  const p = page(`<input aria-label="Note" value="Hello world">`);
+  const field = p.doc.querySelector("input") as HTMLInputElement;
+  field.focus(); field.setSelectionRange(6, 11);
+  assert.equal(p.agent.rememberDictationTarget().ok, true);
+  field.blur();                                                        // clicking the extension may move focus
+  const result = await p.agent.dictate("local assistant");
+  assert.deepEqual([result.ok, field.value], [true, "Hello local assistant"]);
+  assert.equal((await p.agent.undo(result.undo!)).ok, true);
+  assert.equal(field.value, "Hello world");
+});
+
+test("dictation refuses secrets and needs an explicitly selected text field", async () => {
+  const p = page(`<input type="password" aria-label="Password"><button>Go</button>
+    <div contenteditable="false" tabindex="0">Locked</div>`);
+  (p.doc.querySelector("input") as HTMLInputElement).focus();
+  assert.match(p.agent.rememberDictationTarget().error || "", /disabled/);
+  (p.doc.querySelector("button") as HTMLButtonElement).focus();
+  assert.match(p.agent.rememberDictationTarget().error || "", /not a text field/);
+  (p.doc.querySelector("div") as HTMLDivElement).focus();
+  assert.match(p.agent.rememberDictationTarget().error || "", /not a text field/);
+  assert.equal((await p.agent.dictate("secret")).ok, false);
+});
+
 test("fill never types into a secret, a checkbox, a CAPTCHA or a read-only field", async () => {
   const p = page(FORM + `<input readonly aria-label="Fixed" value="a"><div class="cf-turnstile"><input aria-label="Token"></div>`);
   const s = p.agent.snapshot();
@@ -199,7 +238,8 @@ test("a field that does not keep the value is reported as a failure, not as succ
 
 test("a page's own script cannot reach the agent, and the agent takes no code or selectors", () => {
   const p = page(`<button id="b">Go</button>`);
-  assert.deepEqual(Object.keys(p.agent).sort(), ["click", "fill", "find", "generation", "inspect", "press", "rectOf", "scroll", "snapshot"]);
+  assert.deepEqual(Object.keys(p.agent).sort(), ["click", "dictate", "fill", "find", "generation", "inspect", "press",
+    "rectOf", "rememberDictationTarget", "scroll", "snapshot", "undo"]);
   const s = p.agent.snapshot();
   for (const evil of ["button", "#b", "javascript:alert(1)", "e1; alert(1)", "../e1"]) {
     assert.equal(p.agent.inspect(evil, { generation: s.generation, url: s.url }).ok, false, evil);

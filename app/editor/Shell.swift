@@ -436,17 +436,26 @@ private struct ChatLayout: View {
             let left = SplitPrefs.clamp(leftWidth, 150, min(320, g.size.width * 0.3))
             let right = SplitPrefs.clamp(rightWidth, 240, g.size.width - left - 360 - 14)
             HStack(spacing: 0) {
-                SessionsModuleView(ws: ws, store: chat).frame(width: left)
+                SessionsModuleView(ws: ws, store: chat, destination: $ws.chatDestination).frame(width: left)
                 SplitHandle(axis: .columns, size: $leftWidth, range: 150...max(150, min(320, g.size.width * 0.3)),
                             key: "editor.chat.left")
-                Group {
-                    if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat) }
-                    else { Text("The assistant module is switched off (Modules menu)").foregroundColor(.secondary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity) }
-                }.frame(minWidth: 360, maxWidth: .infinity)
-                SplitHandle(axis: .columns, size: $rightWidth, range: 240...max(240, g.size.width - left - 360 - 14),
-                            growsWithDrag: false, key: "editor.chat.right")
-                ChatRightPanel(ws: ws, modules: modules).frame(width: right)
+                if ws.chatDestination == .knowledge, AppHost.enabled(.knowledge) {
+                    ScrollView {
+                        KnowledgePage(onExit: { ws.chatDestination = .chats })
+                            .padding(16).frame(maxWidth: 760)
+                    }
+                    .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Palette.window)
+                } else {
+                    Group {
+                        if modules.isOn(.chat) { ChatModuleView(ws: ws, store: chat) }
+                        else { Text("The assistant module is switched off (Modules menu)").foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity) }
+                    }.frame(minWidth: 360, maxWidth: .infinity)
+                    SplitHandle(axis: .columns, size: $rightWidth, range: 240...max(240, g.size.width - left - 360 - 14),
+                                growsWithDrag: false, key: "editor.chat.right")
+                    ChatRightPanel(ws: ws, modules: modules).frame(width: right)
+                }
             }
         }
     }

@@ -1,6 +1,6 @@
 """The Conductor: an optional orchestrator that splits a task and routes the pieces to models by role.
 
-Three roles, each mapped to a model in `.llm/conductor.json` (the person sets this up with `llm conduct`):
+Four roles, each mapped to a model in `.llm/conductor.json` (the person sets this up with `llm conduct`):
 
     {"roles": {
        "heavy": {"type": "openai", "url": "https://openrouter.ai/api/v1", "model": "anthropic/claude-sonnet-5-5",
@@ -27,7 +27,7 @@ import os
 
 from . import delegate
 
-ROLES = ("heavy", "code", "fast")
+ROLES = ("heavy", "code", "fast", "vision")
 MAX_SUBTASKS = 6
 MAX_PARALLEL = 3
 MAX_DEP_BYTES = 12_000          # how much of a dependency's answer is quoted into a dependent subtask
@@ -192,13 +192,14 @@ def _extract_json(text):
 
 
 PLAN_PROMPT = (
-    "You are the conductor of a team of models with three roles:\n"
+    "You are the conductor of a team of models with four roles:\n"
     "  fast  — routine, fast work: finding files, simple edits, formatting, quick checks.\n"
     "  code  — writing and fixing code to a specification.\n"
     "  heavy — architecture, tricky reasoning, resolving conflicts.\n"
+    "  vision — visual interpretation of screenshots and UI layouts.\n"
     "Break the task below into at most {maxn} atomic subtasks and assign each to the cheapest role that can do it. "
     "A subtask may depend on earlier ones by id. Reply with ONLY a JSON object, no prose:\n"
-    '{{"subtasks": [{{"id": "s1", "role": "fast|code|heavy", "task": "<self-contained instruction>", '
+    '{{"subtasks": [{{"id": "s1", "role": "fast|code|heavy|vision", "task": "<self-contained instruction>", '
     '"depends_on": []}}]}}\n\nTask:\n{task}'
 )
 

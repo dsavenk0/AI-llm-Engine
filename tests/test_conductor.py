@@ -206,7 +206,7 @@ class TestConfig(Base):
         self.assertTrue(conductor.is_local(roles["code"]))
         self.assertEqual(roles["fast"]["model"], "q")
         self.assertEqual(roles["heavy"]["model"], "big")
-        self.assertEqual(dropped, {})
+        self.assertEqual(dropped, {"vision": "no model configured and no local fallback"})
 
     def test_a_missing_worker_is_dropped_with_a_reason(self):
         conductor.set_role(self.root, "heavy", "ghost")

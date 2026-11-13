@@ -41,6 +41,15 @@ export type Action =
   | { action: "find"; query: string }
   | { action: "scroll"; direction: "up" | "down"; ref?: string }
   | { action: "press"; key: Key; ref?: string; why: string }
+  /** A vision-grounded native action. `ticket` is issued by the local service and expires within seconds. */
+  | { action: "visual_click"; x: number; y: number; label: string; why: string; ticket: string }
+  | { action: "visual_type"; x: number; y: number; label: string; value: string; empty: boolean; why: string; ticket: string }
+  | { action: "visual_press"; key: Key; why: string; ticket: string }
+  | { action: "workspace_sheets_write"; spreadsheet_id: string; cell: string; value: string; overwrite: boolean; why: string; ticket: string }
+  | { action: "workspace_docs_append"; document_id: string; text: string; why: string; ticket: string }
+  | { action: "workspace_drive_create"; name: string; text: string; why: string; ticket: string }
+  | { action: "workspace_gmail_draft"; to: string; subject: string; body: string; why: string; ticket: string }
+  | { action: "workspace_calendar_create"; summary: string; start: string; end: string; time_zone: string; why: string; ticket: string }
   | { action: "wait"; seconds: number }
   | { action: "ask_user"; question: string }
   | { action: "done"; answer: string };
@@ -90,6 +99,8 @@ export interface AgentView {
   message?: string;           // the final answer, a question for the person, or what went wrong
   needsAccess?: string;       // an origin the extension may not read yet
   doing?: string;             // the step being approved, done or checked right now, as the person was shown it
+  route?: "DOM" | "vision" | "macOS" | "Workspace";
+  undo?: { label: string };   // the last completed step when the service/page supplied a one-use reversal
 }
 
 export interface AuditEntry {

@@ -1,4 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="930" height="328" viewBox="0 0 930 328" role="img" aria-label="Lumo, the AI-llm-Engine mascot, greeting you in the terminal">
+<style>
+@keyframes eye-p0 { 0%, 30%, 62%, 100% { fill:#ecfcff } 44%, 50% { fill:#040e12 } }
+@keyframes eye-p1 { 0%, 18%, 75%, 100% { fill:#ecfcff } 30%, 62% { fill:#040e12 } }
+@keyframes eye-p2 { 0%, 30%, 62%, 100% { fill:#040e12 } 44%, 50% { fill:#ecfcff } }
+@keyframes eye-p3 { 0%, 18%, 75%, 100% { fill:#040e12 } 30%, 62% { fill:#ecfcff } }
+.eye-p0 { animation:eye-p0 6s steps(1,end) infinite }
+.eye-p1 { animation:eye-p1 6s steps(1,end) infinite }
+.eye-p2 { animation:eye-p2 6s steps(1,end) infinite }
+.eye-p3 { animation:eye-p3 6s steps(1,end) infinite }
+@media (prefers-reduced-motion: reduce) { .eye-p0,.eye-p1,.eye-p2,.eye-p3 { animation:none } }
+</style>
 <rect width="930" height="328" rx="14" fill="#151b22"/>
 <g shape-rendering="crispEdges">
 <rect x="108" y="24" width="14" height="14" fill="#00e5ff"/>
@@ -89,17 +100,17 @@
 <rect x="52" y="108" width="14" height="14" fill="#063440"/>
 <rect x="66" y="108" width="14" height="14" fill="#063440"/>
 <rect x="80" y="108" width="14" height="14" fill="#063440"/>
-<rect x="94" y="108" width="14" height="14" fill="#ecfcff"/>
-<rect x="108" y="108" width="14" height="14" fill="#ecfcff"/>
-<rect x="122" y="108" width="14" height="14" fill="#040e12"/>
-<rect x="136" y="108" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p0" x="94" y="108" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p1" x="108" y="108" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p2" x="122" y="108" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p3" x="136" y="108" width="14" height="14" fill="#040e12"/>
 <rect x="150" y="108" width="14" height="14" fill="#063440"/>
 <rect x="164" y="108" width="14" height="14" fill="#063440"/>
 <rect x="178" y="108" width="14" height="14" fill="#063440"/>
-<rect x="192" y="108" width="14" height="14" fill="#ecfcff"/>
-<rect x="206" y="108" width="14" height="14" fill="#ecfcff"/>
-<rect x="220" y="108" width="14" height="14" fill="#040e12"/>
-<rect x="234" y="108" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p0" x="192" y="108" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p1" x="206" y="108" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p2" x="220" y="108" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p3" x="234" y="108" width="14" height="14" fill="#040e12"/>
 <rect x="248" y="108" width="14" height="14" fill="#063440"/>
 <rect x="262" y="108" width="14" height="14" fill="#063440"/>
 <rect x="276" y="108" width="14" height="14" fill="#00e5ff"/>
@@ -107,17 +118,17 @@
 <rect x="52" y="122" width="14" height="14" fill="#063440"/>
 <rect x="66" y="122" width="14" height="14" fill="#063440"/>
 <rect x="80" y="122" width="14" height="14" fill="#063440"/>
-<rect x="94" y="122" width="14" height="14" fill="#ecfcff"/>
-<rect x="108" y="122" width="14" height="14" fill="#ecfcff"/>
-<rect x="122" y="122" width="14" height="14" fill="#040e12"/>
-<rect x="136" y="122" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p0" x="94" y="122" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p1" x="108" y="122" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p2" x="122" y="122" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p3" x="136" y="122" width="14" height="14" fill="#040e12"/>
 <rect x="150" y="122" width="14" height="14" fill="#063440"/>
 <rect x="164" y="122" width="14" height="14" fill="#063440"/>
 <rect x="178" y="122" width="14" height="14" fill="#063440"/>
-<rect x="192" y="122" width="14" height="14" fill="#ecfcff"/>
-<rect x="206" y="122" width="14" height="14" fill="#ecfcff"/>
-<rect x="220" y="122" width="14" height="14" fill="#040e12"/>
-<rect x="234" y="122" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p0" x="192" y="122" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p1" x="206" y="122" width="14" height="14" fill="#ecfcff"/>
+<rect class="eye-p2" x="220" y="122" width="14" height="14" fill="#040e12"/>
+<rect class="eye-p3" x="234" y="122" width="14" height="14" fill="#040e12"/>
 <rect x="248" y="122" width="14" height="14" fill="#063440"/>
 <rect x="262" y="122" width="14" height="14" fill="#063440"/>
 <rect x="276" y="122" width="14" height="14" fill="#00e5ff"/>

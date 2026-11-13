@@ -28,6 +28,28 @@
 <p id="result" role="status"></p>
 <p>The token stays in this browser's extension storage. It lets the extension talk to the local model and start
 or stop the engine — nothing else on your Mac. Pages you visit never see it.</p>
+<h2 style="margin-top:28px">Eyes</h2>
+<p>When the text model cannot see a canvas or screenshot, LLMBar temporarily uses this local vision model and then
+restores the text model. By default it chooses the best installed model that fits memory.</p>
+<section><label for="vision-model">Vision model</label><select id="vision-model"></select></section>
+<div class="row"><button id="vision-save" type="button">Use for vision</button>
+<button id="vision-install" type="button">Find and install eyes</button></div>
+<p id="vision-result" role="status"></p>
+<div id="workspace-settings" hidden>
+  <h2 style="margin-top:28px">Google Workspace</h2>
+  <p>Connect Sheets, Docs, Drive, Gmail and Calendar directly from the local service. Google tokens stay in macOS
+  Keychain; this extension and the pages you visit never receive them.</p>
+  <div class="row"><button id="workspace-connect" type="button" class="primary">Connect Google Workspace</button>
+  <button id="workspace-disconnect" type="button">Disconnect</button></div>
+  <p id="workspace-result" role="status"></p>
+  <details id="workspace-advanced">
+    <summary>Advanced setup for source builds</summary>
+    <p>Official release builds can include a public Desktop OAuth client ID. If this build has none, create a Google
+    Desktop OAuth client and paste its ID here. This ID is not a secret.</p>
+    <section><label for="google-client-id">Custom Google Desktop OAuth client ID</label>
+    <input id="google-client-id" type="text" spellcheck="false" autocomplete="off" placeholder="…apps.googleusercontent.com"></section>
+  </details>
+</div>
 <h2 style="margin-top:28px">What the agent did</h2>
 <p>A local record of the agent's steps: what was proposed, approved, refused and done, and on which site. It holds no
 page text and no typed values, stays in this browser, and keeps the last 200 entries.</p>

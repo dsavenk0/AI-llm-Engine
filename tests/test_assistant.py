@@ -3,6 +3,7 @@ real loopback HTTP, against a fake engine that streams slowly enough to be cance
 
     .venv/bin/python -m unittest tests.test_assistant -v
 """
+import base64
 import http.client
 import http.server
 import json
@@ -447,6 +448,64 @@ class TestLifecycle(Base):
         s = self.assistant.refresh()
         self.assertFalse(s["capabilities"]["unload"])
         self.assertIn("stop the engine instead", s["engine"]["error"])
+
+
+class TestDictation(Base):
+    def test_recording_is_transcribed_locally_and_the_temporary_file_is_erased(self):
+        from engine import audio
+        seen = {}
+
+        def transcribe(path):
+            seen["path"] = path
+            self.assertTrue(os.path.isfile(path))
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"webm-audio")
+            return {"text": "Hello locally", "language": "en", "segments": []}
+
+        data = "data:audio/webm;base64," + base64.b64encode(b"webm-audio").decode()
+        with mock.patch.object(audio, "whisper_available", return_value=True), \
+             mock.patch.object(audio, "transcribe", side_effect=transcribe):
+            code, body, _ = self.call("POST", "/v1/assistant/audio/transcribe", {"audio": data})
+        self.assertEqual((code, body["text"], body["language"]), (200, "Hello locally", "en"))
+        self.assertFalse(os.path.exists(seen["path"]))
+
+    def test_dictation_rejects_unknown_payloads_before_decoding(self):
+        for value in ("not-a-data-url", "data:text/plain;base64,SGk=", "data:audio/webm,raw"):
+            code, body, _ = self.call("POST", "/v1/assistant/audio/transcribe", {"audio": value})
+            self.assertEqual(code, 400)
+            self.assertIn("error", body)
+
+
+class TestVisionInstall(unittest.TestCase):
+    def test_install_chooses_only_a_compatible_fitting_result_and_rechecks_it(self):
+        control = object.__new__(service.EngineControl)
+        control._models_at = 123
+        control.llm = mock.Mock()
+        control.llm.hf_search.return_value = [
+            {"id": "too-large", "compatible": True, "fits": False, "size": 12},
+            {"id": "wrong-format", "compatible": False, "fits": True, "size": 2},
+            {"id": "safe-vision", "compatible": True, "fits": True, "size": 3},
+        ]
+        control.vision_model = mock.Mock(side_effect=[None, "/models/safe-vision"])
+        control.run = mock.Mock(return_value=(True, ""))
+
+        self.assertEqual(control.install_vision_model(), "/models/safe-vision")
+        control.run.assert_called_once_with(["pull", "safe-vision"], timeout=7200)
+        self.assertEqual(control._models_at, 0)
+
+    def test_install_does_not_download_an_unusable_search_result(self):
+        control = object.__new__(service.EngineControl)
+        control._models_at = 123
+        control.llm = mock.Mock()
+        control.llm.hf_search.return_value = [
+            {"id": "too-large", "compatible": True, "fits": False, "size": 12},
+        ]
+        control.vision_model = mock.Mock(return_value=None)
+        control.run = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "no compatible vision model"):
+            control.install_vision_model()
+        control.run.assert_not_called()
 
 
 class TestNoGrowth(Base):

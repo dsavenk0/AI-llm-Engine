@@ -1755,6 +1755,15 @@ struct ModelsTab: View {
 struct ToolsTab: View {
     @ObservedObject var e: EngineState
     @State private var connectOpen = false
+    @State private var browserAssistantOpen = false
+
+    private var browserAssistantNames: String {
+        var names = ["Safari"]
+        if let browser = BrowserAssistantSetup.chromium { names.append(browser.name) }
+        if let browser = BrowserAssistantSetup.firefox { names.append(browser.name) }
+        return names.joined(separator: " · ")
+    }
+
     var body: some View {
         if e.toolsPage == "knowledge", AppHost.enabled(.knowledge) {
             KnowledgePage(e: e)
@@ -1799,26 +1808,41 @@ struct ToolsTab: View {
                     }
                 }
                 // Optional and independent of this app: the browser extension talks to its own small service, so
-                // it keeps working with LLMBar closed. Each row installs what is missing and takes the person to
-                // the one step the browser keeps for them (BrowserAssistantSetup.swift).
-                tool("safari", L("Browser assistant · Safari", "Браузерный ассистент · Safari"),
-                     L("Enables it in Safari", "Включит в Safari")
-                     + (BrowserAssistantSetup.bundledVersion.map { " · v\($0)" } ?? "")) {
-                    BrowserAssistantSetup.run()
-                }
-                if let browser = BrowserAssistantSetup.chromium {
-                    tool("globe", L("Browser assistant · \(browser.name)", "Браузерный ассистент · \(browser.name)"),
-                         L("Prepares the install", "Подготовит установку")
-                         + (BrowserAssistantSetup.chromiumVersion.map { " · v\($0)" } ?? "")) {
-                        BrowserAssistantSetup.runChromium()
-                    }
-                }
-                if let browser = BrowserAssistantSetup.firefox {
-                    tool("globe", L("Browser assistant · \(browser.name)", "Браузерный ассистент · \(browser.name)"),
-                         L("Prepares the temporary install", "Подготовит временную установку")
-                         + (BrowserAssistantSetup.firefoxVersion.map { " · v\($0)" } ?? "")) {
-                        BrowserAssistantSetup.runFirefox()
-                    }
+                // it keeps working with LLMBar closed. Keep the browser choices together like the editor connectors.
+                Button(action: { browserAssistantOpen.toggle() }) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "safari").font(.system(size: 14)).foregroundColor(HUD.cyan).frame(width: 22)
+                            .shadow(color: HUD.cyan.opacity(0.7), radius: 3)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(L("Browser assistant", "Браузерный ассистент"))
+                                .font(.system(size: 13, weight: .medium)).foregroundColor(HUD.text)
+                            Text(browserAssistantNames).font(.system(size: 10)).foregroundColor(HUD.dim).lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: browserAssistantOpen ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10)).foregroundColor(HUD.dim)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .help(L("Choose a browser to set up", "Выберите браузер для настройки"))
+                    .accessibilityHint(L("Shows browser setup options", "Показывает варианты настройки браузера"))
+                    .accessibilityValue(browserAssistantOpen ? L("Expanded", "Открыто") : L("Collapsed", "Закрыто"))
+                if browserAssistantOpen {
+                    HStack(spacing: 8) {
+                        browserOption("Safari", version: BrowserAssistantSetup.bundledVersion) {
+                            BrowserAssistantSetup.run()
+                        }
+                        if let browser = BrowserAssistantSetup.chromium {
+                            browserOption(browser.name, version: BrowserAssistantSetup.chromiumVersion) {
+                                BrowserAssistantSetup.runChromium()
+                            }
+                        }
+                        if let browser = BrowserAssistantSetup.firefox {
+                            browserOption(browser.name, version: BrowserAssistantSetup.firefoxVersion) {
+                                BrowserAssistantSetup.runFirefox()
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }.padding(.leading, 32)
                 }
                 // an inline list, like the model settings: a Menu in this style lost the row's padding and chevron
                 Button(action: { connectOpen.toggle() }) {
@@ -1878,6 +1902,16 @@ struct ToolsTab: View {
 
     func tool(_ icon: String, _ title: String, _ sub: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) { toolLabel(icon, title, sub) }.buttonStyle(.plain).help(sub)
+    }
+
+    private func browserOption(_ name: String, version: String?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(version.map { "\(name) · v\($0)" } ?? name).font(HUD.mono(10, .semibold)).lineLimit(1)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+        }
+        .buttonStyle(NeonButton(color: HUD.cyan))
+        .fixedSize()
+        .help(name)
     }
 }
 

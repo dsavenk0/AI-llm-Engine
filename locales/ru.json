@@ -446,5 +446,32 @@
   "Nothing found.": "Ничего не найдено.",
   "Removed from the chat.": "Убрано из чата.",
   "Chat documents removed from the index:": "Документов чата убрано из индекса:",
-  "Added to the library.": "Добавлено в библиотеку."
+  "Added to the library.": "Добавлено в библиотеку.",
+  "Lumo tip:": "Совет Люмо:",
+  "Star the models you use most — favourites stay at the top of every model list": "Отметьте любимые модели звёздочкой — они будут первыми во всех списках моделей",
+  "./llm show <model> explains its format, memory route, context and capabilities": "./llm show <модель> покажет формат, маршрут памяти, контекст и возможности модели",
+  "A model can stay downloaded without being selected or loaded into memory": "Модель может оставаться загруженной на диск, не будучи выбранной или загруженной в память",
+  "Search results show size and memory fit before you download anything": "Результаты поиска показывают размер и совместимость с памятью до скачивания",
+  "Use --source modelscope when the model is easier to find on ModelScope": "Используйте --source modelscope, если модель проще найти на ModelScope",
+  "Downloads resume: an interrupted pull does not have to start again": "Скачивание возобновляется: после прерывания не нужно начинать сначала",
+  "Per-model context and vision settings override the global defaults": "Настройки контекста и vision конкретной модели важнее общих значений",
+  "The memory guard can reject a prompt before it pushes macOS into swap": "Защита памяти может отклонить запрос до того, как macOS начнёт активно использовать swap",
+  "Proxy and CA settings here are also used by downloads and web tools": "Настройки прокси и CA также используются скачиванием и веб-инструментами",
+  "A chat searches only the Knowledge libraries selected for that chat": "Чат ищет только в библиотеках Knowledge, выбранных для этого чата",
+  "Files attached to one chat leave the Knowledge index when that chat is deleted": "Файлы, прикреплённые к одному чату, удаляются из индекса Knowledge вместе с чатом",
+  "Knowledge indexes local text and OCR results; your original files are never changed": "Knowledge индексирует локальный текст и результаты OCR, не изменяя исходные файлы",
+  "The browser assistant token stays on this Mac and can be replaced at any time": "Токен браузерного ассистента остаётся на этом Mac, и его можно заменить в любой момент",
+  "DOM actions are preferred; vision and macOS Accessibility are fallbacks when needed": "В приоритете действия через DOM; vision и Универсальный доступ macOS включаются при необходимости",
+  "Risky browser actions wait for your approval before they run": "Рискованные действия в браузере ждут вашего подтверждения",
+  "Knowledge now lives inside Chat: select libraries or manage their documents without leaving it": "Knowledge теперь находится внутри Chat: выбирайте библиотеки и управляйте документами, не покидая чат",
+  "Attach a file to the next message when you want the assistant to reason about that exact version": "Прикрепите файл к следующему сообщению, чтобы ассистент работал именно с этой версией",
+  "Review the diff before approving an edit; accepted edits can still be undone": "Проверьте diff перед подтверждением; принятое изменение всё равно можно отменить",
+  "Image generation is needed for this request. Install mflux now? The first image also downloads its model weights.": "Для этого запроса нужна генерация изображений. Установить mflux сейчас? При первой генерации также загрузятся веса модели.",
+  "Restarting the engine with local image generation…": "Перезапускаю движок с локальной генерацией изображений…"
+  ,"  2. Safari ▸ Settings ▸ Developer: “Add Temporary Extension…” and choose: ": "  2. Safari ▸ Настройки ▸ Разработчик: «Добавить временное расширение…», затем выберите: "
+  ,"Firefox — temporary extension:": "Firefox — временное расширение:"
+  ,"  1. Open about:debugging#/runtime/this-firefox, then “Load Temporary Add-on…”": "  1. Откройте about:debugging#/runtime/this-firefox, затем «Загрузить временное дополнение…»"
+  ,"  2. Choose:": "  2. Выберите:"
+  ,"  3. The extension pairs with the app automatically. If needed, paste the token from the clipboard.": "  3. Расширение подключается к приложению автоматически. При необходимости вставьте токен из буфера обмена."
+  ,"Firefox removes temporary add-ons when it quits. Load it again after restarting Firefox.": "Firefox удаляет временные дополнения при выходе. После перезапуска Firefox загрузите его снова."
 }

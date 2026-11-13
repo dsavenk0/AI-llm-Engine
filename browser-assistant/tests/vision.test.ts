@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { wantsToSee } from "../src/core/vision";
+import { needsVisualPage, wantsToSee } from "../src/core/vision";
 
 test("a question about how the page looks asks for a picture, in English, Russian and Spanish", () => {
   for (const q of ["ты видишь изображения?", "что на картинке", "What is in this image?", "how does the chart look",
@@ -10,4 +10,12 @@ test("a question about how the page looks asks for a picture, in English, Russia
 test("an ordinary question does not, and a word inside another word does not count", () => {
   for (const q of ["summarize the article", "сколько стоит доставка", "imagine a plan", "seed the database", undefined, ""])
     assert.equal(wantsToSee(q as string), false, String(q));
+});
+
+test("agent mode automatically brings eyes to Google Workspace canvas applications", () => {
+  for (const url of ["https://keep.google.com/", "https://docs.google.com/spreadsheets/d/1/edit",
+                     "https://mail.google.com/mail/u/0/#inbox", "https://calendar.google.com/calendar/u/0/r"])
+    assert.equal(needsVisualPage(url), true, url);
+  for (const url of ["https://example.com/", "not a URL", undefined])
+    assert.equal(needsVisualPage(url), false, String(url));
 });

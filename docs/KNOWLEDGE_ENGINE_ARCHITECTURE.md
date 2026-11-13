@@ -218,9 +218,11 @@ linked folders with FSEvents are a later phase.
   `tests/swift/main.swift`).
 * `app/knowledge/KnowledgeModule.swift` — `KnowledgeCLI` (runs the CLI), `KnowledgeStore` (shared state; runs
   nothing while no database exists on disk), `KnowledgePicker` (the 📚 menu in the editor composer and the quick
-  chat), and the **Knowledge window** (libraries: create, rename, delete; documents: add files/folders, remove,
+  chat), and the **Knowledge manager inside Chat** (also available from Tools; libraries: create, rename, delete;
+  documents: add files/folders, remove,
   re-index changed ones, show in Finder; a "try a question" box showing exactly what a chat would get). Opened
-  from LLMBar ▸ Tools ▸ *Knowledge* or the picker's *Manage Knowledge…*; closing it releases its views.
+  from Chat's sidebar, LLMBar ▸ Tools ▸ *Knowledge* or the picker's *Manage Knowledge…*. Every entrance uses the
+  same `KnowledgeStore.shared`; closing it releases its views.
 * A module like the editor and the voice chat: `AppHost.Module.knowledge`, switched off in LLMBar settings
   (*Knowledge module*), link `llmbar://knowledge`.
 * Editor chats store their choice (`knowledge`, `knowledgeChat`) in the chat JSON; both fields are optional when
@@ -316,7 +318,7 @@ The import cost only applies to a process that actually uses Knowledge: clients 
 | 1 | `engine/knowledge.py` (schema, ingestion, chunking, FTS5/exact search, owners, context builder with citations), OCR helper page mode, `./llm knowledge` CLI, tests in `tests/test_knowledge.py` + `tests/test_documents.py` | ✔ done — dormant-path tests, budgets met |
 | 2 | Integration: UI server `knowledge` field, editor chat and Quick chat selector (📚 menu, empty state), chat-deletion hooks, sources in transcripts | ✔ done (Quick chat via the CLI, see §5.4) |
 | 3 | Optional semantic retrieval via existing `/v1/embeddings`, vectors as BLOBs keyed by model fingerprint, streamed exact scan, RRF fusion — only if measured quality gain justifies it | benchmark |
-| 4 | Knowledge Center (libraries, documents, progress, diagnostics) as an optional module off the main screen | ✔ done — the Knowledge window |
+| 4 | Knowledge Center (libraries, documents, progress, diagnostics) as an optional module | ✔ done — inside Chat, with a Tools entrance to the same store |
 | 5 | Linked folders (FSEvents + bookmarks), browser page capture, Conductor/agent tool, more formats | per feature |
 
 ---

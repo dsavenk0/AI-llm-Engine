@@ -7,10 +7,34 @@ import { api } from "../browser-adapters/api";
 const MAX_WIDTH = 1280;
 
 export class CaptureError extends Error {}
+export interface CapturedFrame { screenshot: string; width: number; height: number; signature: string }
 
 /** A JPEG data URL of the tab's visible area. Throws CaptureError with a reason a person can act on. */
 export async function captureTab(tabId: number): Promise<string> {
   return shrink(await captureRaw(tabId));
+}
+
+/** Screenshot plus a tiny perceptual signature used only to notice a substantially different frame before a
+ * native click. It contains no recoverable page text. */
+export async function captureFrame(tabId: number): Promise<CapturedFrame> {
+  const screenshot = await captureTab(tabId);
+  const g = globalThis as unknown as { OffscreenCanvas?: typeof OffscreenCanvas; createImageBitmap?: typeof createImageBitmap };
+  if (!g.OffscreenCanvas || !g.createImageBitmap) return { screenshot, width: 0, height: 0, signature: "" };
+  const bmp = await g.createImageBitmap(dataUrlToBlob(screenshot));
+  const width = bmp.width, height = bmp.height;
+  const canvas = new g.OffscreenCanvas(16, 9), ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bmp, 0, 0, 16, 9); bmp.close();
+  const pixels = ctx.getImageData(0, 0, 16, 9).data;
+  let bits = "";
+  const gray = (i: number): number => pixels[i] * 3 + pixels[i + 1] * 6 + pixels[i + 2];
+  for (let y = 0; y < 9; y++) for (let x = 0; x < 15; x++) {
+    const i = (y * 16 + x) * 4;
+    bits += gray(i) >= gray(i + 4) ? "1" : "0";
+  }
+  while (bits.length % 4) bits += "0";
+  let signature = "";
+  for (let i = 0; i < bits.length; i += 4) signature += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  return { screenshot, width, height, signature };
 }
 
 /** The screenshot, scaled down, and the page's pictures cut from the full-resolution capture before scaling —

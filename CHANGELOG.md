@@ -2,6 +2,49 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## 1.3.0 — 14 November
+
+### Added
+- **Real eyes and hands for the browser assistant.** Safari, Firefox and Chromium still use the DOM first, but
+  canvas and virtualized interfaces can now be grounded from a screenshot and operated through a small signed
+  macOS Accessibility helper. Visual commands are one-use, expire quickly, are tied to the current page and active
+  browser, and never accept arbitrary selectors or code. Low-risk steps may run automatically; sending, deleting,
+  overwriting and other consequential actions still require approval.
+- **A separate vision role for the Conductor.** A configured local vision model can inspect the frame, after which
+  LLMBar restores the text model; without one, Apple Vision supplies local OCR and scene labels.
+- **Secure Google Workspace connection.** The extension settings can start Desktop OAuth for Sheets, Docs, Drive,
+  Gmail and Calendar with PKCE and a one-time loopback callback. Refresh tokens live only in the macOS Keychain;
+  neither web pages, the extension nor the model can read them. Release builds connect in one click; a custom
+  public client ID is under Advanced setup for source builds. Google Keep continues through browser automation.
+- **Firefox packaging and setup** from the shared extension source, with its native sidebar and native-messaging
+  registration.
+- **Reversible browser work.** Ordinary DOM field fills and the named Sheets, Docs, Drive, Gmail-draft and Calendar
+  operations now expose a one-use Undo. A DOM undo refuses to overwrite a value changed again by the person.
+- **Knowledge management inside Chat.** Chat's sidebar opens the existing library manager in the conversation
+  window; Tools remains a second entrance to the same `KnowledgeStore`, not a parallel index.
+- **A livelier, more useful Lumo.** Its terminal eyes now glance and blink, and interactive model, search,
+  settings, Knowledge, browser-assistant and editor sections select advice from their own non-repeating pools.
+- **Local browser dictation.** Select an ordinary text field, press the microphone and Whisper inserts the
+  recognised text at its caret. Audio is bounded and erased immediately after local transcription; sensitive and
+  CAPTCHA fields are refused, and the text falls back to the assistant composer if the page target disappears.
+- **On-demand image and vision setup.** Image requests remain understandable before mflux is installed and offer
+  the optional local setup when first needed. Browser settings can find a current compatible vision model that
+  fits the Mac, download it with explicit approval and assign it to the Conductor's `vision` role.
+
+### Fixed
+- Google Workspace OAuth controls stay dormant when a build has no Desktop client ID, instead of asking the user
+  to configure an unfinished integration. Browser DOM, vision and Accessibility actions continue without Auth;
+  the existing connector appears automatically once a later build includes the public ID.
+- Visual mode is enabled automatically on Google Workspace pages instead of depending on the user saying
+  “screenshot”, and the native route now recognizes the active Edge, Brave, Arc, Vivaldi or Chromium app rather
+  than assuming Google Chrome.
+- The native helper asks for Accessibility access when first needed, and the text model is restored even when a
+  visual step is malformed or cancelled.
+- Deleting a browser conversation now drops its short-lived visual, Workspace and undo tickets from the local
+  service; screenshot bytes were already request-only and are never stored in conversation history.
+- Lumo's README eyes now swap whole pixel colours instead of translating dark squares, so the final glance no
+  longer stretches a pupil and the vacated square turns white.
+
 ## 1.2.0 — 12 November
 
 ### Added

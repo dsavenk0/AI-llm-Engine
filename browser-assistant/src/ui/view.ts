@@ -33,7 +33,7 @@ export function problemText(problem: string | undefined): string {
 }
 
 export function modelLabel(m: ModelInfo): string {
-  const bits = [m.format, `${m.size_gb.toFixed(1)} GB`, m.route].filter(Boolean).join(" · ");
+  const bits = [m.format, `${m.size_gb.toFixed(1)} GB`, m.route, m.vision ? "vision" : "text + OCR"].filter(Boolean).join(" · ");
   return `${m.favorite ? "★ " : ""}${m.name} — ${bits}${m.supported ? (m.fits ? "" : " · may not fit") : " · unsupported"}`;
 }
 

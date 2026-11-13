@@ -6,7 +6,7 @@ import { api, browserName } from "../browser-adapters/api";
 import { AgentView, Autonomy } from "../core/agent-types";
 import { activityLabel } from "../core/activity";
 import { originOf } from "../core/policy";
-import { wantsToSee } from "../core/vision";
+import { needsVisualPage, wantsToSee } from "../core/vision";
 import { Conversations, historyFor } from "./conversations";
 import { Command, PROTOCOL, ServiceError, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { isActive, renderAgent } from "./agent-view";
@@ -43,6 +43,7 @@ const threads = $("threads"), input = $<HTMLTextAreaElement>("input"), send = $<
 const stop = $<HTMLButtonElement>("stop"), mode = $<HTMLSelectElement>("mode"), tabLine = $("tab");
 const chip = $<HTMLButtonElement>("model-chip"), sheet = $("model-sheet"), picker = $<HTMLSelectElement>("model");
 const controls = $("controls"), note = $("note"), see = $<HTMLButtonElement>("see");
+const mic = $<HTMLButtonElement>("mic");
 // in Safari (and a Chromium browser without a side panel) this page is docked into the tab in a frame
 const EMBEDDED = new URLSearchParams(location.search).has("docked");
 let lastBubble: HTMLElement | null = null;
@@ -52,6 +53,14 @@ const MINE = MANIFEST.version;
 let state: Snapshot | null = null;
 let tabId: number | null = null;
 let windowId: number | undefined;
+let recorder: MediaRecorder | null = null;
+let recordingStream: MediaStream | null = null;
+let recordingChunks: Blob[] = [];
+let recordingTimer: number | null = null;
+let discardRecording = false;
+let dictationReady = false;
+let dictationArmResolve: ((ready: boolean) => void) | null = null;
+let dictationArmTimer: number | null = null;
 
 // ───────────── one conversation per tab ─────────────
 interface Thread { root: HTMLElement; empty: HTMLElement; agents: Map<string, HTMLElement>; view: AgentView | null;
@@ -247,9 +256,10 @@ async function ask(task: Task, question?: string): Promise<void> {
 function act(goal: string): void {
   if (tabId === null || busy()) return;
   const autonomy: Autonomy = mode.value === "act-auto" ? "auto" : "ask";
+  const screenshot = seeing() || wantsToSee(goal) || needsVisualPage(currentUrl);
   bubble(thread(tabId), goal, (autonomy === "auto" ? "Act · asks before anything risky" : "Act · asks before every step")
-    + (seeing() ? " · sees the page" : ""));
-  post({ kind: "agent-start", tabId, goal, autonomy, see: seeing() });
+    + (screenshot ? " · screenshot" : ""));
+  post({ kind: "agent-start", tabId, goal, autonomy, see: screenshot });
 }
 
 const savedTasks = new Set<string>();
@@ -276,6 +286,7 @@ function renderTask(v: AgentView): void {
   renderAgent(body, v, {
     approve: () => post({ kind: "agent-approve" }), reject: () => post({ kind: "agent-reject" }),
     cancel: () => post({ kind: "agent-cancel" }), reply: (text) => post({ kind: "agent-reply", text }),
+    undo: () => post({ kind: "agent-undo" }),
   });
   body.querySelector(".agent-goal")?.remove();                     // the goal is the bubble just above
   body.querySelector(".agent-state")?.remove();                    // the live line above the card says it
@@ -345,11 +356,115 @@ function syncButtons(): void {
     : "This model cannot see: the screenshot and the page's pictures are described to it in words (Apple Vision)";
   send.hidden = working;
   send.disabled = !state;                       // off is fine: sending starts the model
+  mic.disabled = !state || working || mic.getAttribute("aria-busy") === "true";
   input.placeholder = !state ? "Not connected — open ⚙︎ settings"
     : !ready && !pendingRun ? (mode.value === "ask" ? "Ask about this page — the model starts by itself"
                                                     : "Describe what to do — the model starts by itself")
     : mode.value === "ask" ? "Ask about this page — Enter to send" : "Describe what to do on this page — Enter to start";
 }
+
+function insertAtComposer(text: string): void {
+  const start = input.selectionStart ?? input.value.length, end = input.selectionEnd ?? start;
+  input.value = input.value.slice(0, start) + text + input.value.slice(end);
+  input.setSelectionRange(start + text.length, start + text.length);
+  input.focus();
+  autosize();
+}
+
+function dictationMessage(message: string, bad = false): void {
+  if (tabId !== null) thread(tabId).root.append(el("div", { class: `msg note${bad ? " bad" : ""}` }, message));
+  mic.title = message;
+  scroll();
+}
+
+function stopRecording(discard = false): void {
+  discardRecording = discardRecording || discard;
+  if (recordingTimer !== null) { clearTimeout(recordingTimer); recordingTimer = null; }
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+}
+
+function finishDictationArm(ready: boolean): void {
+  if (dictationArmTimer !== null) { clearTimeout(dictationArmTimer); dictationArmTimer = null; }
+  const resolve = dictationArmResolve;
+  dictationArmResolve = null;
+  resolve?.(ready);
+}
+
+function armDictationTarget(): Promise<boolean> {
+  finishDictationArm(false);
+  return new Promise((resolve) => {
+    dictationArmResolve = resolve;
+    dictationArmTimer = window.setTimeout(() => finishDictationArm(false), 2_000);
+    post({ kind: "dictation-arm" });
+  });
+}
+
+async function beginRecording(): Promise<void> {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    dictationMessage("This browser does not provide microphone recording to the extension.", true);
+    return;
+  }
+  // Ask the page to remember its selected field while getUserMedia is opened from this user gesture. Do not
+  // begin recording if the page rejects that field or the bridge does not answer promptly.
+  const armed = armDictationTarget();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!await armed) {
+      stream.getTracks().forEach((track) => track.stop());
+      syncButtons();
+      return;
+    }
+    recordingStream = stream;
+    const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"]
+      .find((candidate) => MediaRecorder.isTypeSupported(candidate));
+    recorder = new MediaRecorder(recordingStream, type ? { mimeType: type } : undefined);
+    recordingChunks = [];
+    discardRecording = false;
+    recorder.ondataavailable = (event) => { if (event.data.size) recordingChunks.push(event.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(recordingChunks, { type: recorder?.mimeType || recordingChunks[0]?.type || "audio/webm" });
+      recordingStream?.getTracks().forEach((track) => track.stop());
+      recordingStream = null; recorder = null; recordingChunks = [];
+      mic.setAttribute("aria-pressed", "false");
+      if (discardRecording) { discardRecording = false; syncButtons(); return; }
+      if (!blob.size || blob.size > 5 * 2 ** 20) {
+        dictationMessage(blob.size ? "The recording is too large (5 MB maximum)." : "Nothing was recorded.", true);
+        syncButtons(); return;
+      }
+      mic.setAttribute("aria-busy", "true");
+      mic.title = "Recognising speech locally…";
+      syncButtons();
+      const reader = new FileReader();
+      reader.onload = () => post({ kind: "dictation-transcribe", audio: String(reader.result || "") });
+      reader.onerror = () => { mic.removeAttribute("aria-busy"); dictationMessage("Could not read the recording.", true); syncButtons(); };
+      reader.readAsDataURL(blob);
+    };
+    recorder.start(250);
+    mic.setAttribute("aria-pressed", "true");
+    mic.title = "Listening… click to stop";
+    recordingTimer = window.setTimeout(() => stopRecording(), 30_000);
+    syncButtons();
+  } catch (e) {
+    finishDictationArm(false);
+    recordingStream?.getTracks().forEach((track) => track.stop());
+    recordingStream = null; recorder = null;
+    dictationMessage(e instanceof Error ? `Microphone: ${e.message}` : "The microphone is unavailable.", true);
+    syncButtons();
+  }
+}
+
+mic.addEventListener("click", () => {
+  if (recorder) { stopRecording(); return; }
+  if (!dictationReady && !state?.capabilities.dictation?.installed) {
+    if (confirm("Install local dictation (Whisper)? The model is downloaded on first use and stays on this Mac.")) {
+      mic.setAttribute("aria-busy", "true");
+      post({ kind: "dictation-setup" });
+      syncButtons();
+    }
+    return;
+  }
+  void beginRecording();
+});
 
 function submit(): void {
   const text = input.value.trim();
@@ -416,6 +531,7 @@ async function renderHistory(): Promise<void> {
     });
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
+      if (tabId !== null && byTab.get(tabId)?.conv === c.id) post({ kind: "forget-session" });
       await convs.remove(c.id);
       if (tabId !== null && byTab.get(tabId)?.conv === c.id) $("clear").click();
       void renderHistory();
@@ -510,6 +626,22 @@ function renderState(ev: Extract<UiEvent, { kind: "state" }>): void {
   $("model-name").textContent = state.model.name || (state.engine.state === "ready" ? "No model" : line.text);
   chip.title = line.text;
   $("metrics").textContent = metricsText(state);
+  const hands = $("hands");
+  const handState = state.capabilities.hands;
+  hands.hidden = !handState;
+  if (handState) {
+    hands.className = "banner " + (handState.trusted ? "ok" : handState.available ? "warn" : "bad");
+    hands.replaceChildren(document.createTextNode(handState.trusted
+      ? "Hands: enabled."
+      : handState.available ? "Hands: macOS Accessibility permission is required."
+        : "Hands: rebuild LLMBar to install the macOS automation helper."));
+    if (handState.available && !handState.trusted) {
+      const open = el("button", { type: "button", textContent: "Open Settings" });
+      open.style.marginLeft = "8px";
+      open.addEventListener("click", () => post({ kind: "open-accessibility" }));
+      hands.append(open);
+    }
+  }
   const target = browserName === "chromium" ? "chromium" : browserName === "firefox" ? "firefox" : "safari";
   const notice = updateNotice(state, MINE, target, PROTOCOL, ev.app);
   $("update").hidden = !notice;
@@ -582,6 +714,30 @@ function onEvent(ev: UiEvent): void {
     else if (tabId !== null) thread(tabId).root.append(el("div", { class: "msg note bad" }, ev.message));
     syncButtons();
   } else if (ev.kind === "command-result" && !ev.ok && ev.error) conflict(ev.error, ev.command);
+  else if (ev.kind === "dictation") {
+    if (ev.phase === "error") {
+      finishDictationArm(false);
+      if (recorder) stopRecording(true);
+      mic.removeAttribute("aria-busy");
+      dictationMessage(ev.message || "Dictation failed.", true);
+    } else if (ev.phase === "armed") {
+      finishDictationArm(true);
+    } else if (ev.phase === "setup") {
+      mic.setAttribute("aria-busy", "true"); mic.title = "Installing local dictation…";
+    } else if (ev.phase === "ready") {
+      dictationReady = true; mic.removeAttribute("aria-busy");
+      dictationMessage("Dictation is ready. Select a field on the page and press the microphone again.");
+    } else if (ev.phase === "done") {
+      mic.removeAttribute("aria-busy");
+      if (ev.text && !ev.inserted) {
+        insertAtComposer(ev.text);
+        dictationMessage("The page field was unavailable, so the recognised text was placed in the assistant composer.");
+      } else if (ev.text) {
+        dictationMessage("Dictation inserted into the selected page field.");
+      } else dictationMessage("No speech was recognised.", true);
+    }
+    syncButtons();
+  }
 }
 
 api.tabs.onUpdated.addListener((id, change) => {

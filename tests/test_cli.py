@@ -27,6 +27,22 @@ def cfg():
     return c
 
 
+class TestLumo(unittest.TestCase):
+    def test_tips_follow_the_section_and_do_not_repeat_immediately(self):
+        llm._LAST_TIP.clear()
+        with mock.patch("random.choice", side_effect=lambda choices: choices[0]):
+            first = llm._lumo_tip("knowledge")
+            second = llm._lumo_tip("knowledge")
+        self.assertIn(first, llm._SECTION_TIPS["knowledge"])
+        self.assertIn(second, llm._SECTION_TIPS["knowledge"])
+        self.assertNotEqual(first, second)
+        self.assertNotIn(llm._lumo_tip("settings"), llm._SECTION_TIPS["knowledge"])
+
+    def test_eyes_have_motion_and_blink_frames(self):
+        self.assertNotEqual(llm._mascot("left"), llm._mascot("right"))
+        self.assertNotEqual(llm._mascot("blink"), llm._mascot("center"))
+
+
 class TestContinueConfig(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -636,7 +652,8 @@ class TestChatTools(unittest.TestCase):
 
     def test_generate_image_reports_a_failed_request_to_the_model(self):
         from unittest import mock
-        with mock.patch.object(llm, "http_json", side_effect=OSError("no route to host")):
+        with mock.patch.object(llm, "health", return_value={"images": True}), \
+             mock.patch.object(llm, "http_json", side_effect=OSError("no route to host")):
             out = llm._tool_generate_image(cfg(), {"prompt": "a lighthouse"})
         self.assertTrue(out.startswith("error:"))
         self.assertIn("no route to host", out)
@@ -647,7 +664,8 @@ class TestChatTools(unittest.TestCase):
         png_bytes = b"\x89PNG\r\n\x1a\nfake"
         fake_reply = {"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]}
         tmp = tempfile.mkdtemp()
-        with mock.patch.object(llm, "http_json", return_value=fake_reply), \
+        with mock.patch.object(llm, "health", return_value={"images": True}), \
+             mock.patch.object(llm, "http_json", return_value=fake_reply), \
              mock.patch.object(llm, "DATA", tmp), \
              mock.patch.object(llm.shutil, "which", return_value=None):          # no Preview window in a test
             out = llm._tool_generate_image(cfg(), {"prompt": "a lighthouse", "size": "512x512"})
@@ -719,13 +737,12 @@ class TestChatTools(unittest.TestCase):
             llm.chat({"port": 1, "api_key": ""})
         return {t["function"]["name"] for t in sent[0]} if sent else set()
 
-    def test_chat_offers_the_tools_only_once_the_backend_is_ready(self):
-        """The schemas sent to the model mirror /health and the installed audio package — never offered,
-        and never silently dropped, by guesswork."""
+    def test_chat_always_understands_image_requests_and_gates_optional_speech_on_installation(self):
+        """Image intent must reach the preparation path even before mflux is installed; speech stays gated."""
         self.assertEqual(self._tool_names_offered(images=True, kokoro=True), {"generate_image", "speak"})
-        self.assertEqual(self._tool_names_offered(images=False, kokoro=False), set())
+        self.assertEqual(self._tool_names_offered(images=False, kokoro=False), {"generate_image"})
         self.assertEqual(self._tool_names_offered(images=True, kokoro=False), {"generate_image"})
-        self.assertEqual(self._tool_names_offered(images=False, kokoro=True), {"speak"})
+        self.assertEqual(self._tool_names_offered(images=False, kokoro=True), {"generate_image", "speak"})
 
 
 def _dispatch_names():

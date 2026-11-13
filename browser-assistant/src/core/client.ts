@@ -41,6 +41,10 @@ export class Client {
     return this.json("POST", path, body);
   }
 
+  async get<T>(path: string): Promise<T> {
+    return this.json("GET", path);
+  }
+
   private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
     const r = await fetch(this.url(path), {
       method, headers: this.headers(), body: body === undefined ? undefined : JSON.stringify(body),
@@ -92,15 +96,42 @@ export class Client {
 
   /** The model's next action for this page and goal. `requestId` names the call so it can be cancelled. */
   async agentStep(req: { session: string; goal: string; snapshot: PageSnapshot; history: { summary: string; result: string }[];
-    requestId: string; screenshot?: string | null }, signal: AbortSignal): Promise<{ action: Action; attempts: number }> {
+    requestId: string; tabId: number; screenshot?: string | null; frame?: { width: number; height: number; signature: string } }, signal: AbortSignal): Promise<{ action: Action; attempts: number }> {
     const r = await fetch(this.url("/v1/assistant/agent/step"), {
       method: "POST", headers: this.headers(), signal,
       body: JSON.stringify({ session: req.session, goal: req.goal, snapshot: req.snapshot, history: req.history,
-                             request_id: req.requestId, screenshot: req.screenshot || undefined }),
+                             request_id: req.requestId, tab_id: req.tabId, screenshot: req.screenshot || undefined,
+                             frame: req.frame }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new ServiceFailure(r.status, data.error || { code: "http_" + r.status, message: `the service answered ${r.status}` });
     return data;
+  }
+
+  /** Run a service-issued, short-lived visual action through the private macOS helper. */
+  async visualExecute(req: { session: string; ticket: string; tabId: number; url: string; screenshot: string;
+    frame?: { width: number; height: number; signature: string }; browser: string }): Promise<{ ok: boolean; error?: string; route?: string }> {
+    return this.post("/v1/assistant/agent/visual/execute", req);
+  }
+
+  async workspaceExecute(req: { session: string; ticket: string; url: string }): Promise<{ ok: boolean; service?: string; undo?: string; [k: string]: unknown }> {
+    return this.post("/v1/assistant/workspace/execute", req);
+  }
+
+  async workspaceUndo(req: { session: string; undo: string }): Promise<{ ok: boolean }> {
+    return this.post("/v1/assistant/workspace/undo", req);
+  }
+
+  async forgetSession(session: string): Promise<void> {
+    await this.post("/v1/assistant/session/forget", { session });
+  }
+
+  async setupDictation(): Promise<{ ready: boolean }> {
+    return this.post("/v1/assistant/audio/setup", {});
+  }
+
+  async transcribe(audio: string): Promise<{ text: string; language?: string }> {
+    return this.post("/v1/assistant/audio/transcribe", { audio });
   }
 
   async cancel(id: string, session: string): Promise<void> {

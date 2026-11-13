@@ -730,17 +730,36 @@ struct DiffView: View {
 
 // MARK: - sessions list (the chat-mode sidebar)
 
+enum ChatDestination {
+    case chats, knowledge
+}
+
 struct SessionsModuleView: View {
     @ObservedObject var ws: Workspace
     @ObservedObject var store: ChatStore
+    @Binding var destination: ChatDestination
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button { store.newChat() } label: { Label("New chat", systemImage: "square.and.pencil").frame(maxWidth: .infinity, alignment: .leading) }
-                .buttonStyle(.plain).padding(10)
+            VStack(spacing: 4) {
+                navigationRow(L("New chat", "Новый чат"), icon: "square.and.pencil", selected: destination == .chats) {
+                    destination = .chats
+                    store.newChat()
+                }
+                if AppHost.enabled(.knowledge) {
+                    navigationRow("Knowledge", icon: destination == .knowledge ? "books.vertical.fill" : "books.vertical",
+                                  selected: destination == .knowledge) {
+                        destination = .knowledge
+                    }
+                }
+            }.padding(6)
             Divider()
-            AccentCaption(text: "Chats", color: Palette.accent).padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 2)
-            List(selection: Binding(get: { store.currentID }, set: { store.currentID = $0 })) {
+            AccentCaption(text: L("Chats", "Чаты"), color: Palette.accent)
+                .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 2)
+            List(selection: Binding(get: { store.currentID }, set: {
+                store.currentID = $0
+                if $0 != nil { destination = .chats }
+            })) {
                 ForEach(store.sessions.sorted { $0.updated > $1.updated }) { s in
                     HStack {
                         Circle().fill(s.id == store.currentID ? Color.accentColor : Color.clear).frame(width: 6, height: 6)
@@ -759,5 +778,18 @@ struct SessionsModuleView: View {
                 }
             }.listStyle(.sidebar).scrollContentBackground(.hidden)
         }.background(Palette.panel)
+    }
+
+    private func navigationRow(_ title: String, icon: String, selected: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(selected ? Palette.accent.opacity(0.14) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8))
     }
 }

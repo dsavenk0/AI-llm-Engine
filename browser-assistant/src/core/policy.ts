@@ -125,6 +125,14 @@ export function summarize(action: Action, live: Record<string, ElementInfo>): st
     case "find": return `look for “${action.query}”`;
     case "scroll": return action.ref ? `scroll to ${d(action.ref)}` : `scroll ${action.direction}`;
     case "press": return `press ${action.key}${action.ref ? ` in ${d(action.ref)}` : ""}`;
+    case "visual_click": return `click visible “${short(action.label, 60)}”`;
+    case "visual_type": return `type into visible “${short(action.label, 60)}”`;
+    case "visual_press": return `press ${action.key} in the visible app`;
+    case "workspace_sheets_write": return `write Google Sheets ${action.cell}`;
+    case "workspace_docs_append": return "append to Google Docs";
+    case "workspace_drive_create": return `create Drive document “${short(action.name, 50)}”`;
+    case "workspace_gmail_draft": return `create Gmail draft to ${short(action.to, 60)}`;
+    case "workspace_calendar_create": return `create Calendar event “${short(action.summary, 50)}”`;
     case "wait": return `wait ${action.seconds}s`;
     case "ask_user": return `ask: ${action.question}`;
     case "done": return "finish";
@@ -177,6 +185,44 @@ export function previewFor(action: Action, live: Record<string, ElementInfo>, pa
     if (el?.formSensitive) reasons.push("its form holds a password, card or one-time-code field");
     return { title: `Press ${action.key}`, lines, risk: reasons.length ? "high" : "low", reasons };
   }
+  if (action.action === "visual_click") {
+    const lines = [`On ${host}: click the visible “${short(action.label, 80)}”.`, `Route: macOS Accessibility.`];
+    if (action.why) lines.push(`Why: ${short(action.why, 160)}`);
+    const high = CONSEQUENTIAL.test(action.label);
+    return { title: `Click “${short(action.label, 40)}”`, lines, risk: high ? "high" : "low",
+             reasons: high ? ["the visible label suggests a lasting effect"] : [] };
+  }
+  if (action.action === "visual_type") {
+    const lines = [`On ${host}: type into the visible “${short(action.label, 80)}”:`, `“${short(action.value, 200)}”`,
+                   "Route: macOS Accessibility."];
+    if (action.why) lines.push(`Why: ${short(action.why, 160)}`);
+    return { title: `Fill “${short(action.label, 40)}”`, lines, risk: action.empty ? "low" : "high",
+             reasons: action.empty ? [] : ["the target may already contain data that would be replaced"] };
+  }
+  if (action.action === "visual_press") {
+    const high = action.key === "Enter";
+    return { title: `Press ${action.key}`, lines: [`On ${host}: press ${action.key}.`, "Route: macOS Accessibility."],
+             risk: high ? "high" : "low", reasons: high ? ["Enter may submit the current form"] : [] };
+  }
+  if (action.action === "workspace_sheets_write") {
+    const high = action.overwrite;
+    return { title: `Write ${action.cell}`, lines: [`In Google Sheets: write “${short(action.value, 200)}”.`,
+      action.overwrite ? "An existing value may be replaced." : "The service will refuse unless the cell is empty."],
+      risk: high ? "high" : "low", reasons: high ? ["an existing cell may be overwritten"] : [] };
+  }
+  if (action.action === "workspace_docs_append")
+    return { title: "Append to Google Docs", lines: [`Append: “${short(action.text, 240)}”`, "Route: Google Docs API."],
+      risk: "high", reasons: ["this changes a cloud document"] };
+  if (action.action === "workspace_drive_create")
+    return { title: `Create “${short(action.name, 50)}”`, lines: ["Create a Google Docs file in Drive.",
+      `Initial text: “${short(action.text, 200)}”`], risk: "high", reasons: ["this creates a cloud file"] };
+  if (action.action === "workspace_gmail_draft")
+    return { title: "Create Gmail draft", lines: [`To: ${short(action.to, 120)}`, `Subject: ${short(action.subject, 120)}`,
+      `Body: “${short(action.body, 240)}”`, "The message is saved as a draft and is not sent."], risk: "high",
+      reasons: ["this creates email content in Gmail"] };
+  if (action.action === "workspace_calendar_create")
+    return { title: "Create Calendar event", lines: [`${short(action.summary, 120)}`, `${action.start} → ${action.end}`],
+      risk: "high", reasons: ["this adds an event to the primary calendar"] };
   return { title: action.action, lines: [], risk: "low", reasons: [] };
 }
 
@@ -186,7 +232,13 @@ export function refusal(action: Action, live: Record<string, ElementInfo>, pageU
     const v = navigationRisk(action.url, pageUrl);
     return v.allowed ? null : v.error || "not allowed";
   }
-  if (action.action === "press" && !(KEYS as readonly string[]).includes(action.key)) return `the key ${action.key} is not allowed`;
+  if ((action.action === "press" || action.action === "visual_press") && !(KEYS as readonly string[]).includes(action.key)) return `the key ${action.key} is not allowed`;
+  if (action.action === "visual_type") {
+    if (!action.ticket) return "the visual action has no service ticket";
+    return valueProblem(action.value);
+  }
+  if (action.action === "visual_click" || action.action === "visual_press") return action.ticket ? null : "the visual action has no service ticket";
+  if (action.action.startsWith("workspace_")) return "ticket" in action && action.ticket ? null : "the Workspace action has no service ticket";
   const refs = action.action === "click" || action.action === "fill" ? [action.ref]
     : action.action === "press" ? (action.ref ? [action.ref] : [])
     : action.action === "fill_form" ? action.fields.map((f) => f.ref) : [];

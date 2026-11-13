@@ -13,7 +13,8 @@ export const PANEL_ID = "ai-llm-engine-assistant-panel";
 // Runs inside the page (it is serialised by executeScript): it must use nothing from this file.
 function dispatch(method: string, args: unknown[]): unknown {
   const agent = (globalThis as unknown as Record<string, Record<string, (...a: unknown[]) => unknown>>).__llmAssistantAgent;
-  const allowed = ["snapshot", "find", "inspect", "click", "fill", "scroll", "press", "generation", "overlay"];
+  const allowed = ["snapshot", "find", "inspect", "click", "fill", "undo", "rememberDictationTarget", "dictate",
+                   "scroll", "press", "generation", "overlay"];
   if (!agent || allowed.indexOf(method) < 0) return { __missing: true };
   return agent[method](...args);
 }
@@ -46,6 +47,9 @@ export const bridge: PageBridge = {
   inspect: (tabId, ref, expect) => call(tabId, "inspect", [ref, expect]),
   click: (tabId, ref, expect) => call(tabId, "click", [ref, expect]),
   fill: (tabId, ref, value, expect) => call(tabId, "fill", [ref, value, expect]),
+  undo: (tabId, token) => call(tabId, "undo", [token]),
+  rememberDictationTarget: (tabId) => call(tabId, "rememberDictationTarget"),
+  dictate: (tabId, text) => call(tabId, "dictate", [text]),
   scroll: (tabId, direction, ref) => call(tabId, "scroll", [direction, ref]),
   press: (tabId, key, ref, expect) => call(tabId, "press", [key, ref, expect]),
 };

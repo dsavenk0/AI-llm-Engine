@@ -38,9 +38,17 @@ enum AppHost {
         activate()
     }
 
-    /// The knowledge libraries: a page inside LLMBar ▸ Tools (app/bar/KnowledgePage.swift), opened on the panel.
+    /// Opens Knowledge inside Chat when an editor window is active. The Tools page remains the fallback for the
+    /// quick chat and menu-bar UI; both are views over the same KnowledgeStore and local index.
     static func openKnowledge() {
         guard enabled(.knowledge) else { return }
+        if let editor = EditorModule.shared.current, editor.window?.isKeyWindow == true {
+            editor.ws.mode = .chat
+            editor.ws.chatDestination = .knowledge
+            editor.window.makeKeyAndOrderFront(nil)
+            activate()
+            return
+        }
         bar?.engine.toolsPage = "knowledge"
         openPanel()
     }

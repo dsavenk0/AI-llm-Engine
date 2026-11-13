@@ -32,7 +32,11 @@ export interface Snapshot {
   metrics: Partial<Record<"context_tokens" | "model_gb" | "active_gb" | "system_ram_used" | "last_decode_tps" |
     "last_prefill_tps", number>>;
   extension: { versions: Record<string, string>; folder: string };
-  capabilities: { unload: boolean; per_session_model: boolean; per_session_model_reason?: string };
+  capabilities: { unload: boolean; per_session_model: boolean; per_session_model_reason?: string;
+    hands?: { available: boolean; trusted: boolean; running: boolean; socket: boolean };
+    eyes?: { model: string | null; source: "automatic" | "configured" };
+    workspace?: { configured: boolean; connected: boolean; client: "bundled" | "custom" | null; scopes: string[] };
+    dictation?: { installed: boolean; local: boolean } };
 }
 
 export type Task = "ask" | "summarize" | "explain" | "translate" | "rewrite" | "key_points";
@@ -81,6 +85,9 @@ export type UiRequest =
   | { kind: "subscribe" }
   | { kind: "agent-start"; tabId: number; goal: string; autonomy?: Autonomy; see?: boolean }
   | { kind: "agent-approve" } | { kind: "agent-reject" } | { kind: "agent-cancel" } | { kind: "agent-resume" }
+  | { kind: "agent-undo" } | { kind: "forget-session" }
+  | { kind: "open-accessibility" }
+  | { kind: "dictation-arm" } | { kind: "dictation-setup" } | { kind: "dictation-transcribe"; audio: string }
   | { kind: "agent-reply"; text: string }
   | { kind: "command"; command: Command; confirm?: boolean }
   | { kind: "ask"; tabId: number; task: Task; question?: string; lang?: string; tone?: string; thinking?: boolean;
@@ -102,5 +109,7 @@ export type UiEvent =
   | { kind: "page"; title: string; url: string; chars: number }
   | { kind: "shot"; dataUrl: string }                   // the screenshot that went with a question, to show it
   | { kind: "agent"; view: AgentView | null }
+  | { kind: "dictation"; phase: "armed" | "setup" | "ready" | "done" | "error"; text?: string;
+      inserted?: boolean; message?: string }
   | { kind: "tab"; tabId: number; title: string; url: string }
   | { kind: "fatal"; message: string };

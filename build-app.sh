@@ -66,9 +66,41 @@ echo "▸ OCR helper (Apple Vision)…"
 mkdir -p "$APP/Contents/Resources/llm/bin"
 swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$APP/Contents/Resources/llm/bin/ocr" "$ROOT/app/ocr/main.swift"
 
+echo "▸ Browser automation helper…"
+# A separate app bundle gets the macOS Accessibility grant.  The extension never runs it: only the local
+# assistant service can reach its owner-only Unix socket.
+AUTOMATION="$APP/Contents/Resources/llm/automation/LLMBar Automation.app"
+mkdir -p "$AUTOMATION/Contents/MacOS"
+swiftc -O -target "$(uname -m)-apple-macos13.0" -framework AppKit -framework ApplicationServices \
+  -o "$AUTOMATION/Contents/MacOS/LLMBarAutomation" "$ROOT/app/automation/main.swift"
+cat > "$AUTOMATION/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>LLMBar Automation</string>
+  <key>CFBundleDisplayName</key><string>LLMBar Automation</string>
+  <key>CFBundleIdentifier</key><string>local.llm-engine.llmbar.automation</string>
+  <key>CFBundleExecutable</key><string>LLMBarAutomation</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSAccessibilityUsageDescription</key><string>LLMBar uses Accessibility only to click or type in the browser after you ask it to act on a page.</string>
+</dict></plist>
+PLIST
+
 echo "▸ Bundling engine + CLI…"
 for f in llm llm.py agent.py requirements.txt LICENSE NOTICE; do cp "$ROOT/$f" "$APP/Contents/Resources/llm/"; done
 for d in engine harness ui locales third_party model_lab assistant; do ditto "$ROOT/$d" "$APP/Contents/Resources/llm/$d"; done
+# A Desktop OAuth client id is public (desktop apps cannot keep a client secret). Release builders provide it once;
+# end users then get a one-click Google sign-in. Source builds can instead paste their own id in Advanced setup.
+if [ -n "${LLMBAR_GOOGLE_CLIENT_ID:-}" ]; then
+  case "$LLMBAR_GOOGLE_CLIENT_ID" in
+    *.apps.googleusercontent.com) ;;
+    *) echo "LLMBAR_GOOGLE_CLIENT_ID is not a Google Desktop OAuth client id" >&2; exit 2 ;;
+  esac
+  printf '%s\n' "$LLMBAR_GOOGLE_CLIENT_ID" > "$APP/Contents/Resources/llm/assistant/google-oauth-client-id.txt"
+  chmod 0444 "$APP/Contents/Resources/llm/assistant/google-oauth-client-id.txt"
+fi
 # The browser extension ships built, so a Mac without Node.js can still install it (./llm assistant setup
 # copies it to Application Support, and copies it again when a later build of this app brings a newer one).
 if [ -f "$ROOT/browser-assistant/package.json" ] && command -v npm >/dev/null 2>&1; then
@@ -195,6 +227,7 @@ if [ -f "$ROOT/browser-assistant/dist/safari/manifest.json" ]; then
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LLMAssistantHome</key><string>$ASSISTANT_HOME</string>
   <key>NSHumanReadableDescription</key><string>Ask the model on this Mac about the page, or let it act on the page while you watch.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Dictation turns your speech into text locally on this Mac.</string>
   <key>NSExtension</key><dict>
     <key>NSExtensionPointIdentifier</key><string>com.apple.Safari.web-extension</string>
     <key>NSExtensionPrincipalClass</key><string>SafariWebExtensionHandler</string>
@@ -250,6 +283,9 @@ cat > "$TMP/app.entitlements" <<'PLIST'
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
 </dict></plist>
 PLIST
+# The automation bridge does not load Python, JIT or third-party libraries. Give it hardened runtime but none of
+# the main app's JIT/library-validation exceptions.
+signing_code "$AUTOMATION"
 signing_app "$APP" "$TMP/app.entitlements"
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 

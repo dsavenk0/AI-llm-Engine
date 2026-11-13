@@ -9,6 +9,7 @@ export interface AgentHandlers {
   reject(): void;
   cancel(): void;
   reply(text: string): void;
+  undo?(): void;
 }
 
 const LINE: Partial<Record<TaskState, string>> = {
@@ -35,7 +36,7 @@ export function renderAgent(root: HTMLElement, v: AgentView | null, h: AgentHand
   const trusted = (e: Event, fn: () => void): void => { if (e.isTrusted) fn(); };     // a page script cannot click for you
 
   root.append(el("div", { class: "agent-goal" }, el("strong", {}, "Task: "), v.goal));
-  const status = el("div", { class: "agent-state", textContent: stateLine(v) });
+  const status = el("div", { class: "agent-state", textContent: stateLine(v) + (v.route ? ` · ${v.route}` : "") });
   status.setAttribute("role", "status");
   root.append(status);
 
@@ -84,5 +85,9 @@ export function renderAgent(root: HTMLElement, v: AgentView | null, h: AgentHand
     const stop = el("button", { type: "button", class: "danger", textContent: "Stop" });
     stop.addEventListener("click", (e) => trusted(e, h.cancel));
     root.append(el("div", { class: "agent-stop" }, stop));
+  } else if (v.undo && h.undo) {
+    const undo = el("button", { type: "button", textContent: `↶ Undo: ${v.undo.label}` });
+    undo.addEventListener("click", (e) => trusted(e, h.undo!));
+    root.append(el("div", { class: "agent-stop" }, undo));
   }
 }

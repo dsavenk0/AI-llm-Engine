@@ -13,6 +13,8 @@ import { MAX_FAILURES, MAX_STEPS, MAX_STEPS_AUTO, originOf, previewFor, refusal,
 import { Binding, TERMINAL, transition } from "../core/task";
 import type { Expect, Outcome, Verdict } from "../content/agent-core";
 
+export interface CapturedFrame { screenshot: string; width: number; height: number; signature: string }
+
 export interface PageBridge {
   ensure(tabId: number): Promise<void>;                       // put the page agent in the tab; throws if it may not
   panelShown(tabId: number): Promise<boolean>;
@@ -22,6 +24,9 @@ export interface PageBridge {
   inspect(tabId: number, ref: string, expect: Expect): Promise<Verdict>;
   click(tabId: number, ref: string, expect: Expect): Promise<Outcome>;
   fill(tabId: number, ref: string, value: string, expect: Expect): Promise<Outcome>;
+  undo?(tabId: number, token: string): Promise<Outcome>;
+  rememberDictationTarget?(tabId: number): Promise<Outcome>;
+  dictate?(tabId: number, text: string): Promise<Outcome>;
   scroll(tabId: number, direction: "up" | "down", ref?: string): Promise<Outcome>;
   press(tabId: number, key: string, ref: string | undefined, expect: Expect): Promise<Outcome>;
 }
@@ -29,7 +34,8 @@ export interface PageBridge {
 export interface Deps {
   page: PageBridge;
   step(req: { session: string; goal: string; snapshot: PageSnapshot; history: { summary: string; result: string }[];
-    requestId: string; screenshot?: string | null }, signal: AbortSignal): Promise<{ action: Action }>;
+    requestId: string; tabId: number; screenshot?: string | null; frame?: Omit<CapturedFrame, "screenshot"> }, signal: AbortSignal):
+    Promise<{ action: Action; saw_screenshot?: boolean; described_screenshot?: boolean }>;
   cancelStep(requestId: string, session: string): Promise<void>;
   tab(tabId: number): Promise<{ url: string; loading: boolean } | null>;      // null: the tab is gone
   navigate(tabId: number, url: string): Promise<void>;
@@ -38,7 +44,12 @@ export interface Deps {
   audit(entry: AuditEntry): void;
   session(tabId: number): string;
   id(): string;
-  capture?(tabId: number): Promise<string>;                                    // a picture of the tab, for a model that sees
+  capture?(tabId: number): Promise<string | CapturedFrame>;                    // a picture of the tab, for a model that sees
+  visualExecute?(req: { session: string; ticket: string; tabId: number; url: string; screenshot: string;
+    frame?: Omit<CapturedFrame, "screenshot"> }): Promise<{ ok: boolean; error?: string; route?: string }>;
+  workspaceExecute?(req: { session: string; ticket: string; url: string }): Promise<{ ok: boolean; service?: string; error?: string;
+    undo?: string; undo_label?: string }>;
+  workspaceUndo?(req: { session: string; undo: string }): Promise<{ ok: boolean }>;
 }
 
 interface Proposal { action: Action; preview: Preview; live: Record<string, ElementInfo>; snapshot: PageSnapshot }
@@ -51,6 +62,8 @@ interface Task {
   proposal?: Proposal; message?: string; needsAccess?: string;
   abort: AbortController; requestId: string;
   waiter: ((d: Decision | { reply: string } | "resume") => void) | null;
+  undo?: { kind: "workspace"; token: string; label: string } | { kind: "page"; tokens: string[]; label: string };
+  route?: "DOM" | "vision" | "macOS" | "Workspace";
 }
 
 export class AgentRunner {
@@ -66,6 +79,8 @@ export class AgentRunner {
       message: t.message, needsAccess: t.needsAccess,
       doing: t.proposal && (t.state === "executing" || t.state === "verifying" || t.state === "approval_required")
         ? t.proposal.preview.title : undefined,
+      undo: t.undo ? { label: t.undo.label } : undefined,
+      route: t.route,
     };
   }
 
@@ -147,6 +162,29 @@ export class AgentRunner {
     this.go(t, "cancelled", "Stopped.");
   }
 
+  async undo(tabId: number): Promise<void> {
+    const t = this.tasks.get(tabId), item = t?.undo;
+    if (!t || !item) return;
+    t.undo = undefined;                         // one click, even if the network result is uncertain
+    try {
+      let ok = false;
+      if (item.kind === "workspace") {
+        if (!this.d.workspaceUndo) throw new Error("Workspace undo is not available");
+        ok = (await this.d.workspaceUndo({ session: this.d.session(tabId), undo: item.token })).ok;
+      } else {
+        if (!this.d.page.undo) throw new Error("page undo is not available");
+        ok = true;
+        for (const token of item.tokens.slice().reverse()) {
+          if (!(await this.d.page.undo(tabId, token)).ok) { ok = false; break; }
+        }
+      }
+      this.record(t, `undo ${item.label}`, ok ? "undone" : "could not undo", ok);
+    } catch (e) {
+      this.record(t, `undo ${item.label}`, `could not undo: ${e instanceof Error ? e.message : String(e)}`, false);
+    }
+    this.d.notify(tabId, this.view(tabId));
+  }
+
   private waitFor<T>(t: Task): Promise<T> {
     return new Promise((resolve) => { t.waiter = resolve as never; });
   }
@@ -195,12 +233,20 @@ export class AgentRunner {
       // with "let the model see the page" on, a picture of the tab goes with the element list; a picture that
       // cannot be taken (the tab is behind another, the browser refused) is skipped, never a reason to stop
       let screenshot: string | null = null;
-      if (t.see && this.d.capture) screenshot = await this.d.capture(tabId).catch(() => null);
+      let frame: Omit<CapturedFrame, "screenshot"> | undefined;
+      if (t.see && this.d.capture) {
+        const captured = await this.d.capture(tabId).catch(() => null);
+        if (typeof captured === "string") screenshot = captured;
+        else if (captured) ({ screenshot, ...frame } = captured);
+      }
       if (this.stopped(t)) return;
       let action: Action;
       try {
-        action = (await this.d.step({ session: this.d.session(tabId), goal: t.goal, snapshot, history: t.history.slice(-6),
-                                      requestId: t.requestId, screenshot }, t.abort.signal)).action;
+        const decision = await this.d.step({ session: this.d.session(tabId), goal: t.goal, snapshot, history: t.history.slice(-6),
+                                             requestId: t.requestId, tabId, screenshot, frame }, t.abort.signal);
+        action = decision.action;
+        t.route = action.action.startsWith("visual_") ? "macOS" : action.action.startsWith("workspace_") ? "Workspace"
+          : decision.saw_screenshot || decision.described_screenshot ? "vision" : "DOM";
       } catch (e) {
         if (this.stopped(t) || t.abort.signal.aborted) return;
         return this.fail(t, `The model could not decide the next step: ${e instanceof Error ? e.message : String(e)}`);
@@ -310,7 +356,7 @@ export class AgentRunner {
 
   /** Do one approved action — after checking, once more, that nothing it depends on has moved. */
   private async execute(t: Task, action: Action, live: Record<string, ElementInfo>, snap: PageSnapshot, expect: Expect):
-    Promise<{ ok: boolean; text: string; access?: string }> {
+    Promise<{ ok: boolean; text: string; access?: string; undo?: { token: string; label: string } }> {
     const tabId = t.bind.tabId;
     const tab = await this.d.tab(tabId);
     if (!tab) return { ok: false, text: "the tab was closed" };
@@ -326,6 +372,26 @@ export class AgentRunner {
         this.log(t, "navigate", action.url.slice(0, 100));
         try { if (origin) await this.d.page.ensure(tabId); } catch { return { ok: true, text: `opened ${after?.url}`, access: origin || undefined }; }
         return { ok: true, text: `opened ${after?.url ?? action.url}` };
+      }
+      if (action.action === "visual_click" || action.action === "visual_type" || action.action === "visual_press") {
+        if (!this.d.capture || !this.d.visualExecute) return { ok: false, text: "macOS visual actions are not available in this browser" };
+        const captured = await this.d.capture(tabId).catch(() => "");
+        const screenshot = typeof captured === "string" ? captured : captured?.screenshot || "";
+        const frame = typeof captured === "string" || !captured ? undefined
+          : { width: captured.width, height: captured.height, signature: captured.signature };
+        if (!screenshot) return { ok: false, text: "I could not take a fresh screenshot, so I did not act" };
+        const r = await this.d.visualExecute({ session: this.d.session(tabId), ticket: action.ticket, tabId,
+                                                url: snap.url, screenshot, frame });
+        return r.ok ? { ok: true, text: action.action === "visual_type" ? "typed through macOS" : "acted through macOS" }
+                    : { ok: false, text: r.error || "the macOS action did not go through" };
+      }
+      if (action.action.startsWith("workspace_")) {
+        if (!this.d.workspaceExecute || !("ticket" in action)) return { ok: false, text: "Google Workspace is not connected" };
+        const r = await this.d.workspaceExecute({ session: this.d.session(tabId), ticket: action.ticket, url: snap.url });
+        if (r.ok && r.undo) t.undo = { kind: "workspace", token: r.undo, label: r.undo_label || "Workspace change" };
+        return r.ok ? { ok: true, text: `completed through Google ${r.service || "Workspace"}`,
+                        undo: r.undo ? { token: r.undo, label: r.undo_label || "Workspace change" } : undefined }
+                    : { ok: false, text: r.error || "the Workspace operation did not go through" };
       }
       if (action.action === "click") {
         let r: Outcome;
@@ -354,13 +420,17 @@ export class AgentRunner {
       }
       const fields = action.action === "fill" ? [{ ref: action.ref, value: action.value }] : action.action === "fill_form" ? action.fields : [];
       const done: string[] = [];
+      const undoTokens: string[] = [];
       for (const f of fields) {
         const r = await this.d.page.fill(tabId, f.ref, f.value, expect);
+        if (r.undo) undoTokens.push(r.undo);
         if (!r.ok) {
+          if (undoTokens.length) t.undo = { kind: "page", tokens: undoTokens, label: `fields ${done.join(", ")}` };
           return { ok: false, text: `${done.length ? `filled ${done.join(", ")}, then ` : ""}could not fill ${live[f.ref]?.name || f.ref}: ${r.error}` };
         }
         done.push(live[f.ref]?.name || f.ref);
       }
+      if (undoTokens.length) t.undo = { kind: "page", tokens: undoTokens, label: `fields ${done.join(", ")}` };
       return { ok: true, text: `filled ${done.join(", ")}` };
     } catch (e) {
       return { ok: false, text: `it did not work: ${e instanceof Error ? e.message : String(e)}` };

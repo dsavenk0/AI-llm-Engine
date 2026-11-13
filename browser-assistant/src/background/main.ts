@@ -7,7 +7,7 @@ import { Client, ServiceFailure, Settings } from "../core/client";
 import { ChatEvent, Command, DEFAULT_SERVICE, Snapshot, Task, UiEvent, UiRequest } from "../core/protocol";
 import { extractPage, Extracted } from "../content/extract";
 import { AgentRunner } from "./agent";
-import { captureTab, captureWithPictures, CaptureError } from "./capture";
+import { captureFrame, captureWithPictures, CaptureError } from "./capture";
 import { bridge, overlay } from "./agent-bridge";
 import { overlayFor } from "../core/activity";
 import { originOf } from "../core/policy";
@@ -289,7 +289,10 @@ const runner = new AgentRunner({
   },
   audit: (e) => { void audit(e); },
   session: (tabId) => `${browserName}-${tabId}-${BOOT}`,
-  capture: (tabId) => captureTab(tabId),
+  capture: (tabId) => captureFrame(tabId),
+  visualExecute: async (req) => new Client(await settings()).visualExecute({ ...req, browser: browserName }),
+  workspaceExecute: async (req) => new Client(await settings()).workspaceExecute(req),
+  workspaceUndo: async (req) => new Client(await settings()).workspaceUndo(req),
   id: () => crypto.randomUUID(),
 });
 
@@ -365,6 +368,42 @@ api.runtime.onConnect.addListener((port: Port) => {
     // which tab the agent messages of this port are about: an in-page panel lives in one; the side panel follows the active one
     const agentTab = async (): Promise<number | undefined> =>
       tabId ?? portTab.get(port) ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
+    if (msg.kind === "dictation-arm") {
+      const t = await agentTab();
+      if (t === undefined) return send(port, { kind: "dictation", phase: "error", message: "No active web page" });
+      try {
+        await bridge.ensure(t);
+        const result = await bridge.rememberDictationTarget!(t);
+        send(port, result.ok ? { kind: "dictation", phase: "armed" }
+          : { kind: "dictation", phase: "error", message: result.error || "Select a text field first" });
+      } catch (e) {
+        send(port, { kind: "dictation", phase: "error", message: e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
+    if (msg.kind === "dictation-setup") {
+      send(port, { kind: "dictation", phase: "setup" });
+      try {
+        await new Client(await settings()).setupDictation();
+        send(port, { kind: "dictation", phase: "ready" });
+      } catch (e) {
+        send(port, { kind: "dictation", phase: "error",
+          message: e instanceof ServiceFailure ? e.error.message : e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
+    if (msg.kind === "dictation-transcribe") {
+      const t = await agentTab();
+      try {
+        const result = await new Client(await settings()).transcribe(msg.audio);
+        const inserted = t !== undefined && !!bridge.dictate && !!(await bridge.dictate(t, result.text)).ok;
+        send(port, { kind: "dictation", phase: "done", text: result.text, inserted });
+      } catch (e) {
+        send(port, { kind: "dictation", phase: "error",
+          message: e instanceof ServiceFailure ? e.error.message : e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
     if (msg.kind === "agent-start") {
       portTab.set(port, msg.tabId);
       try {
@@ -384,6 +423,19 @@ api.runtime.onConnect.addListener((port: Port) => {
       else if (msg.kind === "agent-cancel") runner.cancel(t);
       else if (msg.kind === "agent-resume") runner.resume(t);
       else runner.reply(t, msg.text);
+      return;
+    }
+    if (msg.kind === "agent-undo") {
+      const t = await agentTab(); if (t !== undefined) await runner.undo(t);
+      return;
+    }
+    if (msg.kind === "forget-session") {
+      const t = await agentTab();
+      if (t !== undefined) await new Client(await settings()).forgetSession(`${browserName}-${t}-${BOOT}`).catch(() => undefined);
+      return;
+    }
+    if (msg.kind === "open-accessibility") {
+      await new Client(await settings()).post("/v1/assistant/accessibility/settings", {}).catch(() => undefined);
       return;
     }
     if (msg.kind === "reload") {

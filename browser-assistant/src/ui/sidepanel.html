@@ -34,14 +34,15 @@
 <div class="modebar">
   <label for="mode" class="sr">What the assistant may do</label>
   <select id="mode">
-    <option value="ask">Ask about the page</option>
-    <option value="act-ask">Act on the page — ask before every step</option>
-    <option value="act-auto">Act on the page — ask before anything risky</option>
+    <option value="ask">Ask about the page · read only</option>
+    <option value="act-ask">Act on the page · approve each step</option>
+    <option value="act-auto">Act on the page · approve risky steps</option>
   </select>
 </div>
 
 <div id="problem" class="banner bad" role="alert" hidden></div>
 <div id="update" class="banner warn" role="status" hidden></div>
+<div id="hands" class="banner" role="status" hidden></div>
 
 <main id="threads" aria-live="polite"></main>
 
@@ -55,6 +56,8 @@
       <label class="toggle small" title="The model thinks before answering: better on hard questions, slower">
         <input id="thinking" type="checkbox"> Reason first</label>
       <span class="spacer"></span>
+      <button id="mic" type="button" class="round mic" title="Dictate into the selected field on the page"
+              aria-label="Dictate into the selected field" aria-pressed="false">●</button>
       <button id="stop" type="button" class="round stop" title="Stop" aria-label="Stop" hidden><i></i></button>
       <button id="send" type="button" class="round send" title="Send (Enter)" aria-label="Send">↑</button>
     </div>

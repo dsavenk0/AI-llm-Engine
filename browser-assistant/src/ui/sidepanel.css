@@ -108,5 +108,12 @@ body.browser-titled .logo, body.browser-titled .brand { display: none; }
   font-size: 16px; font-weight: 700; }
 .round.send { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .round.send:disabled { background: var(--raise); color: var(--dim); border-color: var(--line); }
+.round.mic { color: var(--dim); font-size: 13px; }
+.round.mic::before { content: ""; width: 8px; height: 13px; border: 2px solid currentColor; border-radius: 6px; }
+.round.mic::after { content: ""; position: absolute; width: 13px; height: 8px; border: 2px solid currentColor;
+  border-top: 0; border-radius: 0 0 9px 9px; margin-top: 7px; }
+.round.mic { position: relative; font-size: 0; }
+.round.mic[aria-pressed="true"] { color: var(--bad); border-color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, var(--field)); }
+.round.mic[aria-busy="true"] { color: var(--busy); }
 .round.stop i { width: 11px; height: 11px; border-radius: 2px; background: var(--fg); display: block; }
 .foot { text-align: center; margin-top: 6px; }

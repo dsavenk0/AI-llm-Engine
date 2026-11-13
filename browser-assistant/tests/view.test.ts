@@ -50,7 +50,7 @@ test("what was shared is said in numbers, with the cut", () => {
 test("a model that is unsupported or may not fit says so in the picker", () => {
   const m = { name: "big", path: "/m/big", size_gb: 7.5, format: "MLX 8-bit", route: "mlx-lm", supported: true,
     problems: [], fits: false, vision: false, thinking: false, favorite: true };
-  assert.equal(modelLabel(m), "★ big — MLX 8-bit · 7.5 GB · mlx-lm · may not fit");
+  assert.equal(modelLabel(m), "★ big — MLX 8-bit · 7.5 GB · mlx-lm · text + OCR · may not fit");
   assert.match(modelLabel({ ...m, supported: false }), /unsupported$/);
 });
 

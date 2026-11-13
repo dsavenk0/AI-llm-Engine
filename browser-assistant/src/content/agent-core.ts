@@ -26,10 +26,12 @@ const NOT_FILLABLE = new Set(["password", "file", "hidden", "checkbox", "radio",
 
 interface Fingerprint { tag: string; role: string; name: string; type: string }
 interface Entry { el: WeakRef<Element>; fp: Fingerprint }
+interface UndoEntry { el: WeakRef<Element>; before: string; after: string; url: string; expires: number }
 
 export interface Expect { generation: number; url: string }
 export type Verdict = { ok: true; info: ElementInfo } | { ok: false; error: string };
-export type Outcome = { ok: boolean; error?: string; urlChanged?: boolean; mutations?: number; readback?: string };
+export type Outcome = { ok: boolean; error?: string; urlChanged?: boolean; mutations?: number; readback?: string;
+  undo?: string; undoLabel?: string };
 
 const collapse = (s: string | null | undefined): string => (s || "").replace(/\s+/g, " ").trim();
 
@@ -38,6 +40,9 @@ export function createAgent(win: Window & typeof globalThis) {
   let generation = 0;
   let counter = 0;
   let refs = new Map<string, Entry>();
+  let undoCounter = 0;
+  const undos = new Map<string, UndoEntry>();
+  let dictationTarget: WeakRef<Element> | null = null;
 
   // ───────────── what an element is ─────────────
   function roleOf(el: Element): string {
@@ -270,6 +275,94 @@ export function createAgent(win: Window & typeof globalThis) {
     return d && d.set ? (v: string) => d.set!.call(el, v) : null;
   };
 
+  const fieldValue = (el: Element): string => (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")
+    ? (el as HTMLInputElement).value : (el.textContent || "");
+
+  const contentEditable = (el: Element): boolean => {
+    if ((el as HTMLElement).isContentEditable) return true;
+    const value = el.getAttribute("contenteditable");
+    return value !== null && value.toLowerCase() !== "false";
+  };
+
+  function setFieldValue(el: Element, value: string): void {
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") {
+      nativeSetter(el)?.(value);
+      (el as HTMLInputElement).value = value;
+    } else {
+      el.textContent = value;
+    }
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+    el.dispatchEvent(new win.Event("change", { bubbles: true }));
+  }
+
+  function dictationField(el: Element | null): { el: Element; info: ElementInfo } | { error: string } {
+    if (!el || el === doc.body || el === doc.documentElement) return { error: "select a text field on the page first" };
+    if (!el.isConnected || !visible(el)) return { error: "the selected field is no longer visible" };
+    const info = describe(el, "dictation");
+    if (info.sensitive) return { error: "dictation is disabled for passwords, cards and one-time codes" };
+    if (info.blocked) return { error: "dictation is disabled inside a CAPTCHA" };
+    const editable = el.tagName === "TEXTAREA"
+      || (el.tagName === "INPUT" && TEXT_INPUTS.has(info.type) && !NOT_FILLABLE.has(info.type))
+      || contentEditable(el);
+    if (!editable) return { error: "the selected element is not a text field" };
+    if (info.disabled) return { error: "the selected field is disabled" };
+    if ((el as HTMLInputElement).readOnly) return { error: "the selected field is read-only" };
+    return { el, info };
+  }
+
+  /** Remember the page field before the extension starts recording. The microphone UI lives outside the page,
+   * so relying on activeElement after recording would lose the person's chosen insertion point. */
+  function rememberDictationTarget(): Outcome {
+    const r = dictationField(doc.activeElement);
+    if ("error" in r) { dictationTarget = null; return { ok: false, error: r.error }; }
+    dictationTarget = new WeakRef(r.el);
+    return { ok: true, readback: r.info.name || "text field" };
+  }
+
+  /** Insert recognised speech at the caret of the remembered safe field. This is a direct user action, not a
+   * model action, but it keeps the same secret/CAPTCHA/read-only guard and produces the same one-use undo. */
+  async function dictate(text: string): Promise<Outcome> {
+    const value = String(text || "").trim();
+    if (!value) return { ok: false, error: "no speech was recognised" };
+    if (value.length > 20_000) return { ok: false, error: "the recognised text is too long" };
+    const r = dictationField(dictationTarget?.deref() || null);
+    dictationTarget = null;
+    if ("error" in r) return { ok: false, error: r.error };
+    const { el, info } = r;
+    const beforeValue = fieldValue(el);
+    let after = beforeValue;
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      const field = el as HTMLInputElement | HTMLTextAreaElement;
+      const start = typeof field.selectionStart === "number" ? field.selectionStart : beforeValue.length;
+      const end = typeof field.selectionEnd === "number" ? field.selectionEnd : start;
+      after = beforeValue.slice(0, start) + value + beforeValue.slice(end);
+      setFieldValue(el, after);
+      const caret = start + value.length;
+      try { field.setSelectionRange(caret, caret); } catch { /* a browser may not expose a caret for this input type */ }
+    } else {
+      const selection = win.getSelection?.();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      if (range && el.contains(range.commonAncestorContainer)) {
+        range.deleteContents();
+        const node = doc.createTextNode(value);
+        range.insertNode(node);
+        range.setStartAfter(node); range.collapse(true);
+        selection!.removeAllRanges(); selection!.addRange(range);
+        el.dispatchEvent(new win.Event("input", { bubbles: true }));
+        el.dispatchEvent(new win.Event("change", { bubbles: true }));
+        after = fieldValue(el);
+      } else {
+        after = beforeValue + value;
+        setFieldValue(el, after);
+      }
+    }
+    if (fieldValue(el) !== after) return { ok: false, error: "the field did not keep the dictated text" };
+    const undo = `u${Date.now().toString(36)}${(++undoCounter).toString(36)}`;
+    undos.set(undo, { el: new WeakRef(el), before: beforeValue, after, url: win.location.href,
+                      expires: Date.now() + 5 * 60_000 });
+    return { ok: true, readback: value.slice(0, 80), undo, undoLabel: info.name || "dictation" };
+  }
+
   async function fill(ref: string, value: string, expect: Expect): Promise<Outcome> {
     const r = resolve(ref, expect);
     if ("error" in r) return { ok: false, error: r.error };
@@ -278,6 +371,7 @@ export function createAgent(win: Window & typeof globalThis) {
     if (info.blocked) return { ok: false, error: "that is part of a CAPTCHA" };
     if (info.disabled) return { ok: false, error: "that field is disabled" };
     if ((el as HTMLInputElement).readOnly) return { ok: false, error: "that field is read-only" };
+    const beforeValue = fieldValue(el);
     const done = settle(150, 800);
     (el as HTMLElement).focus?.();
     let readback = "";
@@ -286,21 +380,18 @@ export function createAgent(win: Window & typeof globalThis) {
       const want = collapse(value).toLowerCase();
       const opt = Array.from(sel.options).find((o) => o.value === value || collapse(o.text).toLowerCase() === want);
       if (!opt) return { ok: false, error: `the list has no option “${value.slice(0, 40)}”` };
-      nativeSetter(el)?.(opt.value);
-      sel.value = opt.value;
+      setFieldValue(el, opt.value);
       readback = collapse(sel.options[sel.selectedIndex]?.text);
       if (readback.toLowerCase() !== collapse(opt.text).toLowerCase()) return { ok: false, error: "the list did not take that option" };
     } else if (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && TEXT_INPUTS.has(info.type) && !NOT_FILLABLE.has(info.type))) {
-      nativeSetter(el)?.(value);                         // the page's framework listens to the native setter's events
+      setFieldValue(el, value);                          // the page's framework listens to the native setter's events
       readback = (el as HTMLInputElement).value;
-    } else if ((el as HTMLElement).isContentEditable || el.getAttribute("contenteditable") !== null) {
-      el.textContent = value;
+    } else if (contentEditable(el)) {
+      setFieldValue(el, value);
       readback = el.textContent || "";
     } else {
       return { ok: false, error: `a ${info.role || info.tag} cannot be filled` };
     }
-    el.dispatchEvent(new win.Event("input", { bubbles: true }));
-    el.dispatchEvent(new win.Event("change", { bubbles: true }));
     await done;
     if (el.tagName !== "SELECT" && readback !== value) {
       // a number or date field may normalise what it was given; only a different value is a failure
@@ -308,7 +399,30 @@ export function createAgent(win: Window & typeof globalThis) {
         return { ok: false, error: "the field did not keep the value", readback: readback.slice(0, 80) };
       }
     }
-    return { ok: true, readback: readback.slice(0, 80) };
+    const undo = `u${Date.now().toString(36)}${(++undoCounter).toString(36)}`;
+    undos.set(undo, { el: new WeakRef(el), before: beforeValue, after: fieldValue(el), url: win.location.href,
+                      expires: Date.now() + 5 * 60_000 });
+    return { ok: true, readback: readback.slice(0, 80), undo, undoLabel: info.name || "field change" };
+  }
+
+  /** Restore a value written by this page agent. The token is one-use, short-lived and tied to the same element
+   * and URL. If the person or page changed the value afterwards, it refuses rather than overwrite their work. */
+  async function undo(token: string): Promise<Outcome> {
+    const item = undos.get(token);
+    undos.delete(token);
+    if (!item) return { ok: false, error: "that undo is no longer available" };
+    if (Date.now() > item.expires) return { ok: false, error: "that undo has expired" };
+    if (win.location.href !== item.url) return { ok: false, error: "the page address changed" };
+    const el = item.el.deref();
+    if (!el || !el.isConnected) return { ok: false, error: "the field is no longer on the page" };
+    const info = describe(el, "undo");
+    if (info.sensitive || info.blocked) return { ok: false, error: "that field may no longer be changed safely" };
+    if (fieldValue(el) !== item.after) return { ok: false, error: "the field changed again after the assistant filled it" };
+    const done = settle(150, 800);
+    setFieldValue(el, item.before);
+    await done;
+    return fieldValue(el) === item.before ? { ok: true, readback: item.before.slice(0, 80) }
+      : { ok: false, error: "the field did not restore its previous value" };
   }
 
   // ───────────── scrolling and keys ─────────────
@@ -386,7 +500,8 @@ export function createAgent(win: Window & typeof globalThis) {
     return { x: r.left, y: r.top, w: r.width, h: r.height };
   }
 
-  return { snapshot, find, inspect, click, fill, scroll, press, rectOf, generation: () => generation };
+  return { snapshot, find, inspect, click, fill, undo, rememberDictationTarget, dictate, scroll, press, rectOf,
+           generation: () => generation };
 }
 
 export type PageAgent = ReturnType<typeof createAgent>;

@@ -69,7 +69,7 @@ from engine import family, gguf  # noqa: E402  (stdlib only: no MLX needed to ro
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 HOME = os.path.expanduser("~")
-VERSION = "1.2"                                             # single source for the CLI and app bundle version
+VERSION = "1.3"                                             # single source for the CLI and app bundle version
 GITHUB_REPO = "dsavenk0/AI-llm-Engine"                     # where `./llm update` looks for a newer release
 BASE = os.path.dirname(os.path.abspath(__file__))          # code (repo or LLMBar.app/Contents/Resources/llm)
 DATA = os.environ.get("LLM_HOME") or BASE                   # state + .venv (LLMBar.app: ~/Library/Application Support/LLMBar)
@@ -195,9 +195,17 @@ _MASCOT_COLORS = {
 }
 
 
-def _mascot():
-    """Lumo as a grid of colours (None where there is nothing)."""
-    return [[_MASCOT_COLORS.get(ch) for ch in row] for row in _MASCOT]
+def _mascot(gaze="right"):
+    """Lumo as a grid of colours. The pupil variants make the terminal mascot glance and blink."""
+    rows = list(_MASCOT)
+    pupils = {"left": "ppww", "center": "wppw", "right": "wwpp"}
+    if gaze == "blink":
+        rows[6] = rows[6].replace("wwpp", "bbbb")
+        rows[7] = rows[7].replace("wwpp", "bbbb")
+    elif gaze in pupils:
+        rows[6] = rows[6].replace("wwpp", pupils[gaze])
+        rows[7] = rows[7].replace("wwpp", pupils[gaze])
+    return [[_MASCOT_COLORS.get(ch) for ch in row] for row in rows]
 
 
 def _pixel_lines(grid):
@@ -229,24 +237,73 @@ _TIPS = [
     "./llm help <command> — every command, with examples",
 ]
 
+_SECTION_TIPS = {
+    "models": [
+        "Star the models you use most — favourites stay at the top of every model list",
+        "./llm show <model> explains its format, memory route, context and capabilities",
+        "A model can stay downloaded without being selected or loaded into memory",
+    ],
+    "search": [
+        "Search results show size and memory fit before you download anything",
+        "Use --source modelscope when the model is easier to find on ModelScope",
+        "Downloads resume: an interrupted pull does not have to start again",
+    ],
+    "settings": [
+        "Per-model context and vision settings override the global defaults",
+        "The memory guard can reject a prompt before it pushes macOS into swap",
+        "Proxy and CA settings here are also used by downloads and web tools",
+    ],
+    "knowledge": [
+        "A chat searches only the Knowledge libraries selected for that chat",
+        "Files attached to one chat leave the Knowledge index when that chat is deleted",
+        "Knowledge indexes local text and OCR results; your original files are never changed",
+    ],
+    "assistant": [
+        "The browser assistant token stays on this Mac and can be replaced at any time",
+        "DOM actions are preferred; vision and macOS Accessibility are fallbacks when needed",
+        "Risky browser actions wait for your approval before they run",
+    ],
+    "editor": [
+        "Knowledge now lives inside Chat: select libraries or manage their documents without leaving it",
+        "Attach a file to the next message when you want the assistant to reason about that exact version",
+        "Review the diff before approving an edit; accepted edits can still be undone",
+    ],
+}
+_LAST_TIP = {}
 
-def print_banner():
+
+def _lumo_tip(section="home"):
+    """A varied tip for the current CLI section, without an immediate repeat in this process."""
+    import random
+    pool = _SECTION_TIPS.get(section, _TIPS)
+    previous = _LAST_TIP.get(section)
+    choices = [tip for tip in pool if tip != previous] or pool
+    tip = random.choice(choices)
+    _LAST_TIP[section] = tip
+    return tip
+
+
+def print_lumo_tip(section):
+    """A compact, contextual Lumo hint inside an interactive CLI section."""
+    if TTY:
+        print(CY("  ◉ " + T("Lumo tip:")) + " " + DIM(T(_lumo_tip(section))))
+
+
+def print_banner(section="home"):
     """The welcome of the interactive menu: Lumo, the mascot, greets you in a speech bubble — the time of day, the
     version, a tip. A plain line when the terminal has no colour or is narrow; nothing when it is not a TTY."""
     if not TTY:
         return
-    import random
     import shutil as _sh
     hour = time.localtime().tm_hour
     hello = T("Good night") if hour < 5 else T("Good morning") if hour < 12 else \
         T("Good afternoon") if hour < 18 else T("Good evening")
-    tip = T(random.choice(_TIPS))
+    tip = T(_lumo_tip(section))
     cols = _sh.get_terminal_size((80, 24)).columns
     if os.environ.get("NO_COLOR") or cols < 64:
         print(MINT("  Ai>_  ") + B("AI-llm-Engine") + DIM(f"  v{VERSION} · " + T("your models, your Mac, no cloud")))
         print(DIM(f"  {hello}. " + T("Tip:") + f" {tip}"))
         return
-    lumo = _pixel_lines(_mascot())                                            # 10 rows, 20 columns
     # what Lumo says, in a speech bubble pointing at it
     said = [B(f"{hello}! ") + T("I'm Lumo."),
             MINT("Ai>_ ") + B("AI-llm-Engine") + DIM(f" v{VERSION}"),
@@ -265,12 +322,27 @@ def print_banner():
         tail = "◀" if k == 1 else "│"                                          # the bubble points at Lumo's eyes
         bubble.append(frame(tail) + " " + t + " " * (inner - len(plain(t))) + " " + frame("│"))
     bubble.append(frame("╰" + "─" * (inner + 2) + "╯"))
+    def lines(gaze):
+        lumo = _pixel_lines(_mascot(gaze))                                    # 10 rows, 20 columns
+        rendered = []
+        for i in range(max(len(lumo), top + len(bubble))):
+            left = lumo[i] if i < len(lumo) else " " * 20
+            right = bubble[i - top] if 0 <= i - top < len(bubble) else ""
+            rendered.append("  " + left + ("  " + right if right else ""))
+        return rendered
+
     print()
     top = 1                                                                   # the bubble starts level with the eyes
-    for i in range(max(len(lumo), top + len(bubble))):
-        left = lumo[i] if i < len(lumo) else " " * 20
-        right = bubble[i - top] if 0 <= i - top < len(bubble) else ""
-        print("  " + left + ("  " + right if right else ""))
+    animate = not (os.environ.get("LLM_NO_ANIMATION") or os.environ.get("LLM_REDUCE_MOTION")
+                   or os.environ.get("CI") or os.environ.get("TERM") == "dumb")
+    gazes = ("center", "left", "blink", "right") if animate else ("right",)
+    for n, gaze in enumerate(gazes):
+        frame = lines(gaze)
+        sys.stdout.write("\n".join(frame) + "\n")
+        if n + 1 < len(gazes):
+            sys.stdout.flush()
+            time.sleep(0.09)
+            sys.stdout.write(f"\033[{len(frame)}A\r")
     print()
 
 
@@ -914,6 +986,7 @@ def ps_cmd(cfg, args):
 def choose_model(cfg, arg=None):
     models = scan_models(cfg)
     if arg is None:
+        print_lumo_tip("models")
         list_models(cfg, models)
         if not models: return False
         arg = input(T("Model number (Enter to cancel)") + " › ").strip()
@@ -1752,6 +1825,8 @@ def assistant_cmd(cfg, args):
     extension talks to (assistant/service.py, docs/safari-assistant/). `install` keeps it running from
     launchd; `token` prints the pairing token and copies it to the clipboard for the extension's settings."""
     from assistant import service
+    if not args:
+        print_lumo_tip("assistant")
     action = (args[0].lower() if args else "status")
     uid = os.getuid()
     if action == "serve":
@@ -2139,6 +2214,21 @@ def _tool_generate_image(cfg, args):
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
         return "error: a prompt is required"
+    hc = health(cfg)
+    if not hc or not hc.get("images"):
+        from engine import images as _images
+        if not _images.tool_path(DATA):
+            if not ask_yn(Y(T("Image generation is needed for this request. Install mflux now? The first image "
+                                  "also downloads its model weights.")), True):
+                return "error: the user declined to install local image generation"
+            if not setup_images():
+                return "error: local image generation could not be installed"
+        if not cfg.get("images_api"):
+            cfg["images_api"] = True
+            save_cfg(cfg)
+        print(DIM(T("Restarting the engine with local image generation…")))
+        if not restart(cfg, interactive=False) or not (health(cfg) or {}).get("images"):
+            return "error: image generation was installed but its local endpoint did not start"
     body = {"prompt": prompt}
     if args.get("size"):
         body["size"] = str(args["size"])
@@ -2196,9 +2286,9 @@ def chat(cfg, system="", params=None):
     think, effort, show = think_enabled(mc, m), mc["effort"], True
     params = profile_params(params)                 # a named profile may pre-set the system prompt + sampling
     msgs = []
-    tools = []
-    if hc.get("images"):
-        tools.append(IMAGE_TOOL)
+    # Always describe the local image tool. If a request actually needs it, its handler offers the optional
+    # installation and enables the endpoint; ordinary chats do not download or restart anything.
+    tools = [IMAGE_TOOL]
     from engine import audio as _audio
     if _audio.kokoro_available():
         tools.append(SPEAK_TOOL)
@@ -2696,6 +2786,7 @@ def connect_client(cfg, which=None):
     if not m:
         print(R(T("Select a model first."))); return False
     if not which:
+        print_lumo_tip("editor")
         keys = list(CLIENTS)
         for i, k in enumerate(keys, 1):
             print(f"  {i}) {CLIENTS[k][0]}  " + DIM(CLIENTS[k][1]))
@@ -3404,6 +3495,8 @@ def knowledge_cmd(cfg, args):
     extracted text: no model is loaded, nothing runs in the background, the original files are never touched."""
     from engine import knowledge as K
     as_json = "--json" in args
+    if not as_json and not args:
+        print_lumo_tip("knowledge")
     flags = {"--json", "--no-ocr", "--exact", "--context", "--yes"}
     opts, words, i = {}, [], 0
     while i < len(args):
@@ -3602,6 +3695,7 @@ def read_doc_cmd(cfg, args):
 
 def search_cmd(query, as_json=False, source="hf"):
     if not query:
+        print_lumo_tip("search")
         query = input(T("Search MLX models on Hugging Face") + " › ").strip()
     try:
         res = hf_search(query, source=source)
@@ -3659,6 +3753,7 @@ def status(cfg):
 
 def settings(cfg):
     on, off = T("on"), T("off")
+    print_lumo_tip("settings")
     while True:
         m = current_model(cfg)
         mc = mcfg(cfg)
@@ -3833,7 +3928,7 @@ def _conduct_status(cfg, conductor, root):
         print(Y("• " + T("set 'heavy' (it plans and synthesizes): llm conduct set heavy <model|worker>")))
     if roles and len({conductor.where(roles[r]) for r in roles}) == 1:
         print(DIM("• " + T("all roles use one model — the Conductor adds little, which is fine")))
-    print(DIM("\n" + T("set:") + " llm conduct set <heavy|code|fast> <model|worker>    "
+    print(DIM("\n" + T("set:") + " llm conduct set <heavy|code|fast|vision> <model|worker>    "
               + T("run:") + " llm conduct \"<task>\""))
     return True
 
@@ -3933,7 +4028,7 @@ def conduct_cmd(cfg, args):
         return _conduct_status_json(cfg, conductor, root) if as_json else _conduct_status(cfg, conductor, root)
     if sub == "set":
         if len(args) < 3:
-            print(R("usage: llm conduct set <heavy|code|fast> <model|worker>")); return False
+            print(R("usage: llm conduct set <heavy|code|fast|vision> <model|worker>")); return False
         return _conduct_set(cfg, conductor, root, args[1], " ".join(args[2:]))
     if sub == "unset" and len(args) == 2:
         conductor.set_role(root, args[1], None); print(G(f"{args[1]} cleared")); return True
