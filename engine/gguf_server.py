@@ -1,8 +1,8 @@
-"""OpenAI-compatible front for a GGUF model, served by llama.cpp's `llama-server` (stdlib only).
+"""OpenAI-compatible front for a GGUF model, served by llama.cpp or optional InferSSD (stdlib only).
 
     python -m engine.gguf_server --model file.gguf --port 8090 [--llama-server PATH] ...
 
-llama-server does the inference; this process keeps the engine's contract around it so every client and the
+The selected inner runtime does inference; this process keeps the engine's contract around it so every client and the
 LLMBar see the same thing whatever the model's format: `/health` and `/v1/models`, the API key, the
 model-name fallback switch, a leveled and grouped log, and the idle sleep (the model is unloaded after N
 idle minutes and loaded again by the next request).
@@ -50,10 +50,12 @@ def supports_spec(binary):
 
 
 class Inner:
-    """The llama-server process: started on demand, stopped when idle."""
+    """The owned inner runtime: started on demand, stopped when idle."""
 
-    def __init__(self, binary, model, ctx, name, mmproj=None, ngl=99, log_path=None, speculative=True):
+    def __init__(self, binary, model, ctx, name, mmproj=None, ngl=99, log_path=None, speculative=True,
+                 runtime="llama.cpp"):
         self.binary, self.model, self.ctx, self.name = binary, model, ctx, name
+        self.runtime, self.model_id = runtime, name
         self.speculative = speculative
         self.mmproj, self.ngl, self.log_path = mmproj, ngl, log_path
         self.proc, self.port = None, None
@@ -62,6 +64,9 @@ class Inner:
         self.inflight = 0
 
     def command(self, port):
+        if self.runtime == "inferssd":
+            return [self.binary, "serve", "-m", self.model, "--host", "127.0.0.1", "--port", str(port),
+                    "--context", str(self.ctx)]
         cmd = [self.binary, "-m", self.model, "--host", "127.0.0.1", "--port", str(port), "-c", str(self.ctx),
                "-ngl", str(self.ngl), "-np", "1", "--jinja", "-a", self.name]
         if self.mmproj:
@@ -84,13 +89,17 @@ class Inner:
                 return self.port
             self.port = free_port()
             sink = open(self.log_path, "a") if self.log_path else subprocess.DEVNULL
-            LOG(f"model: loading {os.path.basename(self.model)} into llama-server (context {self.ctx})")
-            self.proc = subprocess.Popen(self.command(self.port), stdout=sink, stderr=subprocess.STDOUT,
-                                         stdin=subprocess.DEVNULL)
+            LOG(f"model: loading {os.path.basename(self.model)} into {self.runtime} (context {self.ctx})")
+            try:
+                self.proc = subprocess.Popen(self.command(self.port), stdout=sink, stderr=subprocess.STDOUT,
+                                             stdin=subprocess.DEVNULL)
+            finally:
+                if sink is not subprocess.DEVNULL:
+                    sink.close()                         # the child owns its duplicated descriptor now
             t0 = time.time()
             while time.time() - t0 < timeout:
                 if self.proc.poll() is not None:
-                    raise RuntimeError(f"llama-server exited with code {self.proc.returncode}\n{self.tail()}")
+                    raise RuntimeError(f"{self.runtime} exited with code {self.proc.returncode}\n{self.tail()}")
                 try:
                     c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
                     c.request("GET", "/health")
@@ -98,13 +107,28 @@ class Inner:
                     r.read()
                     c.close()
                     if r.status == 200:
-                        LOG(f"loaded {os.path.basename(self.model)}: llama-server ready in {time.time() - t0:.1f}s")
+                        self._discover_model_id()
+                        LOG(f"loaded {os.path.basename(self.model)}: {self.runtime} ready in {time.time() - t0:.1f}s")
                         return self.port
                 except OSError:
                     pass
                 time.sleep(0.3)
             self.stop_locked()
-            raise RuntimeError("llama-server did not become ready in time\n" + self.tail())
+            raise RuntimeError(f"{self.runtime} did not become ready in time\n" + self.tail())
+
+    def _discover_model_id(self):
+        """InferSSD chooses the inner model id; keep our public alias while proxying its actual id."""
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+            c.request("GET", "/v1/models")
+            r = c.getresponse()
+            body = json.loads(r.read())
+            c.close()
+            models = body.get("data") if isinstance(body, dict) else None
+            if r.status == 200 and isinstance(models, list) and models and models[0].get("id"):
+                self.model_id = str(models[0]["id"])
+        except (OSError, ValueError, TypeError, AttributeError, http.client.HTTPException):
+            pass
 
     def tail(self, n=12):
         try:
@@ -190,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
         self._error(404, f"unknown path {self.path}")
 
     def health(self):
-        return {"status": "ok", "backend": "llama.cpp", "model": ARGS.name, "model_path": ARGS.model,
+        return {"status": "ok", "backend": INNER.runtime, "model": ARGS.name, "model_path": ARGS.model,
                 "state": "awake" if INNER.running else "sleeping", "idle_sleep_min": ARGS.idle_sleep,
                 "context": ARGS.context_effective, "max_tokens": ARGS.max_tokens,
                 "thinking": False, "vision": bool(INNER.mmproj), "vision_capable": bool(INNER.mmproj),
@@ -222,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return self._error(400, "max_tokens must be an integer", "invalid_request_error")
         body.pop("max_completion_tokens", None)
-        body["model"] = ARGS.name
+        body["model"] = INNER.model_id
         if isinstance(body.get("messages"), list) and not INNER.mmproj:      # no projector: answer without pictures
             from engine.media import strip_images
             body["messages"], n_dropped = strip_images(body["messages"])
@@ -297,7 +321,7 @@ def auto_context(model_ctx, ram_gb):
 
 def main(argv=None):
     global ARGS, INNER, LOG
-    ap = argparse.ArgumentParser(description="OpenAI-compatible front for a GGUF model (llama.cpp)")
+    ap = argparse.ArgumentParser(description="OpenAI-compatible front for a GGUF model (llama.cpp / InferSSD)")
     ap.add_argument("--model", required=True)
     ap.add_argument("--name", default=None)
     ap.add_argument("--host", default="127.0.0.1")
@@ -309,6 +333,7 @@ def main(argv=None):
     ap.add_argument("--log-level", choices=logs.LEVELS, default="info")
     ap.add_argument("--fallback-model", choices=("on", "off"), default="on")
     ap.add_argument("--llama-server", default="")
+    ap.add_argument("--inferssd", default="", help="an already installed InferSSD command")
     ap.add_argument("--mmproj", default="")
     ap.add_argument("--no-vision", action="store_true")
     ap.add_argument("--no-speculative", action="store_true", help="no prompt-lookup speculative decoding")
@@ -323,7 +348,11 @@ def main(argv=None):
     except (gguf.GGUFError, OSError) as e:
         print(f"cannot read {ARGS.model}: {e}", file=sys.stderr)
         return 2
-    binary = ARGS.llama_server or gguf.server_path(os.environ.get("LLM_HOME") or ROOT)
+    if ARGS.inferssd and not gguf.inferssd_support(info):
+        print(f"InferSSD has no declared profile for GGUF architecture {info.get('architecture')!r}", file=sys.stderr)
+        return 2
+    runtime = "inferssd" if ARGS.inferssd else "llama.cpp"
+    binary = ARGS.inferssd or ARGS.llama_server or gguf.server_path(os.environ.get("LLM_HOME") or ROOT)
     if not binary:
         print("llama.cpp is not installed — run: ./llm setup --gguf", file=sys.stderr)
         return 2
@@ -333,8 +362,8 @@ def main(argv=None):
     ARGS.format_info = {"architecture": info["architecture"], "quant": info["quant"]}
     mmproj = None if ARGS.no_vision else (ARGS.mmproj or gguf.projector_for(ARGS.model))
     INNER = Inner(binary, ARGS.model, ARGS.context_effective, ARGS.name, mmproj, log_path=ARGS.inner_log or None,
-                  speculative=not ARGS.no_speculative)
-    LOG(f"backend: llama.cpp ({info['architecture']} {info['quant']})")
+                  speculative=not ARGS.no_speculative, runtime=runtime)
+    LOG(f"backend: {runtime} ({info['architecture']} {info['quant']})")
     try:
         INNER.ensure()
     except RuntimeError as e:

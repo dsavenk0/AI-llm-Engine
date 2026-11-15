@@ -69,7 +69,7 @@ from engine import family, gguf  # noqa: E402  (stdlib only: no MLX needed to ro
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 HOME = os.path.expanduser("~")
-VERSION = "1.3"                                             # single source for the CLI and app bundle version
+VERSION = "1.3.1"                                           # single source for the CLI and app bundle version
 GITHUB_REPO = "dsavenk0/AI-llm-Engine"                     # where `./llm update` looks for a newer release
 BASE = os.path.dirname(os.path.abspath(__file__))          # code (repo or LLMBar.app/Contents/Resources/llm)
 DATA = os.environ.get("LLM_HOME") or BASE                   # state + .venv (LLMBar.app: ~/Library/Application Support/LLMBar)
@@ -335,14 +335,25 @@ def print_banner(section="home"):
     top = 1                                                                   # the bubble starts level with the eyes
     animate = not (os.environ.get("LLM_NO_ANIMATION") or os.environ.get("LLM_REDUCE_MOTION")
                    or os.environ.get("CI") or os.environ.get("TERM") == "dumb")
-    gazes = ("center", "left", "blink", "right") if animate else ("right",)
-    for n, gaze in enumerate(gazes):
-        frame = lines(gaze)
-        sys.stdout.write("\n".join(frame) + "\n")
-        if n + 1 < len(gazes):
-            sys.stdout.flush()
+    # Draw the complete mascot and bubble exactly once. Animation then replaces only the single 22-column row
+    # that contains the eyes. The outline, cheeks, body and translated bubble never participate in animation,
+    # so a terminal cannot leave partial frames behind or tear Lumo when the bubble wraps differently.
+    initial_gaze = "center" if animate else "right"
+    rendered = lines(initial_gaze)
+    sys.stdout.write("\n".join(rendered) + "\n")
+    if animate:
+        eye_row = 3                                                            # pixel rows 6+7, packed into one ▀ row
+        distance = len(rendered) - eye_row
+        # The cursor would otherwise flash as a grey block to Lumo's left while it waits between eye frames.
+        # Hide it only for the 180 ms animation and restore it before returning control to the menu.
+        sys.stdout.write(f"\033[?25l\033[{distance}A\r")
+        sys.stdout.flush()
+        for gaze in ("left", "right"):
             time.sleep(0.09)
-            sys.stdout.write(f"\033[{len(frame)}A\r")
+            eyes = _pixel_lines(_mascot(gaze))[eye_row]
+            sys.stdout.write("  " + eyes + "\r")
+            sys.stdout.flush()
+        sys.stdout.write(f"\033[{distance}B\r\033[?25h")
     print()
 
 
@@ -538,7 +549,7 @@ def route_features(cfg, m):
     "engine-gguf" (the own GGUF decoder), "mlx-lm", "llama.cpp"."""
     route = m.get("route", "native")
     if route == "gguf":
-        which = "engine-gguf" if gguf_native(cfg, m) else "llama.cpp"
+        which = "engine-gguf" if gguf_native(cfg, m) else ("InferSSD" if gguf_accelerator(cfg, m) else "llama.cpp")
     else:
         which = {"native": "engine", "ptq1": "engine-ptq1", "mlxlm": "mlx-lm"}.get(route, route)
     f = []
@@ -548,9 +559,9 @@ def route_features(cfg, m):
         f.append("thinking")
     # tool calls: the native engine and llama.cpp parse every convention they know; mlx-lm and the own GGUF
     # decoder follow what the chat template speaks
-    if which in ("engine", "engine-ptq1", "llama.cpp") or m.get("tool_calls"):
+    if which in ("engine", "engine-ptq1", "llama.cpp", "InferSSD") or m.get("tool_calls"):
         f.append("tools")
-    if which in ("engine", "engine-ptq1"):
+    if which in ("engine", "engine-ptq1", "InferSSD") or (which == "engine-gguf" and m.get("moe")):
         f.append("ssd-cache")
     if which in ("engine", "engine-gguf"):
         f += ["speculation", "steering"]
@@ -594,6 +605,7 @@ def inspect_gguf(path, name=None):
             t=", ".join(str(t) for t in sorted(vendor))))
     return {"path": path, "name": base, "size": size / 2**30, "format": f"GGUF {h['quant']}", "type": h["architecture"],
             "route": "gguf", "vision": bool(gguf.projector_for(path)),
+            "moe": bool(h.get("expert_count")),
             "thinking": "<think>" in tpl or "enable_thinking" in tpl,
             "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
             "efforts": [], "hadamard": False, "supported": not problems, "problems": problems,
@@ -620,6 +632,29 @@ def gguf_native(cfg, m):
     if key not in _NATIVE_CACHE:
         _NATIVE_CACHE[key] = gguf.native_support(path)[0]
     return _NATIVE_CACHE[key]
+
+
+def gguf_accelerator(cfg, m):
+    """InferSSD's command when its narrow route is useful, otherwise None.
+
+    Auto-selection requires all three: already installed, an explicitly supported architecture, and a GGUF
+    larger than the RAM this engine may safely occupy. `LLM_GGUF_RUNTIME=inferssd|llama` is the diagnostic
+    override; it never installs anything.
+    """
+    preference = os.environ.get("LLM_GGUF_RUNTIME", "auto").lower()
+    if preference == "llama":
+        return None
+    try:
+        binary = gguf.inferssd_path(DATA)
+        supported = gguf.inferssd_runtime_support(binary, m["path"]) if binary else False
+    except (OSError, gguf.GGUFError):
+        return None
+    if not binary or not supported:
+        return None
+    if preference == "inferssd":
+        return binary
+    safe_gb = RAM_GB * float(cfg.get("mem_limit", 88)) / 100.0
+    return binary if float(m.get("size", 0)) > safe_gb else None
 
 
 def scan_gguf(cfg):
@@ -1658,7 +1693,7 @@ def image_cmd(cfg, args):
 
 
 def gguf_cmd(cfg, m):
-    """The engine for a GGUF model: engine.gguf_server in front of llama.cpp's llama-server."""
+    """One GGUF gateway in front of llama.cpp, or optional InferSSD for a supported oversized MoE."""
     mc = mcfg(cfg, m["path"])
     cmd = [VENV_PY, "-m", "engine.gguf_server", "--model", m["path"], "--name", served_name(m),
            "--host", "0.0.0.0" if cfg["lan"] else "127.0.0.1", "--port", str(cfg["port"]),
@@ -1668,7 +1703,10 @@ def gguf_cmd(cfg, m):
     if os.environ.get("LLM_PARENT_PID"):   # the app sets this so the engine (and llama-server) stop if it crashes
         cmd += ["--parent-pid", os.environ["LLM_PARENT_PID"]]
     srv = gguf.server_path(DATA)
-    if srv:
+    accelerator = gguf_accelerator(cfg, m)
+    if accelerator:
+        cmd += ["--inferssd", accelerator]
+    elif srv:
         cmd += ["--llama-server", srv]
     if cfg.get("log_level", "info") != "info":
         cmd += ["--log-level", cfg["log_level"]]
@@ -1997,7 +2035,7 @@ def route_blocker(cfg, m, interactive):
     """None when the model's route is ready; else a message (after offering the fix, if interactive).
     Only the optional mlx-lm backend needs anything installed; PTQ1 is enabled by the model itself."""
     route = m.get("route", "native")
-    if route == "gguf" and not gguf_native(cfg, m) and not gguf.server_path(DATA):
+    if route == "gguf" and not gguf_native(cfg, m) and not gguf_accelerator(cfg, m) and not gguf.server_path(DATA):
         # a GGUF model was chosen on purpose and llama.cpp is its only runtime: fetch it (printing what happens)
         if interactive and not ask_yn(Y(T("This model runs on llama.cpp, which is not installed. Download it now (~40 MB)?")), True):
             return T("GGUF models need llama.cpp. Install it with:  ./llm setup --gguf")

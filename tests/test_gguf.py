@@ -30,7 +30,8 @@ def _s(x):
     return struct.pack("<Q", len(b)) + b
 
 
-def make_gguf(path, arch="llama", name="Tiny", ftype=15, ctx=4096, template="{{ messages }}", extra_tokens=3):
+def make_gguf(path, arch="llama", name="Tiny", ftype=15, ctx=4096, template="{{ messages }}", extra_tokens=3,
+              experts=0):
     kv = [_s("general.architecture") + struct.pack("<I", 8) + _s(arch),
           _s("general.name") + struct.pack("<I", 8) + _s(name),
           _s("general.file_type") + struct.pack("<I", 4) + struct.pack("<I", ftype),
@@ -39,6 +40,9 @@ def make_gguf(path, arch="llama", name="Tiny", ftype=15, ctx=4096, template="{{ 
           + b"".join(_s("t" * (i + 1)) for i in range(extra_tokens)),
           _s("tokenizer.ggml.scores") + struct.pack("<I", 9) + struct.pack("<I", 6) + struct.pack("<Q", 2)
           + struct.pack("<ff", 0.0, 1.0)]
+    if experts:
+        kv += [_s(f"{arch}.expert_count") + struct.pack("<I", 4) + struct.pack("<I", experts),
+               _s(f"{arch}.expert_used_count") + struct.pack("<I", 4) + struct.pack("<I", min(8, experts))]
     if template:
         kv.append(_s("tokenizer.chat_template") + struct.pack("<I", 8) + _s(template))
     with open(path, "wb") as f:
@@ -79,6 +83,33 @@ class TestHeader(unittest.TestCase):
         self.assertEqual(gguf.guess_quant("model-IQ4_XS.gguf"), "IQ4_XS")
         self.assertEqual(gguf.guess_quant("mystery.gguf"), "?")
 
+    def test_inferssd_accepts_only_its_declared_routed_moe_profiles(self):
+        supported = make_gguf(os.path.join(self.dir, "q.gguf"), arch="qwen35moe", experts=256)
+        other = make_gguf(os.path.join(self.dir, "g.gguf"), arch="granitemoe", experts=32)
+        dense = make_gguf(os.path.join(self.dir, "d.gguf"), arch="qwen35moe")
+        self.assertTrue(gguf.inferssd_support(supported))
+        self.assertFalse(gguf.inferssd_support(other))
+        self.assertFalse(gguf.inferssd_support(dense))
+
+    def test_inferssd_runtime_must_advertise_the_reviewed_version_and_profile(self):
+        model = make_gguf(os.path.join(self.dir, "runtime.gguf"), arch="qwen35moe", experts=256)
+        binary = os.path.join(self.dir, "inferssd-version")
+
+        def command(version, profiles):
+            with open(binary, "w") as f:
+                f.write("#!/bin/sh\nprintf '%s\\n' '" + json.dumps({
+                    "version": version, "capabilities": {"model_profiles": profiles}
+                }) + "'\n")
+            os.chmod(binary, 0o755)
+            os.utime(binary, None)
+            gguf._inferssd_capabilities.cache_clear()
+
+        command("0.1.4", ["qwen35moe"])
+        self.assertTrue(gguf.inferssd_runtime_support(binary, model))
+        command("0.1.3", ["qwen35moe"])
+        self.assertFalse(gguf.inferssd_runtime_support(binary, model))
+        command("0.1.4", ["dsv"])
+        self.assertFalse(gguf.inferssd_runtime_support(binary, model))
 
 class TestPickFiles(unittest.TestCase):
     def sib(self, *names):
@@ -310,6 +341,40 @@ class TestGateway(unittest.TestCase):
         self.assertEqual(args[args.index("-c") + 1], "8192")
         self.assertEqual(args[args.index("--host") + 1], "127.0.0.1")        # never exposed directly
 
+    def test_inferssd_is_an_inner_runtime_of_the_same_gateway(self):
+        model = make_gguf(os.path.join(self.tmp, "huge.gguf"), arch="qwen35moe", experts=256)
+        fake = os.path.join(self.tmp, "inferssd")
+        with open(fake, "w") as f:
+            f.write(fake_server())
+        os.chmod(fake, 0o755)
+        port = free_port()
+        log = open(os.path.join(self.tmp, "infer-gw.log"), "w+")
+        proc = subprocess.Popen([sys.executable, "-B", "-m", "engine.gguf_server", "--model", model,
+                                 "--port", str(port), "--inferssd", fake, "--ram-gb", "16"], cwd=ROOT,
+                                stdout=log, stderr=subprocess.STDOUT)
+        self.addCleanup(log.close)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(base + "/health", timeout=1) as response:
+                    health = json.load(response)
+                break
+            except OSError:
+                if proc.poll() is not None:
+                    self.fail("gateway exited: " + open(log.name).read())
+                time.sleep(0.05)
+        else:
+            self.fail("InferSSD gateway did not start")
+        self.assertEqual(health["backend"], "inferssd")
+        with open(fake + ".args") as f:
+            args = f.read().split()
+        self.assertEqual(args[:3], ["serve", "-m", model])
+        self.assertEqual(args[args.index("--host") + 1], "127.0.0.1")
+        proc.terminate()
+        proc.wait(10)
+
     def test_prompt_lookup_speculation_is_on_when_the_server_knows_it(self):
         with open(os.path.join(self.tmp, "llama-server"), "w") as f:
             f.write(fake_server())
@@ -338,6 +403,9 @@ class TestGateway(unittest.TestCase):
         self.assertEqual(on[on.index("--spec-type") + 1], "ngram-mod")
         self.assertNotIn("--spec-type", gguf_server.Inner(new, "m.gguf", 4096, "m", speculative=False).command(1234))
         self.assertNotIn("--spec-type", gguf_server.Inner(old, "m.gguf", 4096, "m").command(1234))
+        infer = gguf_server.Inner(new, "m.gguf", 4096, "m", runtime="inferssd").command(1234)
+        self.assertEqual(infer, [new, "serve", "-m", "m.gguf", "--host", "127.0.0.1", "--port", "1234",
+                                 "--context", "4096"])
 
     def test_a_chat_is_forwarded_and_max_tokens_is_clamped(self):
         g = self.gw("--max-tokens", "256")
@@ -406,7 +474,7 @@ class TestGateway(unittest.TestCase):
         p = subprocess.run([sys.executable, "-B", "-m", "engine.gguf_server", "--model", model, "--port", str(free_port()),
                             "--llama-server", broken, "--ram-gb", "16"], cwd=ROOT, capture_output=True, text=True, timeout=60)
         self.assertEqual(p.returncode, 3)
-        self.assertIn("llama-server exited", p.stderr)
+        self.assertIn("llama.cpp exited", p.stderr)
 
     def test_a_missing_llama_cpp_says_how_to_install(self):
         model = make_gguf(os.path.join(self.tmp, "c.gguf"))
@@ -546,7 +614,10 @@ class TestHeaderAndSupportDetails(unittest.TestCase):
 
     def test_native_support_names_why_not(self):
         self.assertEqual(gguf.native_support(self.write("fine.gguf")), (True, ""))
-        ok, why = gguf.native_support(self.write("moe.gguf", extra_meta={"llama.expert_count": 8}))
+        moe = self.write("moe.gguf", extra_meta={"llama.expert_count": 8, "llama.expert_used_count": 2})
+        self.assertEqual((gguf.read_header(moe)["expert_count"], gguf.read_header(moe)["expert_used_count"]),
+                         (8, 2))
+        ok, why = gguf.native_support(moe)
         self.assertEqual((ok, why), (False, "mixture of experts stored per expert"))
         ok, why = gguf.native_support(self.write("spm.gguf", extra_meta={"tokenizer.ggml.model": "llama"}))
         self.assertEqual((ok, why), (False, "tokenizer: SentencePiece without scores"))

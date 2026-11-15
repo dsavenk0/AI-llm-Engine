@@ -41,6 +41,39 @@ class TestLumo(unittest.TestCase):
     def test_eyes_have_motion_and_blink_frames(self):
         self.assertNotEqual(llm._mascot("left"), llm._mascot("right"))
         self.assertNotEqual(llm._mascot("blink"), llm._mascot("center"))
+        base = llm._mascot("right")
+        for gaze in ("left", "center", "blink"):
+            frame = llm._mascot(gaze)
+            self.assertEqual((len(frame), {len(row) for row in frame}), (len(base), {len(base[0])}))
+            changed = {(y, x) for y, row in enumerate(frame) for x, pixel in enumerate(row)
+                       if pixel != base[y][x]}
+            self.assertTrue(changed)
+            self.assertTrue(all(y in (6, 7) and x in range(5, 16) for y, x in changed), changed)
+
+    def test_animation_only_replaces_the_eye_row_of_one_pristine_banner(self):
+        """A translated speech bubble may wrap. It and the mascot body must be written only once; animation may
+        replace the fixed-width eye row but must never redraw the outline, cheeks or bubble."""
+        with mock.patch.object(llm, "TTY", True), mock.patch.object(llm.time, "sleep"), \
+                mock.patch("shutil.get_terminal_size", return_value=os.terminal_size((80, 24))), \
+                mock.patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": "", "CI": "",
+                                             "LLM_NO_ANIMATION": "", "LLM_REDUCE_MOTION": ""}, clear=False):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                llm.print_banner("home")
+        rendered = out.getvalue()
+        self.assertNotIn("\033[s", rendered)
+        self.assertNotIn("\033[u", rendered)
+        self.assertEqual(rendered.count("╭"), 1)
+        self.assertEqual(rendered.count("╰"), 1)
+        up = re.findall(r"\033\[(\d+)A\r", rendered)
+        down = re.findall(r"\033\[(\d+)B\r", rendered)
+        self.assertEqual(len(up), 1)
+        self.assertEqual(down, up)
+        self.assertEqual(rendered.count("\033[?25l"), 1)
+        self.assertEqual(rendered.count("\033[?25h"), 1)
+        updates = rendered.split(f"\033[{up[0]}A\r", 1)[1].split(f"\033[{up[0]}B\r", 1)[0]
+        self.assertIn(llm._pixel_lines(llm._mascot("left"))[3], updates)
+        self.assertIn(llm._pixel_lines(llm._mascot("right"))[3], updates)
 
 
 class TestContinueConfig(unittest.TestCase):
@@ -354,11 +387,28 @@ class TestRouteFeatures(unittest.TestCase):
         with mock.patch.object(llm, "gguf_native", return_value=True):
             self.assertEqual(llm.route_features({}, dict(base, route="gguf", thinking=False)),
                              ("engine-gguf", ["speculation", "steering"]))
+            self.assertEqual(llm.route_features({}, dict(base, route="gguf", thinking=False, moe=True)),
+                             ("engine-gguf", ["ssd-cache", "speculation", "steering"]))
             self.assertEqual(llm.route_features({}, dict(base, route="gguf", tool_calls=True)),
                              ("engine-gguf", ["thinking", "tools", "speculation", "steering"]))
-        with mock.patch.object(llm, "gguf_native", return_value=False):
+        with mock.patch.object(llm, "gguf_native", return_value=False), \
+                mock.patch.object(llm, "gguf_accelerator", return_value=None):
             self.assertEqual(llm.route_features({}, dict(base, route="gguf", vision=True)),
                              ("llama.cpp", ["vision", "thinking", "tools"]))
+        with mock.patch.object(llm, "gguf_native", return_value=False), \
+                mock.patch.object(llm, "gguf_accelerator", return_value="/bin/inferssd"):
+            self.assertEqual(llm.route_features({}, dict(base, route="gguf", thinking=False, moe=True)),
+                             ("InferSSD", ["tools", "ssd-cache"]))
+
+    def test_inferssd_auto_route_is_only_for_an_oversized_supported_model(self):
+        from unittest import mock
+        m = {"path": "/models/huge.gguf", "size": llm.RAM_GB, "route": "gguf"}
+        with mock.patch.object(llm.gguf, "inferssd_path", return_value="/bin/inferssd"), \
+                mock.patch.object(llm.gguf, "inferssd_runtime_support", return_value=True):
+            self.assertEqual(llm.gguf_accelerator({"mem_limit": 88}, m), "/bin/inferssd")
+            self.assertIsNone(llm.gguf_accelerator({"mem_limit": 88}, dict(m, size=1.0)))
+            with mock.patch.dict(os.environ, {"LLM_GGUF_RUNTIME": "llama"}):
+                self.assertIsNone(llm.gguf_accelerator({"mem_limit": 88}, m))
 
     def test_scan_models_carries_the_route_and_its_features(self):
         from unittest import mock

@@ -475,7 +475,12 @@ hub search and the agent's web tools follow them; the engine on this Mac is neve
 `./llm setup --images` installs [mflux](https://github.com/mflux-community/mflux) (FLUX and others on MLX) into its own
 environment, `./llm image "a lighthouse at dusk"` writes a PNG, and with the engine started `--images on` (or the
 *Image API* switch) `POST /v1/images/generations` answers with a base64 PNG. The language model is unloaded while an
-image is made, so the two never share memory.
+image is made, so the two never share memory. `model: "auto"` (the default) selects a quantized FLUX.2 Klein 4B or
+Z-Image Turbo profile from unified-memory size; MFLUX resolves a complete local/Hugging Face cache first and
+downloads the selected weights on first use. Chat asks before that download, shows a staged image skeleton, offers
+a chooser when several compatible cached models exist, and saves the result under `.llm/images/` with a separate
+**Save a copy…** action. MFLUX model families are dispatched to their own CLI entry points rather than all being
+sent through `mflux-generate`.
 
 ### Activation edits (optional)
 
@@ -551,8 +556,8 @@ Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one se
   `./llm start|stop|use`).
 - **Web:** the globe button (off by default) lets the assistant search the internet and read pages; every request is
   shown in the conversation.
-- **Pictures:** with the engine started `--images on` the assistant can draw (`generate_image`); the picture appears in
-  the message and is saved under `.llm/images/`.
+- **Pictures:** the assistant can draw (`generate_image`). On first use Chat asks before preparing MFLUX and fitting
+  model weights; a skeleton reports progress, then becomes the downloadable picture saved under `.llm/images/`.
 - **Assistant tools (MCP)** (opt-in module, *Assistant Tools (MCP)* in the Modules menu): connect MCP servers so the
   assistant can use their tools on the open project. A small catalog (context7, Stitch) and your own servers — a
   program over stdio (`command`/`args`) or a streamable-HTTP URL. The tools run with the project as their working
@@ -750,6 +755,7 @@ downloads one and records it as the Conductor's `vision` role. Apple Vision OCR 
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
 | mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
 | GGUF, own decoder | llama / Qwen2 / Qwen3 / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
+| GGUF, InferSSD | its explicitly profiled oversized DeepSeek 4.1 / Muse / Qwen 3.6 / Qwen 3.8 MoE architectures | optional, installed separately; never fetched by this project |
 | GGUF, llama.cpp | every other GGUF (other architectures, IQ1–IQ3, per-expert MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
 
 What each route can do (also printed under every model by `./llm models` and in the panel's tooltip):
@@ -759,13 +765,50 @@ What each route can do (also printed under every model by `./llm models` and in 
 | native | ✓ (with a vision tower) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 1.75-bit | ✓ (JANG) | ✓ | ✓ | ✓ | — (a pass of 2–16 rows costs ~6 steps) | — |
 | GGUF, own decoder | — (an image projector sends it to llama.cpp) | ✓ | when the template speaks `<tool_call>` | — | ✓ | ✓ |
+| GGUF, InferSSD | — | ✓ | ✓ | — | its runtime | SSD expert executor |
 | GGUF, llama.cpp | ✓ (with a projector) | ✓ | ✓ | — | its own `ngram-mod` | — |
 | mlx-lm | — | ✓ | when the template speaks tools | — | — | — |
 
-A Mixture-of-Experts GGUF file on the engine's own decoder streams its experts from disk instead of decoding
-every one at load time (`stream_experts`, on by default — `LLM_GGUF_STREAM_EXPERTS=0` turns it off) — a small
-cache holds only the experts a token actually routes to, useful when the full set of experts would not
-otherwise fit comfortably in memory.
+A Mixture-of-Experts GGUF file on the engine's own decoder streams its experts from disk when the complete
+decoded expert set would not fit the current safe RAM headroom (`LLM_GGUF_STREAM_EXPERTS=0` disables it) — a
+small cache holds only the experts a token actually routes to. If all experts fit, they are loaded resident:
+GGUF misses also decode and repack quantization blocks, so streaming a small model is needlessly slower. Its
+`moe_stream` health record uses `source: mmap+decode`, because the
+reported bytes are logical GGUF source traffic and its duration includes quantized decoding, not just physical
+SSD reads. `GGUFEngine` derives the cache capacity from each decoded expert's actual packed size and the memory
+manager's current safe headroom; `LLM_GGUF_EXPERT_CACHE=<experts per projection>` remains an explicit override.
+Within a bounded pool, a decaying use count keeps the conversation's hot experts and recency breaks equal scores.
+On a miss, the gate/up/down GGUF blocks are decoded concurrently as NumPy work; only the main thread publishes
+the completed buffers into MLX, because worker threads do not own a Metal stream. Each completed transform is
+also written atomically to the bounded disk-cache directory with owner-only permissions and a CRC. Its key includes
+the GGUF source identity and tensor layout, so replacing the model invalidates it. A later eviction or process start
+therefore reads MLX-ready packed weights rather than decoding and requantizing the GGUF blocks again.
+
+The admission decision is backed by a real M5 diagnostic on Granite-3.0-1B-A400M Q3_K_S (32 experts, 8 used;
+the same `Hi` prompt and two output tokens for every row):
+
+| GGUF experts resident | Memory | Load | Warm decode | Cache hit rate |
+|---|---:|---:|---:|---:|
+| all, eager | 0.95 GB | 12.0 s | 220.3 tok/s | — |
+| 32, lazy | 0.95 GB | 1.6 s | 100.0 tok/s | 75.9 % |
+| 16, parallel decode only | 0.53 GB | 1.6 s | 5.80 tok/s | 68.2 % |
+| 16, packed cache warm | 0.53 GB | 1.9 s | 61.9 tok/s | 68.2 % |
+| 8 | 0.32 GB | 1.5 s | 0.68 tok/s | 46.1 % |
+
+This short diagnostic is an admission-policy check, not a general throughput claim. It shows why the engine
+keeps GGUF experts resident whenever they fit and reserves `mmap+decode` streaming for otherwise impossible
+loads. Parallel projection decoding more than doubled the constrained-pool result; persisting the exact transformed
+layout then removed repeated repacking and brought the warm path another order of magnitude closer to residency.
+The remaining gap is cache misses, SSD traffic and synchronisation, not repeated quant-block conversion.
+
+An already installed **InferSSD** is a narrow optional route for architectures in its own tested profile list when
+the GGUF is larger than the RAM budget. It runs behind `engine.gguf_server`, so clients keep the same API key,
+model alias, idle lifecycle and public OpenAI-compatible endpoint; the unauthenticated inner server binds only to
+`127.0.0.1`. AI-llm-Engine neither vendors nor downloads it. `LLM_INFERSSD=/path/to/inferssd` locates a nonstandard
+installation; `LLM_GGUF_RUNTIME=inferssd|llama` is a diagnostic override. Before routing, the engine reads
+`inferssd --version --json`: the build must implement the reviewed 0.1.4+ contract and advertise the exact model
+profile. Ordinary models stay on the own decoder or llama.cpp, and InferSSD is not selected merely because it
+happens to be installed.
 
 **MLX Mixture-of-Experts models bigger than memory** run with their experts on the SSD. When such a model
 (Qwen3-MoE, Mixtral, OLMoE, DeepSeek, GLM, Granite-MoE… — anything mlx-lm builds from `SwitchGLU`) would not
@@ -777,6 +820,10 @@ known offsets, in parallel; the pool evicts the least-used expert, and the hot s
 next start is warm. `./llm models` shows such a model as “⇄ streams experts from the SSD” instead of “won't fit”.
 `LLM_MOE_STREAM=auto|on|off` (default auto: only when the model does not fit), `LLM_MOE_CACHE=<experts per
 layer>`, `LLM_MOE_DIRECT=1` (read around the file cache). `/health` reports the pool's hit rate and traffic.
+Both MLX/safetensors and built-in GGUF routes report the source kind, cache hits and misses, evictions, source
+operations, throughput and resident pool size under `moe_stream`; compare throughput only when `source` matches.
+`tests/bench_moe.py` accepts either an MLX model folder or a `.gguf` file and starts every capacity with a cold
+pool, so one run cannot accidentally warm the next one's persisted hot set.
 
 What it costs, measured on OLMoE-1B-7B-4bit (64 experts per layer, 8 per token — the *hard* case for this
 technique: no shared expert, flat routing), M5, reads around the file cache, `tests/bench_moe.py`:

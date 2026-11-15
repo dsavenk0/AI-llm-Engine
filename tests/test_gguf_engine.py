@@ -1,6 +1,8 @@
 """The engine's own GGUF path: reader → repacker → MLX decoder → tokenizer → engine (no llama.cpp)."""
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -350,7 +352,7 @@ class TestMixtureOfExperts(Base):
             self.assertLess(float(np.abs(got - want).max()), 0.01 * float(np.ptp(want)), f"{n} tokens, pool of 2")
 
     def test_streamed_experts_match_eager_and_the_reference_with_real_eviction(self):
-        """`stream_experts=True` decodes experts on demand into a small LRU cache instead of all at once —
+        """`stream_experts=True` decodes experts on demand into a small hot-expert cache instead of all at once —
         correctness must not depend on which experts happen to be resident. Stepping one token at a time
         (each step needs only N_USED=2 distinct experts, which the cache always holds at once) while the
         cache is smaller than N_EXPERT forces real cross-step eviction, not a lazy-load-once no-op — a whole
@@ -383,6 +385,137 @@ class TestMixtureOfExperts(Base):
         self.assertGreater(streamed_layer.gate_e.hits, 0)                  # a later token reused a cached expert
         # half the experts resident (cache_size=2 of N_EXPERT=4): the streamed cache holds markedly less
         self.assertLess(streamed_layer.gate_e.nbytes, eager_layer.gate_e.nbytes)
+        stats = model2.moe_stats()
+        self.assertEqual((stats["format"], stats["source"], stats["capacity"], stats["experts"]),
+                         ("gguf", "mmap+decode", cache_size, S.N_EXPERT))
+        self.assertGreater(stats["hits"], 0)
+        self.assertGreater(stats["misses"], cache_size)
+        self.assertGreater(stats["evictions"], 0)
+        self.assertGreater(stats["read_ops"], 3)                          # gate/up/down plus later replacements
+        self.assertIsNotNone(stats["read_mbps"])
+
+        # GGUFEngine is the bridge to the shared server contract; it must expose the model's counters instead
+        # of CompatEngine's safetensors-only `self.moe` field.
+        from engine.gguf_engine import GGUFEngine
+        engine = object.__new__(GGUFEngine)
+        engine.model = model2
+        self.assertEqual(engine.moe_stats(), stats)
+
+    def test_streamed_cache_keeps_a_hot_expert_over_a_merely_recent_one(self):
+        """Frequency with decay is the primary eviction signal; recency only breaks ties. A one-off route must
+        not dislodge an expert that the current conversation repeatedly uses."""
+        from engine import dense
+        path = os.path.join(self.dir, "hot-Q8_0.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        model, _, _ = dense.build(path, stream_experts=True, expert_cache=2)
+        pool = next(L for L in model.layers if L.router is not None).gate_e
+        pool._ensure([1])
+        for _ in range(20):
+            pool._ensure([0])
+        pool._ensure([1])                         # most recent, but still much colder than expert 0
+        pool._ensure([2])
+        self.assertEqual(set(pool.resident), {0, 2})
+        self.assertGreater(pool.score[0], pool.score[1])
+
+    def test_a_miss_decodes_gate_up_and_down_concurrently(self):
+        """The layer owns one three-worker reader lane; a miss does not serialize three independent slabs."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "parallel-Q8_0.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        model, _, _ = dense.build(path, stream_experts=True, expert_cache=S.N_USED)
+        real = dense.StreamedExperts._decode
+        state = {"active": 0, "peak": 0}
+        lock = threading.Lock()
+
+        def observed(pool, tensors, expert):
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            try:
+                time.sleep(0.02)
+                return real(pool, tensors, expert)
+            finally:
+                with lock:
+                    state["active"] -= 1
+
+        with mock.patch.object(dense.StreamedExperts, "_decode", observed):
+            out = model(mx.array([self.IDS]), model.make_cache())
+            mx.eval(out)
+        self.assertGreaterEqual(state["peak"], 2)
+        model.close()
+        self.assertIsNone(model._expert_readers)
+
+    def test_packed_cache_budget_counts_only_admitted_writes(self):
+        """A file larger than the cache, or a writer that later fails, must not poison the process-wide usage
+        estimate and cause valid later experts to be evicted unnecessarily."""
+        from engine import dense
+        root = tempfile.mkdtemp()
+        dense._PACK_USAGE.pop(root, None)
+        self.assertFalse(dense._reserve_packed_space(root, 10, 11))
+        self.assertEqual(dense._PACK_USAGE[root], 0)
+        self.assertTrue(dense._reserve_packed_space(root, 10, 6))
+        self.assertEqual(dense._PACK_USAGE[root], 6)
+        dense._release_packed_space(root, 6)
+        self.assertEqual(dense._PACK_USAGE[root], 0)
+
+    def test_packed_cache_reuses_transformed_experts_without_requantizing(self):
+        """An evicted expert and a later process read checksummed MLX-ready bytes, not GGUF quant blocks again."""
+        import mlx.core as mx
+        from engine import dense
+        path = os.path.join(self.dir, "packed-Q8_0.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        root = tempfile.mkdtemp()
+
+        def run():
+            model, _, _ = dense.build(path, stream_experts=True, expert_cache=S.N_USED,
+                                      packed_cache_dir=root, packed_cache_bytes=64 * 2**20)
+            cache = model.make_cache()
+            rows = [np.asarray(model(mx.array([[token]]), cache)[0].astype(mx.float32)) for token in self.IDS]
+            stats = model.moe_stats()
+            model.close()
+            return np.concatenate(rows), stats
+
+        first, a = run()
+        second, b = run()
+        np.testing.assert_array_equal(second, first)
+        self.assertGreater(a["repack_ops"], 0)
+        self.assertGreater(b["packed_hits"], 0)
+        self.assertLess(b["repack_ops"], a["repack_ops"])
+        self.assertEqual(b["source"], "packed-cache")
+        self.assertGreater(b["packed_gb_read"], 0)
+
+        # Replacing a GGUF in place changes the source fingerprint. Even if all tensor offsets remain equal,
+        # transforms produced for the old file are not considered candidates for the new one.
+        now = os.stat(path).st_mtime_ns + 1_000_000_000
+        os.utime(path, ns=(now, now))
+        _, changed = run()
+        self.assertGreater(changed["repack_ops"], 0)
+
+    def test_expert_cache_is_planned_from_the_available_memory(self):
+        from engine import dense
+        path = os.path.join(self.dir, "planned-Q8_0.gguf")
+        S.write(path, seed=11, quant="Q8_0", arch="llama", moe=True)
+        roomy = dense.plan_expert_cache(path, 10 * 2**30, reserve_bytes=0)
+        self.assertEqual((roomy["capacity"], roomy["experts"], roomy["top_k"], roomy["thrashing"]),
+                         (S.N_EXPERT, S.N_EXPERT, S.N_USED, False))
+        budget = roomy["fixed_bytes"] + S.N_USED * roomy["per_expert_bytes"]
+        tight = dense.plan_expert_cache(path, budget, reserve_bytes=0)
+        self.assertEqual((tight["capacity"], tight["thrashing"], tight["fits"]), (S.N_USED, True, True))
+        self.assertLess(tight["resident_gb"], roomy["resident_gb"])
+        self.assertFalse(dense.plan_expert_cache(path, budget - 1, reserve_bytes=0)["fits"])
+
+        from engine.gguf_engine import GGUFEngine
+        from engine.generate import MemoryLimitError
+        with mock.patch("engine.memory.headroom_bytes", return_value=1):
+            with self.assertRaisesRegex(MemoryLimitError, "even streamed, this GGUF MoE needs"):
+                GGUFEngine(path, max_context=128, max_tokens=8, log=lambda *_: None)
+
+        logs = []
+        with mock.patch("engine.memory.headroom_bytes", return_value=10 * 2**30):
+            engine = GGUFEngine(path, max_context=128, max_tokens=8, log=logs.append)
+        self.assertFalse(engine.model.layers[0].streamed)
+        self.assertTrue(any("loading them resident" in line for line in logs), logs)
 
     def test_a_single_token_needing_more_distinct_experts_than_the_cache_is_refused_clearly(self):
         """A single token's own top-k routes to more distinct experts than the cache holds — no grouping can

@@ -188,8 +188,9 @@ class TestReviewFixes(Base):
         out = t.call("web_fetch", {"url": "http://127.0.0.1:8090/v1/models"}, "c2")
         self.assertTrue(out.startswith("error"), out)
 
-    def test_generate_image_is_offered_only_when_the_engine_says_it_is_ready(self):
+    def test_generate_image_uses_only_the_local_engine_and_can_prepare_its_optional_backend(self):
         import base64
+        from unittest import mock
         from http.server import BaseHTTPRequestHandler, HTTPServer
         from ui import agentloop
         png = b"\x89PNG\r\n\x1a\nfake"
@@ -222,19 +223,50 @@ class TestReviewFixes(Base):
         names = lambda t: {x["function"]["name"] for x in t.schemas()}
 
         self.assertIs(agentloop._images_endpoint(ep).base, ep.base)
-        t = agentloop.Tools(Project(self.root), agentloop.Run(), events.append, images=agentloop._images_endpoint(ep))
+        run = agentloop.Run()
+        run.answer("question:c1:image_model", {"text": "Z-Image Turbo"})
+        t = agentloop.Tools(Project(self.root), run, events.append, images=agentloop._images_endpoint(ep))
         self.assertIn("generate_image", names(t))
-        out = t.call("generate_image", {"prompt": "a red fox", "size": "512x512"}, "c1")
+        choices = [{"model": "flux2-klein-4b", "label": "FLUX.2 Klein 4B · recommended"},
+                   {"model": "z-image-turbo", "label": "Z-Image Turbo"}]
+        with mock.patch("engine.images.model_choices", return_value=choices), \
+             mock.patch("engine.images.installed_models", return_value=["flux2-klein-4b", "z-image-turbo"]), \
+             mock.patch("engine.images.tool_path", return_value="/bin/mflux"):
+            out = t.call("generate_image", {"prompt": "a red fox", "size": "512x512"}, "c1")
         self.assertIn(".llm/images/", out)
-        self.assertEqual(state["bodies"], [{"prompt": "a red fox", "size": "512x512"}])
+        self.assertEqual(state["bodies"], [{"prompt": "a red fox", "model": "z-image-turbo", "size": "512x512"}])
+        self.assertTrue(any(e["type"] == "question" and e["id"] == "c1:image_model" for e in events))
+        self.assertEqual([e["type"] for e in events],
+                         ["image_progress", "question", "image_progress", "image_progress", "image"])
         shown = [e for e in events if e["type"] == "image"]
         self.assertEqual(len(shown), 1)
         with open(os.path.join(self.root, shown[0]["path"]), "rb") as f:
             self.assertEqual(f.read(), png)
         self.assertEqual(agentloop.CATEGORY["generate_image"], "image")
 
-        state["images"] = False                               # switched off on the engine: no tool, no call
-        self.assertIsNone(agentloop._images_endpoint(ep))
+        # No cached fit: Auto proposes the memory-sized model, but a declined multi-GB download must make no
+        # generation request and must leave no image event behind.
+        state["bodies"].clear()
+        declined_events = []
+        declined_run = agentloop.Run()
+        declined_run.answer("approval:c2", {"approve": False})
+        declined = agentloop.Tools(Project(self.root), declined_run, declined_events.append,
+                                   images=agentloop._images_endpoint(ep))
+        with mock.patch("engine.images.model_choices", return_value=[]), \
+             mock.patch("engine.images.installed_models", return_value=[]), \
+             mock.patch("engine.images.auto_profile", return_value={"model": "flux2-klein-4b", "quantize": 4,
+                                                                      "size": (512, 512), "low_ram": True}), \
+             mock.patch("engine.images.tool_path", return_value="/bin/mflux"):
+            refused = declined.call("generate_image", {"prompt": "a private sketch"}, "c2")
+        self.assertTrue(refused.startswith("error: the user declined"), refused)
+        self.assertEqual(state["bodies"], [])
+        self.assertEqual([e["type"] for e in declined_events], ["image_progress", "approval"])
+        self.assertIn("several GB", declined_events[-1]["dangerous"])
+
+        # A local engine remains eligible when its optional image backend is off: `generate_image` can ask for
+        # approval and prepare that backend on first use. A remote provider must never get that local setup path.
+        state["images"] = False
+        self.assertIs(agentloop._images_endpoint(ep).base, ep.base)
         off = agentloop.Tools(Project(self.root), agentloop.Run(), events.append, images=None)
         self.assertNotIn("generate_image", names(off))
         self.assertTrue(off.call("generate_image", {"prompt": "x"}, "c2").startswith("error"))

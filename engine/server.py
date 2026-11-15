@@ -1264,9 +1264,10 @@ def main():
     ap.add_argument("--shutdown-grace", type=float, default=10,
                     help="on SIGTERM, let in-flight requests finish for up to N seconds before exiting")
     ap.add_argument("--disk-cache-gb", type=_cache_size, default=8,
-                    help="SSD prefix cache budget in GB, or \"auto\" for 10%% of free disk space (0 = off)")
-    ap.add_argument("--disk-cache-dir", default="", help="where the SSD prefix cache lives (default: "
-                    "~/.cache/ai-llm-engine/prefix) — point it at a faster/bigger external SSD if you have one")
+                    help="SSD prefix / transformed GGUF expert cache budget in GB, or \"auto\" for 10%% of "
+                         "free disk space (0 = off)")
+    ap.add_argument("--disk-cache-dir", default="", help="where the SSD cache lives (default: "
+                    "~/.cache/ai-llm-engine) — point it at a faster/bigger external SSD if you have one")
     tune = ap.add_argument_group("fine tuning (defaults come from the model's presets)")
     for flag in ("temperature", "top-p", "top-k", "min-p", "presence-penalty", "repetition-penalty"):
         tune.add_argument(f"--{flag}", type=int if flag == "top-k" else float, default=None)

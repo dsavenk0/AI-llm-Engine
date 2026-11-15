@@ -11,9 +11,10 @@ happen to be resident, which is faster and changes the model's answers; this one
 
 What makes the reads affordable, taken from what Colibri, mlx-moe and kimi-k3-in-c report:
 
-* **One read per expert.** An expert's gate, up and down matrices are each a contiguous slab of the stacked
-  tensor in the safetensors file, so a miss is three `pread`s at known offsets — issued in parallel — with no
-  decoding: the bytes go straight into the pool in the quantized layout the matmul takes.
+* **One positional read per expert tensor.** An expert's gate, up and down matrices are each a contiguous slab
+  of the stacked tensor in the safetensors file, so a miss is three `preadv`s at known offsets — queued
+  together, including when only one expert misses — with no decoding: the bytes go straight into the pool in
+  the quantized layout the matmul takes.
 * **A pool per layer that keeps what is used often.** Eviction takes the expert with the lowest decayed use
   count, the least recently used among equals, so the hot experts of a conversation stay and a passing one does
   not push them out.
@@ -129,15 +130,28 @@ class Files:
 
     def __init__(self, direct=None):
         self.fds = {}
+        self.lock = threading.Lock()
         self.direct = os.environ.get("LLM_MOE_DIRECT") == "1" if direct is None else direct
 
     def _fd(self, path):
         fd = self.fds.get(path)
-        if fd is None:
-            fd = self.fds[path] = os.open(path, os.O_RDONLY)
-            if self.direct:
-                import fcntl
-                fcntl.fcntl(fd, getattr(fcntl, "F_NOCACHE", 48), 1)
+        if fd is not None:
+            return fd
+        # Several reader threads can see a new shard together. Open it once: leaking the losing descriptor is
+        # especially costly for checkpoints split into many files, and applying F_NOCACHE to only one of two
+        # racing descriptors would make the selected I/O policy nondeterministic.
+        with self.lock:
+            fd = self.fds.get(path)
+            if fd is None:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    if self.direct:
+                        import fcntl
+                        fcntl.fcntl(fd, getattr(fcntl, "F_NOCACHE", 48), 1)
+                except Exception:
+                    os.close(fd)
+                    raise
+                self.fds[path] = fd
         return fd
 
     def read(self, path, offset, nbytes):
@@ -200,6 +214,7 @@ class LayerPool:
         self.tick = np.zeros(n_experts, np.int64)
         self.now = 0
         self.hits = self.misses = self.bytes_read = 0
+        self.read_ops = self.evictions = 0
         self.read_s = 0.0
 
     @property
@@ -210,12 +225,11 @@ class LayerPool:
     def expert_nbytes(self):
         return sum(s[0] for s in self.slab.values())
 
-    def _read_into(self, job):
-        """Read expert `e`'s matrices straight into row `i` of each staging block."""
-        i, e, blocks = job
-        for key, (size, npdt, mxdt, shape, where) in self.slab.items():
-            path, off = where(e)
-            self.files.read_into(path, off, blocks[key][i])
+    def _read_slab(self, job):
+        """Read one expert tensor straight into its row of the staging block."""
+        key, i, e, blocks = job
+        path, off = self.slab[key][4](e)
+        self.files.read_into(path, off, blocks[key][i])
 
     def warm(self, order):
         """Fill the pool with these experts, best first (the saved hot set)."""
@@ -242,14 +256,19 @@ class LayerPool:
                     victim = min((x for x in self.resident if x not in protect),
                                  key=lambda x: (self.score[x], self.tick[x]))
                     slots[e] = self.resident.pop(victim)
-            t0 = time.time()
+                    self.evictions += 1
+            t0 = time.perf_counter()
             blocks = {key: np.empty((len(miss),) + tuple(s[3]), dtype=s[1]) for key, s in self.slab.items()}
-            jobs = [(i, e, blocks) for i, e in enumerate(miss)]
-            if len(miss) > 1:
-                list(self.readers.map(self._read_into, jobs))
+            # Keep adjacent expert slabs of one projection next to each other in the queue. This preserves
+            # locality in a stacked safetensors tensor while still allowing gate/up/down of a single miss to
+            # occupy separate readers — the common decode path used to serialize those reads.
+            jobs = [(key, i, e, blocks) for key in self.slab for i, e in enumerate(miss)]
+            if len(jobs) > 1:
+                list(self.readers.map(self._read_slab, jobs))
             else:
-                self._read_into(jobs[0])
-            self.read_s += time.time() - t0
+                self._read_slab(jobs[0])
+            self.read_ops += len(jobs)
+            self.read_s += time.perf_counter() - t0
             order = mx.array(np.asarray([slots[e] for e in miss], np.int32))
             for key, buf in blocks.items():
                 block = mx.array(buf)
@@ -274,7 +293,7 @@ class LayerPool:
         n = self.hits + self.misses
         return {"hits": self.hits, "misses": self.misses, "hit_rate": round(self.hits / n, 4) if n else None,
                 "bytes_read": self.bytes_read, "read_s": round(self.read_s, 3), "resident": len(self.resident),
-                "capacity": self.capacity}
+                "capacity": self.capacity, "read_ops": self.read_ops, "evictions": self.evictions}
 
 
 # ───────────────────────────── the block that replaces mlx-lm's SwitchGLU / SwitchMLP ─────────────────────────────
@@ -407,13 +426,21 @@ class Streamer:
         self.lock = threading.Lock()
 
     def stats(self):
-        pools = [p.stats() for p in self.pools.values()]
-        hits, misses = sum(p["hits"] for p in pools), sum(p["misses"] for p in pools)
-        return {"layers": len(pools), "capacity": self.plan["capacity"], "experts": self.plan["experts"],
-                "hit_rate": round(hits / (hits + misses), 4) if hits + misses else None, "misses": misses,
-                "gb_read": round(sum(p["bytes_read"] for p in pools) / GiB, 3),
-                "read_s": round(sum(p["read_s"] for p in pools), 2),
-                "pool_gb": round(sum(p.nbytes for p in self.pools.values()) / GiB, 2)}
+        pools = list(self.pools.values())
+        hits, misses = sum(p.hits for p in pools), sum(p.misses for p in pools)
+        bytes_read = sum(p.bytes_read for p in pools)
+        read_s = sum(p.read_s for p in pools)
+        return {"format": "mlx-safetensors", "source": "preadv", "layers": len(pools),
+                "capacity": self.plan["capacity"], "experts": self.plan["experts"],
+                "hit_rate": round(hits / (hits + misses), 4) if hits + misses else None,
+                "hits": hits, "misses": misses,
+                "evictions": sum(p.evictions for p in pools),
+                "read_ops": sum(p.read_ops for p in pools),
+                "gb_read": round(bytes_read / GiB, 3), "read_s": round(read_s, 2),
+                "read_mbps": round(bytes_read / 2**20 / read_s, 1) if read_s else None,
+                "pool_gb": round(sum(p.nbytes for p in pools) / GiB, 2),
+                # F_NOCACHE is a cache-bypass hint on macOS, not O_DIRECT; name it precisely in the API.
+                "bypass_file_cache": self.files.direct, "reader_threads": READERS}
 
     def save_usage(self):
         path = usage_file(self.folder)
@@ -437,7 +464,10 @@ class Streamer:
 
     def close(self):
         self.save_usage()
-        self.readers.shutdown(wait=False)
+        # Quiesce every positional read before closing the shared descriptors. `wait=False` could close a shard
+        # while a worker was still inside `preadv`, turning an otherwise clean model unload into an intermittent
+        # EBADF/truncated-read error. InferSSD follows the same ownership rule: readers stop before their sources.
+        self.readers.shutdown(wait=True)
         self.files.close()
         self.pools = {}
 

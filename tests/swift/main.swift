@@ -55,11 +55,29 @@ eq(q.summary(), "", "a question alone is not activity text")
 var web = ActivityCounts(); web.add(category: "web"); web.add(category: "web"); web.add(category: "read")
 eq(web.summary(), "Explored 1 file, made 2 web requests", "web requests are counted apart from files")
 
-let img = AgentEvent.parse(line: #"data: {"type":"image","path":".llm/images/a.png","prompt":"a fox"}"#)
-check(img == .image(path: ".llm/images/a.png", prompt: "a fox"), "image event")
+let progress = AgentEvent.parse(line: #"data: {"type":"image_progress","id":"i1","text":"Downloading model…"}"#)
+check(progress == .imageProgress(id: "i1", text: "Downloading model…"), "image progress event")
+let img = AgentEvent.parse(line: #"data: {"type":"image","id":"i1","path":".llm/images/a.png","prompt":"a fox"}"#)
+check(img == .image(id: "i1", path: ".llm/images/a.png", prompt: "a fox"), "image event")
 check(AgentEvent.parse(line: #"data: {"type":"image"}"#) == nil, "image event without a path")
 var pics = ActivityCounts(); pics.add(category: "image")
 eq(pics.summary(), "Generated 1 image", "images are counted")
+
+// The exact card shown by Chat must progress in place, ignore another call, finish once, and disappear on failure.
+var card = ImageCardState(callID: "i1", prompt: "a fox")
+eq(card.apply(.imageProgress(id: "other", text: "wrong")), .ignored, "another image cannot mutate this card")
+eq(card, ImageCardState(callID: "i1", prompt: "a fox"), "an ignored event changes no image state")
+eq(card.apply(.imageProgress(id: "i1", text: "Downloading model…")), .updated, "matching progress updates")
+check(card.pending && card.stage == "Downloading model…" && card.path == nil, "download stage stays a skeleton")
+eq(card.apply(.image(id: "i1", path: ".llm/images/a.png", prompt: "a red fox")), .updated,
+   "result completes the same card")
+check(!card.pending && card.stage == nil && card.path == ".llm/images/a.png" && card.prompt == "a red fox",
+      "the PNG replaces the skeleton and keeps the final prompt")
+eq(card.apply(.toolResult(id: "i1", name: "search", ok: false, summary: "failed")), .ignored,
+   "another tool cannot remove an image card")
+var failedCard = ImageCardState(callID: "i2", prompt: "unfinished")
+eq(failedCard.apply(.toolResult(id: "i2", name: "generate_image", ok: false, summary: "failed")), .remove,
+   "a failed image tool removes its unfinished card")
 
 // ── modes and effort
 eq(AgentMode.manual.next, .edit, "shift+tab goes to the next mode")

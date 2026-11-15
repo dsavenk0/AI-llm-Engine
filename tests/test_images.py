@@ -95,6 +95,50 @@ class TestLimits(unittest.TestCase):
             os.environ["LLM_IMAGES_BIN"] = "/no/such/tool"
             self.assertIsNone(images.tool_path(d))                      # an explicit choice is not second-guessed
 
+    def test_auto_profile_fits_the_machine_and_family_selects_the_right_executable(self):
+        self.assertEqual(images.auto_profile(8),
+                         {"model": "flux2-klein-4b", "quantize": 4, "size": (512, 512), "low_ram": True})
+        self.assertEqual(images.auto_profile(16)["model"], "flux2-klein-4b")
+        self.assertEqual(images.auto_profile(32)["model"], "z-image-turbo")
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".venv-images", "bin"))
+        tool = os.path.join(d, ".venv-images", "bin", "mflux-generate-flux2")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(tool, 0o755)
+        self.assertEqual(images.tool_path(d, "flux2-klein-4b"), tool)
+        low = images.command("/bin/mflux", "x", "/tmp/x.png", memory_gb=8)
+        self.assertEqual(low[low.index("--model") + 1], "flux2-klein-4b")
+        self.assertEqual((low[low.index("--width") + 1], low[low.index("--height") + 1]), ("512", "512"))
+        self.assertEqual(low[low.index("--steps") + 1], "4")
+        self.assertEqual(low[-2:], ["-q", "4"])
+        self.assertIn("--low-ram", low)
+        roomy = images.command("/bin/mflux", "x", "/tmp/x.png", memory_gb=32)
+        self.assertEqual(roomy[roomy.index("--model") + 1], "z-image-turbo")
+        self.assertEqual((roomy[roomy.index("--width") + 1], roomy[roomy.index("--height") + 1]), ("1024", "1024"))
+        self.assertEqual(roomy[-2:], ["-q", "8"])
+        self.assertNotIn("--low-ram", roomy)
+
+    def test_only_complete_cached_models_are_offered_and_heavy_ones_are_marked(self):
+        from unittest import mock
+        root = tempfile.mkdtemp()
+        complete = os.path.join(root, "models--mflux-community--z-image-turbo-mflux-q4", "snapshots", "rev")
+        heavy = os.path.join(root, "models--Qwen--Qwen-Image", "snapshots", "rev")
+        partial = os.path.join(root, "models--mflux-community--fibo-lite", "snapshots", "rev")
+        os.makedirs(complete)
+        os.makedirs(heavy)
+        os.makedirs(partial)
+        with open(os.path.join(complete, "model.safetensors"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(heavy, "model.safetensors"), "wb") as f:
+            f.write(b"x")
+        with mock.patch.dict(os.environ, {"HUGGINGFACE_HUB_CACHE": root}):
+            self.assertEqual(images.installed_models(), ["z-image-turbo", "qwen-image"])
+            self.assertEqual(images.model_choices(16), [
+                {"model": "z-image-turbo", "label": "Z-Image Turbo", "fits": True},
+                {"model": "qwen-image", "label": "Qwen Image · needs ≈24 GB", "fits": False},
+            ])
+
     def test_failures_report_the_last_lines_and_the_timeout_default_is_half_an_hour(self):
         import inspect
         self.assertEqual(inspect.signature(images.generate).parameters["timeout"].default, 1800)
@@ -125,7 +169,8 @@ class TestLimits(unittest.TestCase):
 
 class TestCommand(unittest.TestCase):
     def test_arguments(self):
-        cmd = images.command("/bin/t", "a red fox", "/tmp/o.png", model="z-image-turbo", steps=6, size="1024x768", seed=7)
+        cmd = images.command("/bin/t", "a red fox", "/tmp/o.png", model="z-image-turbo", steps=6,
+                             size="1024x768", seed=7, quantize=8)
         self.assertEqual(cmd[:3], ["/bin/t", "--model", "z-image-turbo"])
         self.assertIn("--prompt=a red fox", cmd)
         self.assertEqual(cmd[cmd.index("--width") + 1], "1024")

@@ -93,12 +93,14 @@ class CompatEngine(DecodeLoop):
 
     def __init__(self, path, vision=False, max_context=0, max_tokens=8192, prefill_step=512,
                  thinking=None, effort="medium", mem_limit=0.88, sampling_override=None,
-                 cache_limit_mb=128, think_frac=0.6, prefill_guard=True, log=print, **_ignored):
+                 cache_limit_mb=128, disk_cache_gb=8.0, disk_cache_dir="", think_frac=0.6,
+                 prefill_guard=True, log=print, **_ignored):
         if self.REQUIRES_MLX_LM and not mlx_lm_available():
             raise RuntimeError(INSTALL_HINT)
         self.path, self.log = path, log
         self.max_tokens, self.prefill_step = max_tokens, prefill_step
         self.effort, self.mem_limit, self.think_frac = effort, mem_limit, think_frac
+        self.disk_cache_gb, self.disk_cache_dir = disk_cache_gb, disk_cache_dir
         self.prefill_guard, self.progress = prefill_guard, None
         self.config, self.gen_cfg = self._read_configs(path)
         self.vision_allowed = False      # text only; mlx-vlm would be a separate optional backend

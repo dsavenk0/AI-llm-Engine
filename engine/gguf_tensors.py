@@ -32,6 +32,10 @@ TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 2: ("Q4_0", 32, 18), 3: ("Q4_1", 32
 OTHER = {15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS", 19: "IQ1_S", 21: "IQ3_S", 22: "IQ2_S", 29: "IQ1_M"}
 # bits the exactly decoded values are re-quantized to (per group of 32)
 REQUANT_BITS = {"Q6_K": 8, "Q2_K": 4, "Q3_K": 5, "IQ4_NL": 6, "IQ4_XS": 6}
+# The representation produced for MLX. Kept in one place so the memory planner and persistent expert cache do
+# not guess a layout independently from `load_matrix`.
+MLX_BITS = {"Q4_0": 4, "Q4_1": 4, "Q5_0": 5, "Q5_1": 5, "Q8_0": 8,
+            "Q4_K": 4, "Q5_K": 5, **REQUANT_BITS}
 # ggml's kvalues_iq4nl: the 16 levels of IQ4_NL / IQ4_XS
 KVALUES_IQ4NL = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113], np.float32)
 
@@ -310,6 +314,16 @@ def load_matrix(gf, info, chunk_rows=2048):
         ss.append(scale.astype(np.float16))
         bs.append(bias.astype(np.float16))
     return np.concatenate(ws), np.concatenate(ss), np.concatenate(bs), bits
+
+
+def matrix_layout(info):
+    """The exact NumPy shapes/dtypes `load_matrix` returns, without decoding the tensor."""
+    rows, cols = info.shape
+    bits = MLX_BITS.get(info.type_name)
+    if bits is None or (cols * bits) % 32 or cols % GROUP:
+        raise UnsupportedQuant(f"{info.name}: no MLX packed layout for {info.type_name}")
+    return bits, ((rows, cols * bits // 32), np.dtype("<u4")), \
+        ((rows, cols // GROUP), np.dtype("<f2")), ((rows, cols // GROUP), np.dtype("<f2"))
 
 
 def load_dense(gf, info):

@@ -1,6 +1,7 @@
 // The assistant module: sessions, the streaming agent transcript, question and approval cards.
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ApprovalInfo: Codable, Equatable {
     var id: String, kind: String
@@ -25,6 +26,7 @@ struct ChatItem: Identifiable, Codable, Equatable {
     var question: QuestionInfo?
     var resolved: String?                 // what the user decided / answered
     var imagePath: String?                // image: project-relative file of a generated picture
+    var imageState: ImageCardState?        // optional so chats saved by older builds keep decoding
 }
 
 struct ChatSession: Identifiable, Codable {
@@ -338,6 +340,23 @@ final class ChatStore: ObservableObject {
     private func apply(_ ev: AgentEvent) {
         mutate { s in
             func lastIs(_ k: ChatItem.Kind) -> Bool { s.items.last?.kind == k }
+            @discardableResult func applyImage(_ event: AgentEvent) -> Bool {
+                for i in s.items.indices.reversed() {
+                    guard var state = s.items[i].imageState else { continue }
+                    switch state.apply(event) {
+                    case .ignored: continue
+                    case .remove:
+                        s.items.remove(at: i)
+                        return true
+                    case .updated:
+                        s.items[i].imageState = state
+                        s.items[i].text = state.prompt
+                        s.items[i].imagePath = state.path
+                        return true
+                    }
+                }
+                return false
+            }
             switch ev {
             case .run(let id): runID = id
             case .delta(let t):
@@ -346,20 +365,36 @@ final class ChatStore: ObservableObject {
             case .reasoning(let t):
                 if !lastIs(.assistant) { s.items.append(ChatItem(kind: .assistant)) }
                 s.items[s.items.count - 1].reasoning += t
-            case .tool(_, let name, let category, let args):
+            case .tool(let id, let name, let category, let args):
                 if !lastIs(.activity) { s.items.append(ChatItem(kind: .activity)) }
                 let n = s.items.count - 1
                 s.items[n].counts.add(category: category)
                 let detail = args.values.first.map { String($0.prefix(60)) } ?? ""
                 s.items[n].steps.append(detail.isEmpty ? name : "\(name): \(detail)")
-            case .image(let path, let prompt):
-                s.items.append(ChatItem(kind: .image, text: prompt, imagePath: path))
+                if name == "generate_image", !s.items.contains(where: { $0.imageState?.callID == id }) {
+                    let prompt = args["prompt"] ?? ""
+                    s.items.append(ChatItem(kind: .image, text: prompt,
+                                            imageState: ImageCardState(callID: id, prompt: prompt)))
+                }
+            case .imageProgress(let id, let text):
+                if !applyImage(ev) {
+                    s.items.append(ChatItem(kind: .image, imageState: ImageCardState(callID: id, stage: text)))
+                }
+            case .image(let id, let path, let prompt):
+                if !applyImage(ev) {
+                    var state = ImageCardState(callID: id, prompt: prompt)
+                    _ = state.apply(ev)
+                    s.items.append(ChatItem(kind: .image, text: prompt, imagePath: path, imageState: state))
+                }
             case .approval(let id, let kind, let path, let old, let new, let command, let dangerous):
                 s.items.append(ChatItem(kind: .approval, approval: ApprovalInfo(id: id, kind: kind, path: path, old: old,
                                                                                 new: new, command: command, dangerous: dangerous)))
             case .question(let id, let q, let options):
                 s.items.append(ChatItem(kind: .question, question: QuestionInfo(id: id, question: q, options: options)))
-            case .toolResult(_, _, let ok, let summary):
+            case .toolResult(_, let name, let ok, let summary):
+                if name == "generate_image", !ok {
+                    _ = applyImage(ev)
+                }
                 if !ok, !lastIs(.error) { s.items.append(ChatItem(kind: .error, text: summary)) }
             case .note(let t): ws.say(t)
             case .knowledge(let sources):
@@ -551,12 +586,60 @@ struct ChatItemView: View {
 struct GeneratedImage: View {
     let item: ChatItem
     @ObservedObject var ws: Workspace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shimmer = false
 
-    private var url: URL? { item.imagePath.map { URL(fileURLWithPath: ws.root).appendingPathComponent($0) } }
+    private var url: URL? {
+        (item.imageState?.path ?? item.imagePath).map { URL(fileURLWithPath: ws.root).appendingPathComponent($0) }
+    }
+
+    private func saveCopy(_ source: URL) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = source.lastPathComponent
+        panel.prompt = "Save"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            try Data(contentsOf: source).write(to: destination, options: .atomic)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "The image could not be saved"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let u = url, let img = NSImage(contentsOf: u) {
+            if item.imageState?.pending == true {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Palette.field)
+                    GeometryReader { geo in
+                        LinearGradient(colors: [.clear, Palette.accent.opacity(0.20), .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: max(90, geo.size.width * 0.42))
+                            .offset(x: shimmer ? geo.size.width + 40 : -geo.size.width * 0.55)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    VStack(spacing: 10) {
+                        Image(systemName: "photo.badge.plus").font(.system(size: 30, weight: .light))
+                            .foregroundColor(Palette.accent)
+                        Text(item.imageState?.stage ?? "Creating image…").font(.callout.weight(.medium))
+                        if !(item.imageState?.prompt ?? item.text).isEmpty {
+                            Text(item.imageState?.prompt ?? item.text).font(.caption).foregroundColor(.secondary).lineLimit(2)
+                                .multilineTextAlignment(.center).padding(.horizontal, 24)
+                        }
+                    }
+                }
+                .frame(maxWidth: 420).aspectRatio(1, contentMode: .fit)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.hairline))
+                .onAppear {
+                    guard !reduceMotion else { return }
+                    withAnimation(.linear(duration: 1.25).repeatForever(autoreverses: false)) { shimmer = true }
+                }
+            } else if let u = url, let img = NSImage(contentsOf: u) {
                 Image(nsImage: img).resizable().scaledToFit()
                     .frame(maxWidth: 420, maxHeight: 420, alignment: .leading)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -566,8 +649,19 @@ struct GeneratedImage: View {
             } else {
                 Label("The image is no longer on disk", systemImage: "photo").foregroundColor(.secondary)
             }
-            Text((item.imagePath ?? "") + (item.text.isEmpty ? "" : "  ·  " + item.text))
-                .font(.caption).foregroundColor(.secondary).lineLimit(2).textSelection(.enabled)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text((item.imagePath ?? "") + (item.text.isEmpty ? "" : "  ·  " + item.text))
+                    .font(.caption).foregroundColor(.secondary).lineLimit(2).textSelection(.enabled)
+                Spacer(minLength: 4)
+                if let u = url, FileManager.default.fileExists(atPath: u.path) {
+                    Button { saveCopy(u) } label: {
+                        Label("Save a copy…", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Save the generated PNG somewhere else")
+                }
+            }
         }
     }
 }

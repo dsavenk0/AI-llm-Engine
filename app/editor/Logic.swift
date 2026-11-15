@@ -12,7 +12,8 @@ enum AgentEvent: Equatable {
     case approval(id: String, kind: String, path: String?, old: String?, new: String?, command: String?, dangerous: String?)
     case question(id: String, question: String, options: [String])
     case toolResult(id: String, name: String, ok: Bool, summary: String)
-    case image(path: String, prompt: String)          // a picture the assistant generated, saved in the project
+    case imageProgress(id: String, text: String)      // preparation / model download / diffusion stage
+    case image(id: String, path: String, prompt: String) // a picture generated and saved in the project
     case note(String)                                 // a remark for the person (not part of the conversation)
     case knowledge([String])                          // the knowledge sources this reply was given ("a.pdf, p. 3")
     case done
@@ -44,12 +45,54 @@ enum AgentEvent: Equatable {
         case "tool_result":
             return .toolResult(id: s("id") ?? "", name: s("name") ?? "", ok: obj["ok"] as? Bool ?? true,
                                summary: s("summary") ?? "")
-        case "image": return s("path").map { .image(path: $0, prompt: s("prompt") ?? "") }
+        case "image_progress":
+            return .imageProgress(id: s("id") ?? "", text: s("text") ?? "Creating image…")
+        case "image": return s("path").map { .image(id: s("id") ?? "", path: $0, prompt: s("prompt") ?? "") }
         case "note": return s("text").map { .note($0) }
         case "knowledge": return .knowledge(obj["sources"] as? [String] ?? [])
         case "done": return .done
         case "error": return .error(s("message") ?? "error")
         default: return nil
+        }
+    }
+}
+
+/// The generated-image card is a small state machine shared by the UI and the Foundation-only tests. Keeping the
+/// correlation id here is important: late progress from one tool call must never overwrite another picture.
+enum ImageCardDisposition: Equatable { case ignored, updated, remove }
+
+struct ImageCardState: Codable, Equatable {
+    var callID: String
+    var prompt: String
+    var path: String?
+    var stage: String?
+    var pending: Bool
+
+    init(callID: String, prompt: String = "", stage: String = "Preparing local image model…") {
+        self.callID = callID
+        self.prompt = prompt
+        self.path = nil
+        self.stage = stage
+        self.pending = true
+    }
+
+    mutating func apply(_ event: AgentEvent) -> ImageCardDisposition {
+        switch event {
+        case .imageProgress(let id, let text) where id == callID:
+            stage = text
+            pending = true
+            return .updated
+        case .image(let id, let resultPath, let resultPrompt) where id == callID:
+            prompt = resultPrompt
+            path = resultPath
+            stage = nil
+            pending = false
+            return .updated
+        case .toolResult(let id, let name, let ok, _)
+            where id == callID && name == "generate_image" && !ok && pending:
+            return .remove
+        default:
+            return .ignored
         }
     }
 }

@@ -11,10 +11,175 @@ Everything the architectures differ in is data in `Config`, so adding a family i
 verification against llama.cpp — not a new model class.
 """
 import os
+import time
+import hashlib
+import struct
+import tempfile
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import mlx.core as mx
 import numpy as np
+
+
+_PACK_MAGIC = b"LLMPK01\0"
+_PACK_HEADER = struct.Struct("<8sIIQI")                 # magic, expert id, bits, payload bytes, crc32
+_PACK_LOCK = __import__("threading").Lock()
+_PACK_USAGE = {}
+
+
+def _packed_usage(root):
+    total, files = 0, []
+    for dp, _, names in os.walk(root):
+        for name in names:
+            if not name.endswith(".bin"):
+                continue
+            path = os.path.join(dp, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            total += st.st_size
+            files.append((st.st_mtime_ns, st.st_size, path))
+    return total, files
+
+
+def _reserve_packed_space(root, limit, incoming):
+    """Bound the shared transformed-expert cache. Files are disposable and oldest-use wins eviction."""
+    with _PACK_LOCK:
+        total, files = _packed_usage(root) if root not in _PACK_USAGE else (_PACK_USAGE[root], None)
+        if total + incoming > limit:
+            if files is None:
+                total, files = _packed_usage(root)
+            for _, size, path in sorted(files):
+                try:
+                    os.remove(path)
+                    total -= size
+                except OSError:
+                    pass
+                if total + incoming <= limit:
+                    break
+        allowed = total + incoming <= limit
+        # Reserve immediately so concurrent writers cannot all admit themselves against the same free bytes.
+        # A writer that fails before its atomic replace releases the reservation in `save`.
+        _PACK_USAGE[root] = max(0, total) + (incoming if allowed else 0)
+        return allowed
+
+
+def _release_packed_space(root, size):
+    with _PACK_LOCK:
+        if root in _PACK_USAGE:
+            _PACK_USAGE[root] = max(0, _PACK_USAGE[root] - size)
+
+
+class PackedExpertCache:
+    """Persistent, checksummed GGUF→MLX expert transforms.
+
+    A GGUF miss is expensive mostly because its quant blocks are decoded and repacked, not because the SSD is
+    slow. One file per transformed expert makes later evictions and later process starts read the exact packed
+    `weight/scales/biases` bytes that MLX consumes. The directory key includes source identity and tensor layout;
+    changing the GGUF cannot reuse an old transform. Files are cache data, written owner-only through atomic rename.
+    """
+
+    def __init__(self, gf, info, n_exp, rows, root, max_bytes, layout):
+        self.enabled = bool(root and max_bytes > _PACK_HEADER.size)
+        self.root, self.max_bytes = os.path.expanduser(root or ""), int(max_bytes)
+        self.dir = ""
+        self.shapes = tuple(x[0] for x in layout[1:])
+        self.dtypes = tuple(x[1] for x in layout[1:])
+        self.bits = layout[0]
+        self.payload_bytes = sum(int(np.prod(shape)) * dtype.itemsize
+                                 for shape, dtype in zip(self.shapes, self.dtypes))
+        if not self.enabled or self.payload_bytes + _PACK_HEADER.size > self.max_bytes:
+            self.enabled = False
+            return
+        try:
+            st = os.stat(gf.path)
+            identity = repr((os.path.realpath(gf.path), st.st_dev, st.st_ino, st.st_size,
+                             st.st_mtime_ns, st.st_ctime_ns, gf.data_start,
+                             info.name, info.dims, info.type, info.offset, n_exp, rows, self.bits)).encode()
+            key = hashlib.sha256(identity).hexdigest()[:32]
+            self.dir = os.path.join(self.root, key)
+            os.makedirs(self.dir, mode=0o700, exist_ok=True)
+            os.chmod(self.dir, 0o700)
+        except OSError:
+            self.enabled = False
+
+    def _path(self, expert):
+        return os.path.join(self.dir, f"{expert:06d}.bin")
+
+    def load(self, expert):
+        if not self.enabled:
+            return None
+        path = self._path(expert)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            magic, found, bits, nbytes, checksum = _PACK_HEADER.unpack_from(data)
+            payload = memoryview(data)[_PACK_HEADER.size:]
+            if (magic != _PACK_MAGIC or found != expert or bits != self.bits or nbytes != self.payload_bytes
+                    or len(payload) != nbytes or zlib.crc32(payload) != checksum):
+                raise ValueError("stale or corrupt packed expert")
+            arrays, offset = [], 0
+            for shape, dtype in zip(self.shapes, self.dtypes):
+                count = int(np.prod(shape))
+                arrays.append(np.frombuffer(payload, dtype=dtype, count=count, offset=offset).reshape(shape))
+                offset += count * dtype.itemsize
+            try:
+                os.utime(path, None)
+            except OSError:
+                pass
+            return (*arrays, self.bits), len(data)
+        except (OSError, ValueError, struct.error):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            else:
+                _release_packed_space(self.root, size)
+            return None
+
+    def save(self, expert, arrays):
+        if not self.enabled:
+            return
+        path = self._path(expert)
+        if os.path.exists(path):
+            return
+        payload = b"".join(np.ascontiguousarray(a).tobytes() for a in arrays[:3])
+        if len(payload) != self.payload_bytes:
+            return
+        blob = _PACK_HEADER.pack(_PACK_MAGIC, expert, self.bits, len(payload), zlib.crc32(payload)) + payload
+        if not _reserve_packed_space(self.root, self.max_bytes, len(blob)):
+            return
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=".expert-", dir=self.dir)
+        except OSError:
+            _release_packed_space(self.root, len(blob))
+            return
+        committed = False
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(blob)
+            os.replace(tmp, path)
+            committed = True
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        finally:
+            if not committed:
+                _release_packed_space(self.root, len(blob))
 
 
 @dataclass
@@ -142,21 +307,33 @@ class StreamedExperts:
 
     Each projection (gate/up/down) of a layer keeps its own independent slot assignment for the same global
     expert id — fine, because `rhs_indices` only has to be internally consistent with that projection's own
-    `w`/`scales`/`biases`, never compared across projections."""
+    `w`/`scales`/`biases`, never compared across projections. A layer prepares the three projections together,
+    so misses decode concurrently; eviction uses the same decayed-frequency policy as the safetensors MoE path,
+    with recency only breaking ties."""
 
-    def __init__(self, gf, flat_info, n_exp, rows, cache_size):
+    def __init__(self, gf, flat_info, n_exp, rows, cache_size, packed_cache_dir="", packed_cache_bytes=0):
         from . import gguf_tensors as T
         self.gf, self.info, self.n_exp, self.rows = gf, flat_info, n_exp, rows
         self.cache_size = max(1, min(cache_size, n_exp))
         self.resident = {}      # global expert id -> slot
-        self.lru = []           # slot ids, oldest (next to evict) first
         self.free = list(range(1, self.cache_size))
+        self.score = np.zeros(n_exp, np.float32)
+        self.tick = np.zeros(n_exp, np.int64)
+        self.now = 0
+        self._prepared = None
         self.hits = self.misses = 0
+        self.evictions = self.decode_ops = self.source_bytes = 0
+        self.decode_s = self.packed_s = 0.0
+        self.packed_hits = self.packed_bytes = 0
+        cols = self.info.shape[1]
+        sub = T.TensorInfo(self.info.name, (cols, self.rows), self.info.type, self.info.offset)
+        self.packed = PackedExpertCache(gf, self.info, n_exp, rows, packed_cache_dir, packed_cache_bytes,
+                                        T.matrix_layout(sub))
         w0, s0, b0, self.bits = self._decode(T, 0)
         self.w = mx.array(np.stack([w0] * self.cache_size))
         self.scales = mx.array(np.stack([s0] * self.cache_size))
         self.biases = mx.array(np.stack([b0] * self.cache_size))
-        self.resident[0], self.lru = 0, [0]
+        self.resident[0] = 0
 
     def _decode(self, T, e):
         """(w, scales, biases, bits) for expert `e` alone — `load_matrix` unchanged, pointed at just that
@@ -166,45 +343,92 @@ class StreamedExperts:
         per_row = cols // block
         sub = T.TensorInfo(self.info.name, (cols, self.rows), self.info.type,
                            self.info.offset + e * self.rows * per_row * size)
-        return T.load_matrix(self.gf, sub)
+        t0 = time.perf_counter()
+        cached = self.packed.load(e)
+        if cached is not None:
+            out, nbytes = cached
+            self.packed_s += time.perf_counter() - t0
+            self.packed_hits += 1
+            self.packed_bytes += nbytes
+            return out
+        t0 = time.perf_counter()
+        out = T.load_matrix(self.gf, sub)
+        self.decode_s += time.perf_counter() - t0
+        self.decode_ops += 1
+        # Logical source traffic: mmap may satisfy some pages from RAM, but these are the encoded GGUF bytes
+        # the decoder had to touch. Keep the source kind in stats so it is not confused with physical SSD I/O.
+        self.source_bytes += sub.nbytes
+        self.packed.save(e, out)
+        return out
 
-    def _ensure(self, ids):
-        """Make every expert id this one call needs resident, all at once — `gather_qmm` indexes them in a
-        single pass, so none may be evicted to make room for another one the *same* call also needs. A call
-        that needs more distinct experts than the cache holds is refused clearly (raise `expert_cache`),
-        never served wrong by silently dropping one mid-fill."""
+    def stage(self, ids):
+        """Plan residency and decode misses to NumPy buffers. This phase is safe on a reader thread; committing
+        those buffers to MLX is deliberately separate because a worker thread has no Metal stream."""
         from . import gguf_tensors as T
-        needed = sorted(set(int(i) for i in np.asarray(ids).reshape(-1)))
+        flat = np.asarray(ids).reshape(-1)
+        unique, counts = np.unique(flat, return_counts=True)
+        needed = [int(i) for i in unique]
         if len(needed) > self.cache_size:
             raise ValueError(f"{len(needed)} distinct experts are routed to in one pass, more than the "
                              f"expert cache holds ({self.cache_size}); set LLM_GGUF_EXPERT_CACHE to at "
                              f"least {len(needed)} (or LLM_GGUF_STREAM_EXPERTS=0 to disable streaming "
                              f"for this model).")
-        protected = {self.resident[e] for e in needed if e in self.resident}
+        self.now += 1
+        self.score *= 0.9995
+        for e, count in zip(needed, counts):
+            self.score[e] += int(count)
+        resident, free = dict(self.resident), list(self.free)
+        protected = set(needed)
+        staged, evictions = [], 0
         for e in needed:
-            if e in self.resident:
+            if e in resident:
                 self.hits += 1
-                slot = self.resident[e]
+                slot = resident[e]
             else:
                 self.misses += 1
-                if self.free:
-                    slot = self.free.pop()
+                if free:
+                    slot = free.pop()
                 else:
-                    victim_pos = next(i for i, s in enumerate(self.lru) if s not in protected)
-                    slot = self.lru.pop(victim_pos)
-                    old = next(g for g, s in self.resident.items() if s == slot)
-                    del self.resident[old]
+                    old = min((g for g in resident if g not in protected),
+                              key=lambda g: (self.score[g], self.tick[g]))
+                    slot = resident.pop(old)
+                    evictions += 1
                 w, s_, b, _ = self._decode(T, e)
-                self.w[slot], self.scales[slot], self.biases[slot] = mx.array(w), mx.array(s_), mx.array(b)
-                self.resident[e] = slot
-                protected.add(slot)
-            if slot in self.lru:
-                self.lru.remove(slot)
-            self.lru.append(slot)
+                staged.append((slot, w, s_, b))
+                resident[e] = slot
+        return tuple(needed), resident, free, staged, evictions
+
+    def commit(self, staged, prepared=False):
+        """Publish one staged residency update on the caller's MLX/Metal thread."""
+        key, resident, free, arrays, evictions = staged
+        for slot, w, scales, biases in arrays:
+            self.w[slot], self.scales[slot], self.biases[slot] = \
+                mx.array(w), mx.array(scales), mx.array(biases)
+        self.resident, self.free = resident, free
+        self.evictions += evictions
+        for e in key:
+            self.tick[e] = self.now
+        self._prepared = key if prepared else None
+
+    def _ensure(self, ids):
+        """Make every expert id this one call needs resident, all at once — `gather_qmm` indexes them in a
+        single pass, so none may be evicted to make room for another one the *same* call also needs."""
+        self.commit(self.stage(ids))
+
+    def has_all(self, ids):
+        return all(int(e) in self.resident for e in np.unique(np.asarray(ids)))
+
+    def prepare(self, ids):
+        """Load a routed set now; the following call consumes it without counting the same access twice."""
+        self.commit(self.stage(ids), prepared=True)
 
     def __call__(self, x, idx, sorted_idx):
-        self._ensure(idx)
         idx_np = np.asarray(idx)
+        key = tuple(int(e) for e in np.unique(idx_np))
+        if self._prepared == key:
+            self._prepared = None
+        else:
+            self._ensure(idx_np)
         table = np.zeros(self.n_exp, np.int32)
         for g, slot in self.resident.items():
             table[g] = slot
@@ -229,6 +453,17 @@ class StreamedExperts:
     def nbytes(self):
         """What is actually resident (the cache), not the full stacked tensor on disk."""
         return self.w.nbytes + self.scales.nbytes + self.biases.nbytes
+
+    def stats(self):
+        n = self.hits + self.misses
+        return {"hits": self.hits, "misses": self.misses,
+                "hit_rate": round(self.hits / n, 4) if n else None,
+                "evictions": self.evictions, "read_ops": self.decode_ops + self.packed_hits,
+                "repack_ops": self.decode_ops, "packed_hits": self.packed_hits,
+                "bytes_read": self.source_bytes + self.packed_bytes,
+                "gguf_bytes": self.source_bytes, "packed_bytes": self.packed_bytes,
+                "read_s": self.decode_s + self.packed_s, "repack_s": self.decode_s,
+                "resident": len(self.resident), "capacity": self.cache_size}
 
 
 def _gather_sort(x, indices):
@@ -321,6 +556,8 @@ class DenseModel:
         self.norm = tensors["output_norm.weight"]
         self.head = tensors.get("output.weight") or self.embed.as_linear()
         self.layers = [Layer(cfg, tensors, i) for i in range(cfg.n_layer)]
+        self._expert_readers = ThreadPoolExecutor(max_workers=3, thread_name_prefix="gguf-expert") \
+            if any(L.streamed for L in self.layers if L.router is not None) else None
         self.steer = None            # y -> y', see engine/steering.py: applied where layers write the residual
         mode = os.environ.get("LLM_GGUF_ACT", "mixed")
         self.act = mx.float32 if mode == "f32" else mx.float16      # dtype fed to the matmuls
@@ -343,6 +580,40 @@ class DenseModel:
         self.nbytes = (sum(m.nbytes for L in self.layers for m in L.params())
                        + self.embed.w.nbytes + (self.embed.scales.nbytes + self.embed.biases.nbytes if self.embed.bits else 0)
                        + (self.head.nbytes if "output.weight" in tensors else 0))
+
+    def close(self):
+        """Stop GGUF expert readers before the model and its mapped source are released."""
+        if self._expert_readers is not None:
+            self._expert_readers.shutdown(wait=True, cancel_futures=True)
+            self._expert_readers = None
+
+    def moe_stats(self):
+        """The same cache/traffic view the safetensors MoE path exposes through `/health`.
+
+        GGUF's source counter is logical mmap traffic and includes quantized decoding time; the `source` field
+        keeps it distinct from moe_stream.py's explicit preadv traffic while the shared cache fields remain
+        directly comparable.
+        """
+        layers = [L for L in self.layers if L.router is not None and L.streamed]
+        if not layers:
+            return None
+        pools = [p for L in layers for p in (L.gate_e, L.up_e, L.down_e)]
+        stats = [p.stats() for p in pools]
+        hits, misses = sum(s["hits"] for s in stats), sum(s["misses"] for s in stats)
+        source_bytes, source_s = sum(s["bytes_read"] for s in stats), sum(s["read_s"] for s in stats)
+        packed_hits = sum(s["packed_hits"] for s in stats)
+        return {"format": "gguf", "source": "packed-cache" if packed_hits else "mmap+decode", "layers": len(layers),
+                "capacity": min(p.cache_size for p in pools), "experts": layers[0].gate_e.n_exp,
+                "hits": hits, "misses": misses,
+                "hit_rate": round(hits / (hits + misses), 4) if hits + misses else None,
+                "evictions": sum(s["evictions"] for s in stats),
+                "read_ops": sum(s["read_ops"] for s in stats),
+                "repack_ops": sum(s["repack_ops"] for s in stats), "packed_hits": packed_hits,
+                "gguf_gb_read": round(sum(s["gguf_bytes"] for s in stats) / 2**30, 3),
+                "packed_gb_read": round(sum(s["packed_bytes"] for s in stats) / 2**30, 3),
+                "gb_read": round(source_bytes / 2**30, 3), "read_s": round(source_s, 2),
+                "read_mbps": round(source_bytes / 2**20 / source_s, 1) if source_s else None,
+                "pool_gb": round(sum(p.nbytes for p in pools) / 2**30, 2)}
 
     def make_cache(self):
         return [KVCache() for _ in self.layers]
@@ -382,6 +653,18 @@ class DenseModel:
         sel = idx
         if do_sort:
             x, sel, order = _gather_sort(x, idx)
+        if layer.streamed:
+            # The three GGUF projections are independent source slabs. Decode/read them together on a miss,
+            # like the safetensors streamer's read ring, then let each gather consume its prepared pool.
+            routed = np.asarray(sel)
+            pools = (layer.gate_e, layer.up_e, layer.down_e)
+            if any(not p.has_all(routed) for p in pools):
+                staged = list(self._expert_readers.map(lambda p: p.stage(routed), pools))
+                for p, update in zip(pools, staged):
+                    p.commit(update, prepared=True)
+            else:
+                for p in pools:
+                    p.prepare(routed)
         g = layer.gate_e(x, sel, do_sort).astype(R)
         act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
         inner = (act * layer.up_e(x, sel, do_sort).astype(R)).astype(M)
@@ -493,7 +776,7 @@ def _linear(gf, info, T, bias_info=None):
     return QLinear(mx.array(w), mx.array(s), mx.array(b), bits, bias)
 
 
-def _experts(gf, info, T, stream=False, cache_size=64):
+def _experts(gf, info, T, stream=False, cache_size=64, packed_cache_dir="", packed_cache_bytes=0):
     """A stacked 3-D expert tensor [E, rows, cols] in MLX's quantized form, same layout per expert. `stream`
     (off by default — see `build(..., stream_experts=...)`) decodes experts on demand into a bounded LRU
     cache (`StreamedExperts`) instead of decoding the whole stack up front; a non-quantized (F32/F16/BF16)
@@ -506,13 +789,55 @@ def _experts(gf, info, T, stream=False, cache_size=64):
     # the loader works row by row: the stack is E*rows rows of `cols` (the bytes are contiguous in that order)
     flat = T.TensorInfo(info.name, (cols, n_exp * rows), info.type, info.offset)
     if stream:
-        return StreamedExperts(gf, flat, n_exp, rows, cache_size)
+        return StreamedExperts(gf, flat, n_exp, rows, cache_size, packed_cache_dir, packed_cache_bytes)
     w, s, b, bits = T.load_matrix(gf, flat)
     shape = lambda a: (n_exp, rows) + a.shape[1:]
     return Experts(mx.array(w).reshape(shape(w)), mx.array(s).reshape(shape(s)), mx.array(b).reshape(shape(b)), bits)
 
 
-def build(path, log=print, stream_experts=None, expert_cache=None):
+def plan_expert_cache(path, budget_bytes, reserve_bytes=2.5 * 2**30):
+    """Choose decoded GGUF experts per projection from the RAM that is safe to use now.
+
+    This is admission planning, not another memory manager: `engine.memory` supplies `budget_bytes`, and the
+    resulting bounded cache remains owned by `StreamedExperts`. The estimate follows `gguf_tensors.load_matrix`
+    exactly for quantized matrices (packed codes plus fp16 scale and bias per group of 32); non-expert tensors
+    are conservatively counted as fp16, while `reserve_bytes` leaves room for KV, activations and allocator
+    overhead. An explicit `LLM_GGUF_EXPERT_CACHE` bypasses this caller-side policy.
+    """
+    from . import gguf_tensors as T
+    gf = T.GGUFFile(path)
+    arch = gf.meta.get("general.architecture", "")
+    n_exp = int(gf.meta.get(f"{arch}.expert_count", 0) or 0)
+    top_k = int(gf.meta.get(f"{arch}.expert_used_count", 0) or 0)
+    if not n_exp or not top_k:
+        return None
+
+    def resident_bytes(info):
+        bits = T.MLX_BITS.get(info.type_name)
+        if bits is None:
+            return info.n_elements * 2              # dense tensors are normally converted to fp16
+        # packed codes: bits/8 byte per value; fp16 scale + fp16 bias per 32 values: another 1/8 byte
+        return info.n_elements * (bits + 1) // 8
+
+    expert_infos = [v for k, v in gf.tensors.items() if "_exps.weight" in k]
+    # Float experts are deliberately eager in `_experts`; no bounded cache exists to plan for them.
+    if not expert_infos or any(v.type_name not in T.MLX_BITS or v.shape[0] != n_exp for v in expert_infos):
+        return None
+    per_expert = sum(resident_bytes(v) for v in expert_infos) // n_exp
+    fixed = sum(resident_bytes(v) for k, v in gf.tensors.items() if "_exps.weight" not in k)
+    room = max(0, int(budget_bytes - reserve_bytes - fixed))
+    capacity = max(top_k, min(n_exp, room // max(1, per_expert)))
+    resident = fixed + capacity * per_expert
+    minimum = fixed + top_k * per_expert + reserve_bytes
+    return {"capacity": capacity, "experts": n_exp, "top_k": top_k,
+            "thrashing": capacity < n_exp, "fixed_gb": fixed / 2**30,
+            "per_expert_mb": per_expert / 2**20, "resident_gb": resident / 2**30,
+            "budget_gb": budget_bytes / 2**30, "fixed_bytes": fixed,
+            "per_expert_bytes": per_expert, "minimum_gb": minimum / 2**30,
+            "fits": minimum <= budget_bytes}
+
+
+def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_dir="", packed_cache_bytes=0):
     """(DenseModel, Config, GGUFFile). Raises Unsupported for anything this decoder does not do — the caller
     then runs the file on llama.cpp instead.
 
@@ -520,12 +845,11 @@ def build(path, log=print, stream_experts=None, expert_cache=None):
     token is actually routed to it, keeping at most `expert_cache` decoded experts per projection resident at
     once (LRU-evicted, automatically split into smaller token groups when one pass needs more than that —
     see `StreamedExperts`/`_expert_safe_groups`) instead of decoding the whole stack of experts for every
-    layer at load time. Output is unaffected — it is the same weights, fetched lazily. On by default
-    (`LLM_GGUF_STREAM_EXPERTS=0` turns it off, the same escape hatch `LLM_GGUF_ACT` already gives the
-    activation-dtype choice above): streaming never produces a different answer, and the realistic MoE
-    checkpoints this decoder loads rarely hold so few experts that eager loading would clearly beat it, so
-    the safer default is the one that cannot blow the memory budget a huge expert stack would. Pass `False`
-    explicitly to force eager loading for a comparison or a benchmark.
+    layer at load time. Output is unaffected — it is the same weights, fetched lazily. Direct callers default
+    to streaming (`LLM_GGUF_STREAM_EXPERTS=0` turns it off); `GGUFEngine` first asks the shared memory manager
+    and passes `False` when the complete decoded expert set fits safe RAM, because GGUF misses also pay a
+    quant-block decode/repack cost. Pass `False` explicitly to force eager loading for a comparison or a
+    benchmark.
 
     `expert_cache`: how many decoded experts per projection `StreamedExperts` keeps resident at once.
     `StreamedExperts._ensure`'s own error message tells the caller to "raise expert_cache" when a single pass
@@ -643,7 +967,8 @@ def build(path, log=print, stream_experts=None, expert_cache=None):
                 mx.array(T.load_dense(gf, names[f"blk.{i}.ffn_gate_inp.weight"])).astype(mx.float32))
             for n in ("gate", "up", "down"):
                 tensors[f"blk.{i}.ffn_{n}_exps.weight"] = _experts(
-                    gf, names[f"blk.{i}.ffn_{n}_exps.weight"], T, stream=stream_experts, cache_size=expert_cache)
+                    gf, names[f"blk.{i}.ffn_{n}_exps.weight"], T, stream=stream_experts, cache_size=expert_cache,
+                    packed_cache_dir=packed_cache_dir, packed_cache_bytes=packed_cache_bytes)
         if (i + 1) % 8 == 0:
             mx.eval([a for v in tensors.values() for a in (v if isinstance(v, list) else [v])
                      if isinstance(a, mx.array)])

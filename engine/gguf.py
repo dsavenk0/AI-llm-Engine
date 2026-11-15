@@ -8,9 +8,11 @@ import json
 import os
 import re
 import struct
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
+from functools import lru_cache
 
 MAGIC = b"GGUF"
 # value types of the metadata section
@@ -80,7 +82,8 @@ def read_header(path):
         for _ in range(kv):
             key = _string(f)
             t = _read(f, "<I")
-            want = key in WANTED or (arch and key.startswith(arch + ".") and key.endswith((".context_length", ".block_count")))
+            want = key in WANTED or (arch and key.startswith(arch + ".") and key.endswith(
+                (".context_length", ".block_count", ".expert_count", ".expert_used_count")))
             v = _value(f, t, want)
             if key == "general.architecture":
                 arch = v
@@ -91,6 +94,8 @@ def read_header(path):
     out["name"] = out.get("general.name") or out.get("general.basename") or os.path.basename(path)
     out["quant"] = FTYPE.get(ft, f"ftype {ft}") if ft is not None else guess_quant(os.path.basename(path))
     out["context_length"] = out.get(f"{arch}.context_length") if arch else None
+    out["expert_count"] = out.get(f"{arch}.expert_count") if arch else None
+    out["expert_used_count"] = out.get(f"{arch}.expert_used_count") if arch else None
     out["chat_template"] = out.get("tokenizer.chat_template", "")
     return out
 
@@ -308,6 +313,59 @@ def server_path(data_dir=None):
         if os.access(p, os.X_OK):
             return p
     return shutil.which("llama-server")
+
+
+# Profiles declared by InferSSD's typed launcher at the reviewed 0.1.4/e91c7d7 revision. Keep this exact: a
+# family resemblance is not enough to send an untested checkpoint to a specialised SSD executor.
+INFERSSD_PROFILES = {"deepseek41": "dsv", "muse-spark": "muse",
+                     "qwen35moe": "qwen35moe", "qwen4exp": "qwen4exp"}
+INFERSSD_ARCHS = frozenset(INFERSSD_PROFILES)
+
+
+def inferssd_path(data_dir=None):
+    """An already installed InferSSD command. AI-llm-Engine never downloads this optional third-party runtime."""
+    import shutil
+    explicit = os.environ.get("LLM_INFERSSD")
+    if explicit:
+        return explicit if os.access(explicit, os.X_OK) else None
+    candidates = [os.path.expanduser("~/.local/bin/inferssd")]
+    if data_dir:
+        candidates[:0] = [os.path.join(data_dir, "inferssd", "bin", "inferssd")]
+    return next((p for p in candidates if os.access(p, os.X_OK)), None) or shutil.which("inferssd")
+
+
+def inferssd_support(model):
+    """True only for a routed-MoE GGUF whose architecture has an explicit InferSSD launch profile."""
+    info = read_header(model) if isinstance(model, (str, os.PathLike)) else model
+    return bool(info and info.get("architecture") in INFERSSD_ARCHS and info.get("expert_count"))
+
+
+@lru_cache(maxsize=8)
+def _inferssd_capabilities(binary, mtime_ns, size):
+    """Validated capabilities of one installed build; file identity makes an in-place upgrade re-probe it."""
+    try:
+        result = subprocess.run([binary, "--version", "--json"], capture_output=True, text=True, timeout=5)
+        value = json.loads(result.stdout) if result.returncode == 0 else None
+        version = tuple(int(x) for x in str(value.get("version", "")).split("."))
+        profiles = (value.get("capabilities") or {}).get("model_profiles")
+        if len(version) < 3 or not isinstance(profiles, list) or not all(isinstance(x, str) for x in profiles):
+            return None
+        return version, frozenset(profiles)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def inferssd_runtime_support(binary, model):
+    """The installed command implements the reviewed 0.1.4 contract and advertises this model's profile."""
+    try:
+        info = read_header(model) if isinstance(model, (str, os.PathLike)) else model
+        if not inferssd_support(info):
+            return False
+        st = os.stat(binary)
+        found = _inferssd_capabilities(binary, st.st_mtime_ns, st.st_size)
+        return bool(found and found[0] >= (0, 1, 4) and INFERSSD_PROFILES[info["architecture"]] in found[1])
+    except (OSError, KeyError, TypeError):
+        return False
 
 
 RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=8"

@@ -2,6 +2,32 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## 1.3.1 — 15 November
+
+### Changed
+- Image generation now chooses a quantized MFLUX profile from the Mac's unified memory, switches to a compatible
+  cached model when one is present, or asks once before installing the runtime and downloading fitting weights.
+  When several image models are installed, Chat offers an Auto choice and the available models. A live skeleton
+  shows preparation, download, generation and save stages; the resulting PNG replaces it inline and has an
+  explicit **Save a copy…** action.
+- InferSSD can be used as an optional accelerator behind the existing authenticated GGUF gateway for its declared
+  oversized MoE profiles. It is never downloaded by AI-llm-Engine and is auto-selected only when already installed,
+  compatible, and the checkpoint exceeds the engine's safe RAM budget; its 0.1.4+ capability record and exact model
+  profile are verified first, and its inner API remains loopback-only.
+- MLX MoE streaming now queues the gate, up and down slabs of even a single expert miss across the SSD reader
+  pool instead of reading them serially. File descriptors are opened race-free, and health reports source kind,
+  read operations, throughput and cache evictions alongside the existing hit rate and traffic.
+- The built-in GGUF MoE decoder now sizes its expert cache from the decoded expert size and current safe RAM
+  headroom instead of a fixed default. It exposes the bounded cache through the same `moe_stream` health record,
+  clearly labeling its figures as logical memory-mapped GGUF traffic plus quantized decoding time. It keeps all
+  experts resident when they fit and streams only as an admission fallback, avoiding the measured GGUF repack
+  penalty on ordinary MoE models. When streaming is necessary, eviction now keeps frequently routed experts with
+  a decaying score (recency breaks ties), and gate/up/down quant-block decoding runs concurrently before the main
+  thread publishes the three buffers to Metal. A bounded, checksummed packed cache persists each completed
+  GGUF→MLX expert transform, keyed by the source file and tensor layout, so an eviction or process restart reads
+  MLX-ready bytes instead of requantizing again. On the real Granite diagnostic this raised the 16/32 warm result
+  from 2.46 to 61.9 tok/s without changing the 0.53 GB resident pool.
+
 ## 1.3.0 — 14 November
 
 ### Added

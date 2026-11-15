@@ -269,29 +269,63 @@ class Tools:
         import time
         if not self.images_ep:
             return "error: image generation is not available"
+        prompt = str(prompt).strip()
+        if not prompt:
+            return "error: a prompt is required"
+        import llm
+        from engine import images
+        self.emit({"type": "image_progress", "id": _call_id, "text": "Preparing local image model…"})
+        choices = images.model_choices()
+        fitting = [x for x in choices if x.get("fits", True)]
+        selected = fitting[0]["model"] if fitting else images.auto_profile()["model"]
+        if len(choices) > 1:
+            choice_id = _call_id + ":image_model"
+            automatic = next((x for x in choices if x["model"] == selected), None)
+            auto_label = "Auto · " + (automatic["label"] if automatic else images.MODEL_SPECS[selected]["label"])
+            labels = [auto_label] + [x["label"] for x in choices[:3]]
+            self.emit({"type": "question", "id": choice_id, "question": "Which local image model should I use?",
+                       "options": labels})
+            answer = self.run.wait("question:" + choice_id)
+            if answer is None:
+                return "error: no image model was selected"
+            picked = answer.get("text") or labels[0]
+            by_label = {x["label"]: x["model"] for x in choices}
+            selected = by_label.get(picked, selected)
+        spec = images.MODEL_SPECS[selected]
+        installed = set(images.installed_models())
+        needs_model = selected not in installed
         try:
             with urllib.request.urlopen(self.images_ep.health_url, timeout=1.5) as r:
                 ready = json.load(r).get("images") is True
         except (OSError, ValueError):
             ready = False
-        if not ready:
-            if not self._approve(_call_id, "run", command="Install and enable local image generation",
-                                 dangerous="downloads the optional mflux package and model weights, then restarts the local engine"):
+        has_tool = bool(images.tool_path(llm.DATA, selected))
+        if not ready or not has_tool or needs_model:
+            actions = []
+            if not has_tool:
+                actions.append("install the MFLUX image runtime")
+            if needs_model:
+                actions.append("download " + spec["label"] + " weights")
+            if not ready:
+                actions.append("enable image generation and restart the local engine")
+            command = "; ".join(actions) or "Prepare local image generation"
+            if not self._approve(_call_id, "run", command=command,
+                                 dangerous="uses only local inference; model weights can take several GB of disk space"):
                 return "error: the user declined to prepare local image generation"
-            import llm
-            from engine import images
-            if not images.tool_path(llm.DATA) and not llm.setup_images():
+            if not has_tool:
+                self.emit({"type": "image_progress", "id": _call_id, "text": "Installing image runtime…"})
+            if not has_tool and not llm.setup_images():
                 return "error: local image generation could not be installed"
             cfg = llm.load_cfg()
             if not cfg.get("images_api"):
                 cfg["images_api"] = True
                 llm.save_cfg(cfg)
-            if not llm.restart(cfg, interactive=False):
+            if not ready and not llm.restart(cfg, interactive=False):
                 return "error: image generation was installed but the local engine did not restart"
-        prompt = str(prompt).strip()
-        if not prompt:
-            return "error: a prompt is required"
-        body = {"prompt": prompt}
+        self.emit({"type": "image_progress", "id": _call_id,
+                   "text": (("Downloading " + spec["label"] + " and creating image…") if needs_model else
+                            ("Creating with " + spec["label"] + "…"))})
+        body = {"prompt": prompt, "model": selected}
         if size:
             body["size"] = str(size)
         req = urllib.request.Request(self.images_ep.base + "/images/generations",
@@ -309,6 +343,7 @@ class Tools:
             return f"error: image generation failed ({e.code}): {detail}"
         except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError) as e:
             return f"error: image generation failed: {e}"
+        self.emit({"type": "image_progress", "id": _call_id, "text": "Saving image…"})
         rel = os.path.join(".llm", "images", time.strftime("img-%Y%m%d-%H%M%S") + f"-{secrets.token_hex(2)}.png")
         full = self.P.resolve(rel, must_exist=False)
         os.makedirs(os.path.dirname(full), exist_ok=True)

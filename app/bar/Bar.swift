@@ -1754,6 +1754,7 @@ struct ModelsTab: View {
 
 struct ToolsTab: View {
     @ObservedObject var e: EngineState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var connectOpen = false
     @State private var browserAssistantOpen = false
 
@@ -1809,7 +1810,7 @@ struct ToolsTab: View {
                 }
                 // Optional and independent of this app: the browser extension talks to its own small service, so
                 // it keeps working with LLMBar closed. Keep the browser choices together like the editor connectors.
-                Button(action: { browserAssistantOpen.toggle() }) {
+                Button(action: { toggleSubmenu($browserAssistantOpen) }) {
                     HStack(spacing: 10) {
                         Image(systemName: "safari").font(.system(size: 14)).foregroundColor(HUD.cyan).frame(width: 22)
                             .shadow(color: HUD.cyan.opacity(0.7), radius: 3)
@@ -1819,8 +1820,9 @@ struct ToolsTab: View {
                             Text(browserAssistantNames).font(.system(size: 10)).foregroundColor(HUD.dim).lineLimit(1)
                         }
                         Spacer()
-                        Image(systemName: browserAssistantOpen ? "chevron.down" : "chevron.right")
+                        Image(systemName: "chevron.right")
                             .font(.system(size: 10)).foregroundColor(HUD.dim)
+                            .rotationEffect(.degrees(browserAssistantOpen ? 90 : 0))
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain)
                     .help(L("Choose a browser to set up", "Выберите браузер для настройки"))
@@ -1841,11 +1843,16 @@ struct ToolsTab: View {
                                 BrowserAssistantSetup.runFirefox()
                             }
                         }
-                        Spacer(minLength: 0)
-                    }.padding(.leading, 32)
+                    }
+                    .padding(.leading, 32)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .top)),
+                        removal: .opacity
+                    ))
                 }
                 // an inline list, like the model settings: a Menu in this style lost the row's padding and chevron
-                Button(action: { connectOpen.toggle() }) {
+                Button(action: { toggleSubmenu($connectOpen) }) {
                     HStack(spacing: 10) {
                         Image(systemName: "puzzlepiece.extension").font(.system(size: 14)).foregroundColor(HUD.cyan).frame(width: 22)
                             .shadow(color: HUD.cyan.opacity(0.7), radius: 3)
@@ -1854,7 +1861,8 @@ struct ToolsTab: View {
                             Text("Continue · Kilo Code · opencode").font(.system(size: 10)).foregroundColor(HUD.dim).lineLimit(1)
                         }
                         Spacer()
-                        Image(systemName: connectOpen ? "chevron.down" : "chevron.right").font(.system(size: 10)).foregroundColor(HUD.dim)
+                        Image(systemName: "chevron.right").font(.system(size: 10)).foregroundColor(HUD.dim)
+                            .rotationEffect(.degrees(connectOpen ? 90 : 0))
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain)
                     .help(L("Writes URL and limits into the editor config (.bak kept)", "Записывает адрес и лимиты в конфиг редактора (копия .bak)"))
@@ -1866,7 +1874,12 @@ struct ToolsTab: View {
                             }.buttonStyle(NeonButton(color: HUD.cyan)).fixedSize()
                         }
                         Spacer()
-                    }.padding(.leading, 32)
+                    }
+                    .padding(.leading, 32)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .top)),
+                        removal: .opacity
+                    ))
                 }
                 tool("link", L("Copy API URL", "Скопировать URL API"), e.apiURL) {
                     NSPasteboard.general.clearContents()
@@ -1904,14 +1917,33 @@ struct ToolsTab: View {
         Button(action: action) { toolLabel(icon, title, sub) }.buttonStyle(.plain).help(sub)
     }
 
+    private func toggleSubmenu(_ state: Binding<Bool>) {
+        let opening = !state.wrappedValue
+        let animation: Animation? = reduceMotion ? nil : (opening ? .easeOut(duration: 0.20) : .easeIn(duration: 0.14))
+        withAnimation(animation) {
+            state.wrappedValue.toggle()
+        }
+    }
+
     private func browserOption(_ name: String, version: String?, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(version.map { "\(name) · v\($0)" } ?? name).font(HUD.mono(10, .semibold)).lineLimit(1)
-                .padding(.horizontal, 10).padding(.vertical, 5)
+            VStack(spacing: 1) {
+                Text(name)
+                    .font(HUD.mono(10, .semibold))
+                    .lineLimit(1)
+                Text(version.map { "v\($0)" } ?? L("Set up", "Настроить"))
+                    .font(HUD.mono(9))
+                    .foregroundColor(HUD.dim)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .padding(.horizontal, 8)
         }
         .buttonStyle(NeonButton(color: HUD.cyan))
-        .fixedSize()
-        .help(name)
+        .frame(maxWidth: .infinity)
+        .help(version.map { "\(name) · v\($0)" } ?? name)
+        .accessibilityElement(children: .combine)
     }
 }
 

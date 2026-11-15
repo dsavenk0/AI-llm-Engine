@@ -6,6 +6,8 @@ model with every expert in memory. A tiny quantized Qwen3-MoE is built here; no 
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -162,10 +164,28 @@ class TestPool(unittest.TestCase):
         idx = M.index(d)
         files = M.Files()
         from concurrent.futures import ThreadPoolExecutor
+        readers = ThreadPoolExecutor(2)
         pool = M.LayerPool(files, {"up_proj": {"weight": idx["x.switch_mlp.up_proj.weight"]}}, ("up_proj",), n,
-                           capacity, ThreadPoolExecutor(2))
+                           capacity, readers)
         self.addCleanup(files.close)
+        self.addCleanup(readers.shutdown)
         return pool, np.asarray(w)
+
+    def glu_pool(self):
+        """A three-tensor expert, so a single miss can prove its slabs use separate readers."""
+        d = tempfile.mkdtemp()
+        w = mx.arange(8 * 4 * 2, dtype=mx.uint32).reshape(8, 4, 2)
+        tensors = {f"x.switch_mlp.{name}.weight": w + i for i, name in enumerate(M.GLU)}
+        mx.save_safetensors(os.path.join(d, "model.safetensors"), tensors)
+        idx = M.index(d)
+        files = M.Files()
+        from concurrent.futures import ThreadPoolExecutor
+        readers = ThreadPoolExecutor(3)
+        parts = {name: {"weight": idx[f"x.switch_mlp.{name}.weight"]} for name in M.GLU}
+        pool = M.LayerPool(files, parts, M.GLU, 8, 3, readers)
+        self.addCleanup(files.close)
+        self.addCleanup(readers.shutdown)
+        return pool, files
 
     def test_slots_hold_the_bytes_of_their_expert(self):
         pool, w = self.pool()
@@ -183,6 +203,7 @@ class TestPool(unittest.TestCase):
         self.assertEqual(sorted(pool.resident), [0, 1, 5])               # 2 went, not a hot one
         pool.ensure([6, 7, 0])
         self.assertEqual(sorted(pool.resident), [0, 6, 7])               # all three just asked for are kept
+        self.assertEqual(pool.stats()["evictions"], 3)
         with self.assertRaisesRegex(M.StreamError, "pool holds 3"):
             pool.ensure([1, 2, 3, 4])
 
@@ -200,6 +221,45 @@ class TestPool(unittest.TestCase):
         s = pool.stats()
         self.assertEqual((s["hits"], s["misses"]), (2, 3))
         self.assertAlmostEqual(s["hit_rate"], 0.4)
+        self.assertEqual(s["read_ops"], 3)
+
+    def test_one_expert_miss_reads_its_projections_in_parallel(self):
+        pool, files = self.glu_pool()
+        real = files.read_into
+        state = {"active": 0, "peak": 0}
+        lock = threading.Lock()
+
+        def observed(*args):
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            try:
+                time.sleep(0.02)                                       # let the other slab jobs overlap
+                return real(*args)
+            finally:
+                with lock:
+                    state["active"] -= 1
+
+        files.read_into = observed
+        pool.ensure([4])
+        self.assertGreaterEqual(state["peak"], 2)
+        self.assertEqual(pool.stats()["read_ops"], 3)                  # gate, up and down
+
+    def test_streamer_close_waits_for_pending_reads_before_closing_sources(self):
+        folder = tempfile.mkdtemp()
+        plan = {"capacity": 1, "experts": 1}
+        st = M.Streamer(folder, plan, log=lambda *_: None)
+        st.save_usage = lambda: None
+        finished = threading.Event()
+
+        def pending_read():
+            time.sleep(0.03)
+            finished.set()
+
+        st.readers.submit(pending_read)
+        st.close()
+        self.assertTrue(finished.is_set())
+        self.assertEqual(st.files.fds, {})
 
     def test_a_truncated_file_is_an_error_not_garbage(self):
         pool, _ = self.pool()
