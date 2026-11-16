@@ -1276,6 +1276,7 @@ struct HubModel: Identifiable {
     let compatible, local, fits: Bool
     var route = "native"
     var partial = false               // a download was started and not finished: resume, don't start over
+    var format = "mlx"                // mlx | gguf — shown as a label on the row
 }
 
 enum JobState { case queued, downloading, paused, failed }
@@ -1294,6 +1295,7 @@ final class DownloadJob: ObservableObject, Identifiable {
     fileprivate var autoResume = false         // the watchdog bounced it: come back as queued, not paused
     fileprivate var retries = 0
     fileprivate var lastTick = Date()
+    fileprivate var bestBytes: Double = -1     // most bytes ever reported: only more of them is real progress
     fileprivate var args: [String]             // the `llm` sub-command this job runs (pull or fetch)
     init(id: String, args: [String], fraction: Double = 0, state: JobState = .queued) {
         self.id = id; self.args = args; self.fraction = fraction; self.state = state
@@ -1308,6 +1310,10 @@ final class Downloader: ObservableObject {
     private var watchdog: Timer?
     private let stallSeconds: TimeInterval = 90     // no progress for this long → bounce the transfer
     private let maxRetries = 3
+    /// LLMBar is a menu-bar (LSUIElement) app: with its panel closed macOS App Nap throttles it and the
+    /// transfers it launched, which showed up as downloads crawling and then "stalling" for the watchdog.
+    /// Held while anything is queued or downloading.
+    private var activity: NSObjectProtocol?
 
     var active: Int { jobs.filter { $0.state == .downloading }.count }
     func job(_ repo: String) -> DownloadJob? { jobs.first { $0.id == repo } }
@@ -1335,7 +1341,7 @@ final class Downloader: ObservableObject {
     func pause(_ repo: String) {
         guard let j = job(repo) else { return }
         if j.state == .downloading { j.stoppedByUser = true; j.proc?.terminate() }
-        else if j.state == .queued { j.state = .paused }     // not launched yet: just hold it
+        else if j.state == .queued { j.state = .paused; pump() }     // not launched yet: just hold it
     }
 
     func resume(_ repo: String) {
@@ -1348,13 +1354,20 @@ final class Downloader: ObservableObject {
         guard let j = job(repo) else { return }
         onDone[repo] = nil
         if j.state == .downloading { j.stoppedByUser = true; j.proc?.terminate() }   // handler drops it
-        else { jobs.removeAll { $0.id == repo } }
+        else { jobs.removeAll { $0.id == repo }; pump() }
     }
 
     private func pump() {
         for j in jobs where j.state == .queued {
             if active >= maxParallel { break }
             launch(j)
+        }
+        let busy = jobs.contains { $0.state == .downloading || $0.state == .queued }
+        if busy && activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
+                                                            reason: "Downloading models")
+        } else if !busy, let a = activity {
+            ProcessInfo.processInfo.endActivity(a); activity = nil
         }
     }
 
@@ -1364,6 +1377,7 @@ final class Downloader: ObservableObject {
         p.executableURL = URL(fileURLWithPath: Paths.shared.root + "/llm")
         p.arguments = j.args
         p.currentDirectoryURL = URL(fileURLWithPath: Paths.shared.root)
+        p.qualityOfService = .userInitiated            // not background QoS: that throttles network and disk I/O
         var env = ProcessInfo.processInfo.environment
         env["LLM_HOME"] = Paths.shared.home
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -1385,7 +1399,11 @@ final class Downloader: ObservableObject {
                         // from bouncing a transfer that's working fine), just without a fraction to show
                         if t > 0 { j.fraction = d / t }
                         j.file = parts.count > 3 ? parts[3] : ""
-                        j.lastTick = Date()                   // progress → not stalled
+                        j.lastTick = Date()                   // alive (a restart or a checksum also report)
+                        if d > j.bestBytes {                  // new bytes: the stalls in a row start over
+                            j.bestBytes = d
+                            j.retries = 0
+                        }
                     } else if line.contains("✗") || line.lowercased().contains("error") {
                         j.error = line
                     }
@@ -1639,12 +1657,19 @@ struct ModelsTab: View {
                     .onHover { inside in hoverRow = inside ? m.path : (hoverRow == m.path ? nil : hoverRow) }
                 }
             }
-            // Leftover downloads from disk, not from the search box — stays listed across searches and
-            // app restarts until resumed to completion or removed, so an interrupted download is never lost.
-            let shown = partials.filter { dl.job($0.id) == nil }     // a job already in the list above shows there instead
-            if !shown.isEmpty {
+            // Downloads get a block of their own, above the search: what is running, queued or paused, then
+            // leftovers found on disk (not from the search box) — listed across searches and app restarts
+            // until resumed to completion or removed, so an interrupted download is never lost in the results.
+            let shown = partials.filter { dl.job($0.id) == nil }     // a job in the list shows as that job instead
+            if !dl.jobs.isEmpty || !shown.isEmpty {
                 Card(glow: HUD.amber) {
-                    Caption(text: L("Incomplete downloads", "Недокачанные загрузки"), color: HUD.amber)
+                    Caption(text: L("Downloads", "Загрузки"), color: HUD.amber)
+                    ForEach(dl.jobs) { job in
+                        DownloadRow(job: job, dl: dl)
+                    }
+                    if !shown.isEmpty && !dl.jobs.isEmpty {
+                        Hint(text: L("Not finished — press ▶ to resume", "Не докачаны — ▶ продолжит с того же места"))
+                    }
                     ForEach(shown) { p in
                         HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 2) {
@@ -1676,29 +1701,30 @@ struct ModelsTab: View {
                         .onChange(of: hubSource) { _ in results = []; searchError = nil }
                 }
                 HStack {
-                    TextField(L("Search MLX models", "Поиск MLX-моделей"), text: $query)
+                    TextField(L("Search MLX and GGUF models", "Поиск моделей MLX и GGUF"), text: $query)
                         .textFieldStyle(.roundedBorder).font(HUD.mono(12)).onSubmit(search)
                     Button(action: search) { Image(systemName: searching ? "hourglass" : "magnifyingglass").frame(width: 24, height: 20) }
                         .buttonStyle(NeonButton(color: HUD.phosphor)).disabled(searching)
                 }
-                Hint(text: L("MLX-tagged repos, most downloaded first. Mirrors: set HF_ENDPOINT; private repos: HF_TOKEN.",
-                             "Репозитории с тегом MLX, популярные сверху. Зеркало: HF_ENDPOINT; закрытые модели: HF_TOKEN."))
+                Hint(text: hubSource == "hf"
+                     ? L("MLX repos first, then GGUF (llama.cpp); most downloaded first. Mirrors: set HF_ENDPOINT; private repos: HF_TOKEN.",
+                         "Сначала MLX, затем GGUF (llama.cpp); популярные сверху. Зеркало: HF_ENDPOINT; закрытые модели: HF_TOKEN.")
+                     : L("MLX repos on ModelScope, most downloaded first.", "MLX-репозитории на ModelScope, популярные сверху."))
                 if let err = searchError { Text(err).font(HUD.mono(10)).foregroundColor(HUD.magenta) }
-                ForEach(dl.jobs) { job in
-                    DownloadRow(job: job, dl: dl)
-                }
                 ForEach(results) { r in
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
                             MarqueeText(text: r.id, font: .system(size: 11, weight: .medium), color: HUD.text,
                                         active: hoverRow == r.id)
                             HStack(spacing: 6) {
+                                badge(r.format == "gguf" ? "GGUF" : "MLX", r.format == "gguf" ? HUD.magenta : HUD.cyan)
                                 badge(r.size.map { String(format: "%.1f GB", $0) } ?? "? GB", HUD.dim)
                                 badge("⬇ \(r.downloads >= 1000 ? "\(r.downloads / 1000)K" : "\(r.downloads)")", HUD.dim)
                                 switch r.route {
                                 case "native": badge(L("engine ✓", "движок ✓"), HUD.phosphor)
                                 case "ptq1": badge(L("1.75-bit · experimental", "1.75 бит · эксперим."), HUD.cyan)
                                 case "mlxlm": badge(L("via mlx-lm", "через mlx-lm"), HUD.cyan)
+                                case "gguf": badge("llama.cpp", HUD.phosphor)
                                 default: badge(L("not supported", "не поддерживается"), HUD.dim)
                                 }
                                 if r.size != nil { badge(r.fits ? L("fits RAM", "влезет") : L("too big", "не влезет"), r.fits ? HUD.cyan : HUD.magenta) }
@@ -1708,10 +1734,18 @@ struct ModelsTab: View {
                         Spacer()
                         if r.local {
                             Text(L("HAVE", "ЕСТЬ")).font(HUD.mono(9, .semibold)).foregroundColor(HUD.phosphor)
-                        } else if dl.job(r.id) != nil {        // already downloading/queued/paused: shown in the list above
+                        } else if let j = dl.job(r.id), j.state == .downloading || j.state == .queued {
+                            // running or waiting for a slot: its controls are in the Downloads block
                             Image(systemName: "arrow.down.circle.fill").font(.system(size: 16)).foregroundColor(HUD.dim)
+                                .help(L("Downloading — see Downloads above", "Качается — см. «Загрузки» выше"))
+                        } else if let j = dl.job(r.id) {         // paused or failed: resume right here too
+                            Button(action: { dl.resume(j.id) }) { Image(systemName: "play.circle") }
+                                .buttonStyle(.plain).font(.system(size: 16)).foregroundColor(HUD.phosphor)
+                                .help(L("Resume the download", "Докачать"))
                         } else {
-                            Button(action: { dl.start(r.id) { e.loadModels(); search() } }) { Image(systemName: "arrow.down.circle") }
+                            Button(action: { dl.start(r.id) { e.loadModels(); search(); refreshPartials() } }) {
+                                Image(systemName: r.partial ? "play.circle" : "arrow.down.circle")
+                            }
                                 .buttonStyle(.plain).font(.system(size: 16)).foregroundColor(r.compatible ? HUD.phosphor : HUD.dim)
                                 .help(r.partial ? L("Resume the download", "Докачать")
                                       : (r.compatible ? L("Download (resumable)", "Скачать (с докачкой)")
@@ -1723,6 +1757,7 @@ struct ModelsTab: View {
                 }
             }
         }.onAppear { if results.isEmpty { search() }; refreshPartials() }
+        .onChange(of: dl.jobs.count) { _ in refreshPartials() }   // a removed job may leave files to resume
     }
 
     func badge(_ t: String, _ c: Color) -> some View {
@@ -1744,7 +1779,8 @@ struct ModelsTab: View {
             results = arr.map {
                 HubModel(id: $0["id"] as? String ?? "?", downloads: $0["downloads"] as? Int ?? 0, size: $0["size"] as? Double,
                          compatible: $0["compatible"] as? Bool ?? false, local: $0["local"] as? Bool ?? false, fits: $0["fits"] as? Bool ?? false,
-                         route: $0["route"] as? String ?? "native", partial: $0["partial"] as? Bool ?? false)
+                         route: $0["route"] as? String ?? "native", partial: $0["partial"] as? Bool ?? false,
+                         format: $0["format"] as? String ?? "mlx")
             }
         }
     }

@@ -540,8 +540,10 @@ class FakeHub(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/models":
+            kind = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("filter", [""])[0]
             return self.send(200, json.dumps([{"id": r, "downloads": v["downloads"], "likes": 1, "tags": v["tags"]}
-                                              for r, v in REPOS.items()]).encode())
+                                              for r, v in sorted(REPOS.items(), key=lambda kv: -kv[1]["downloads"])
+                                              if not kind or kind in v["tags"]]).encode())
         if path.startswith("/api/models/"):
             repo = path[len("/api/models/"):]
             if repo not in REPOS:
@@ -720,6 +722,62 @@ class TestHub(State):
         # a second pull finds everything complete and fetches nothing new
         ok2, _ = quiet(llm.hf_pull, "org/native-4bit")
         self.assertTrue(ok2)
+
+    def test_search_lists_mlx_first_then_gguf_and_labels_each_row(self):
+        res = llm.hf_search("x")
+        kinds = [r["format"] for r in res]
+        self.assertEqual(kinds, sorted(kinds, key=lambda k: k == "gguf"))    # every MLX row before any GGUF row
+        by = {r["id"]: r for r in res}
+        self.assertEqual(by["org/gguf-only"]["format"], "gguf")             # despite the most downloads
+        self.assertEqual(by["org/mlx-and-gguf"]["format"], "mlx")
+        self.assertEqual(len(res), len(by))                                  # a repo in both listings shows once
+        self.assertIn("org/gguf-only", [r["id"] for r in llm.hf_search("x", fmt="gguf")])
+
+    def test_resuming_does_not_hash_finished_files_again(self):
+        # re-verifying a multi-GB shard on every resume printed no progress for minutes, and LLMBar's stall
+        # watchdog killed the resumed transfer before it fetched anything
+        ok, _ = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertTrue(ok)
+        with mock.patch.object(llm, "_sha256", side_effect=AssertionError("hashed again")):
+            ok, out = quiet(llm.hf_pull, "org/native-4bit", True)
+        self.assertTrue(ok, out)
+
+    def test_a_same_size_file_with_other_content_is_fetched_again(self):
+        # a shard replaced in place by a revision of the same size, or a damaged file: size alone proves nothing
+        ok, _ = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertTrue(ok)
+        dest = llm._pull_dest("org/native-4bit")
+        os.remove(os.path.join(dest, llm.VERIFIED_MANIFEST))          # e.g. a folder from an older pull
+        with open(os.path.join(dest, "model.safetensors"), "wb") as f:
+            f.write(bytes(len(WEIGHTS)))
+        ok, _ = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertTrue(ok)
+        with open(os.path.join(dest, "model.safetensors"), "rb") as f:
+            self.assertEqual(f.read(), WEIGHTS)
+
+    def test_progress_is_reported_before_the_first_byte_of_a_resume(self):
+        dest = llm._pull_dest("org/glm-mlx")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "config.json"), "wb") as f:
+            f.write(CONFIG)
+        _, out = quiet(llm.hf_pull, "org/glm-mlx", True)
+        first = [l for l in out.splitlines() if l.startswith("PROGRESS")][0]
+        self.assertGreaterEqual(int(first.split()[1]), len(CONFIG))          # what was on disk shows at once
+
+    def test_an_interrupted_pull_stays_unfinished_even_without_a_part_file(self):
+        dest = llm._pull_dest("org/glm-mlx")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "config.json"), "wb") as f:
+            f.write(CONFIG)
+        with open(os.path.join(dest, llm.PULL_MARKER), "w") as f:
+            f.write("{}")
+        self.assertEqual([p["id"] for p in llm.scan_partial_downloads()], ["org/glm-mlx"])
+        self.assertEqual(llm.install_state("org/glm-mlx"), "partial")
+        ok, _ = quiet(llm.hf_pull, "org/glm-mlx")
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(os.path.join(dest, llm.PULL_MARKER)))
+        self.assertEqual(llm.scan_partial_downloads(), [])
+        self.assertEqual(llm.install_state("org/glm-mlx"), "complete")
 
     def test_progress_mode_prints_machine_readable_lines(self):
         _, out = quiet(llm.hf_pull, "org/glm-mlx", True)

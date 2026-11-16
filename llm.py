@@ -621,6 +621,8 @@ def gguf_native(cfg, m):
     an image projector, and an architecture / quantization / tokenizer that decoder implements."""
     if m.get("route") != "gguf" or not cfg.get("gguf_native", True) or m.get("vision"):
         return False
+    if os.environ.get("LLM_GGUF_RUNTIME", "auto").lower() in ("inferssd", "llama"):
+        return False                      # the diagnostic override names another runtime: honour it before ours
     path = m["path"]
     if _SPLIT_RE.search(path) or not os.path.isfile(path):
         return False
@@ -1502,12 +1504,59 @@ def inspect_cmd(cfg, args):
     return True
 
 
-def web_cmd(args):
+def web_research_cmd(cfg, question, mode="smart", focus="auto", as_json=False):
+    """`./llm web research "<question>" [--mode quick|smart|deep] [--focus …] [--json]`: several queries over the
+    sources that suit the question, the best pages read, an answer with checked citations by the running model —
+    or, with no model running, the evidence itself with its sources."""
+    from harness import research
+    model = None
+    if health(cfg):
+        from ui.agentloop import complete
+        model = lambda messages, max_tokens: complete(cfg["port"], messages, max_tokens)
+    quiet = as_json or not TTY
+    progress = None if quiet else (lambda stage, text, **info: print(DIM("· " + text), flush=True))
+    result = research.run(question, mode=mode, focus=focus, model=model, progress=progress)
+    text = None
+    if model is not None and result["ledger"].items:
+        try:
+            text = research.answer(result, model)
+        except Exception as e:                       # a dropped or malformed stream: the evidence still stands
+            text = None
+            result["errors"]["model"] = f"{type(e).__name__}: {e}"[:200]
+    if as_json:
+        print(json.dumps({**research.as_json(result), "answer": text}, ensure_ascii=False))
+    elif text:
+        print("\n" + text)
+    else:
+        print(research.report(result))
+    return result["state"] in ("complete", "partial")
+
+
+def web_cmd(args, cfg=None):
     """`./llm web search "<query>" [--n 4] [--read 2]`: one JSON line {"query", "results": [{title, url, snippet}],
     "pages": [{url, text}]} — what the voice chat adds to a question that needs fresh facts. Failures come
-    back as {"error": ...}, never as a traceback: the caller is an app."""
+    back as {"error": ...}, never as a traceback: the caller is an app. `./llm web research …`: see
+    web_research_cmd."""
     from concurrent.futures import ThreadPoolExecutor
     from harness import web
+    if args[:1] == ["research"]:
+        mode, focus, as_json, words, i = "smart", "auto", False, [], 1
+        while i < len(args):                        # only a flag's own value is consumed, never a word of the question
+            if args[i] in ("--mode", "--focus") and i + 1 < len(args):
+                mode, focus = (args[i + 1], focus) if args[i] == "--mode" else (mode, args[i + 1])
+                i += 2
+                continue
+            if args[i] == "--json":
+                as_json = True
+            else:
+                words.append(args[i])
+            i += 1
+        question = " ".join(words).strip()
+        if not question:
+            print(T("Usage:") + ' ./llm web research "<question>" [--mode quick|smart|deep] '
+                  '[--focus auto|web|docs|academic|news|discussions] [--json]')
+            return False
+        return web_research_cmd(cfg or load_cfg(), question[:600], mode, focus, as_json)
     words, opts, i = [], {}, 0
     while i < len(args):
         if args[i] in ("--n", "--read") and i + 1 < len(args):
@@ -2368,6 +2417,18 @@ def chat(cfg, system="", params=None):
         if s in ("/clear", "/new"):
             msgs, session = [], store.new_session()
             print(DIM(T("History cleared.") if s == "/clear" else T("New chat."))); continue
+        if s.split()[0] in ("/skills", "/skill"):
+            # saved skills (harness/skills.py): the folder the chat was started from is the project
+            from harness import skills
+            try:
+                reply, follow = skills.command(s, os.environ.get("LLM_CWD") or None)
+            except skills.SkillError as e:
+                print(R(str(e))); continue
+            if follow:      # writing a skill from the conversation needs the agent's save_skill tool
+                print(Y(T("Saving a skill from the conversation needs the agent: ./llm agent or the code editor.")))
+            else:
+                print(DIM(reply))
+            continue
         if s == "/history":
             lines = store.listing(sessions, session["id"])
             print("\n".join(DIM(l) for l in lines) if lines else DIM(T("No saved chats yet."))); continue
@@ -2445,6 +2506,7 @@ def chat(cfg, system="", params=None):
             print(Y(T("Video and music generation are not implemented in this engine yet.")))
             continue
         resend = s == "/retry"
+        turn_content = None                          # what this turn sends in place of the stored user message
         if resend:                                   # re-send the last question (after an interrupted/looping answer)
             if msgs and msgs[-1]["role"] == "assistant":
                 msgs.pop()
@@ -2454,6 +2516,10 @@ def chat(cfg, system="", params=None):
             question, attached = (last if isinstance(last, str) else T("the attached files")), []
         else:
             content, question, attached = s, s, []
+            from harness import skills
+            content, used = skills.expand(s, os.environ.get("LLM_CWD") or None)     # "$name" brings a skill in
+            if used:
+                print(DIM(T("Skill: {name}").format(name=", ".join(used))))
             if s.startswith("/image "):
                 _, path, *q = s.split(" ", 2)
                 path = os.path.expanduser(path)
@@ -2461,6 +2527,9 @@ def chat(cfg, system="", params=None):
                 question, attached = (q[0] if q else T("Describe the image.")), [os.path.abspath(path)]
                 content = [{"type": "image_url", "image_url": {"url": attached[0]}},
                            {"type": "text", "text": question}]
+            if used and isinstance(content, str):
+                # the skill is for this turn only: history keeps the request, the request carries the skill
+                turn_content, content = content, f"{s}\n(used skill: {', '.join(used)})"
             msgs.append({"role": "user", "content": content})
         ok = True
         turn_start = len(msgs) - 1          # this turn's user message; a failed turn discards from here on,
@@ -2470,7 +2539,9 @@ def chat(cfg, system="", params=None):
                                             # matching tool reply corrupts every later request in this chat
         for tool_turn in range(MAX_CHAT_TOOL_TURNS + 1):
             payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
-                       "messages": ([{"role": "system", "content": system}] if system else []) + msgs,
+                       "messages": ([{"role": "system", "content": system}] if system else []) +
+                                   [dict(x, content=turn_content) if turn_content is not None and i == turn_start else x
+                                    for i, x in enumerate(msgs)],
                        "chat_template_kwargs": {"enable_thinking": think,
                                                 **({"reasoning_effort": effort} if effort else {})},
                        **params}
@@ -2961,7 +3032,7 @@ def ms_search(query, limit=20):
         state = install_state(MS_PREFIX + rid)
         route = hub_route([*tags, "safetensors"])
         out.append({"id": MS_PREFIX + rid, "downloads": m.get("Downloads", 0), "likes": m.get("Stars", 0), "size": size,
-                    "route": route, "compatible": route != "none", "local": state == "complete",
+                    "format": "mlx", "route": route, "compatible": route != "none", "local": state == "complete",
                     "partial": state == "partial", "fits": size is not None and size + 2.0 <= RAM_GB * 0.75})
     return out
 
@@ -2977,6 +3048,8 @@ def install_state(repo, siblings=None):
     dest = _pull_dest(repo)
     if not os.path.isdir(dest):
         return "none"
+    if os.path.isfile(os.path.join(dest, PULL_MARKER)):
+        return "partial"
     if siblings and any(f["rfilename"].lower().endswith(".gguf") for f in siblings) and not any(
             f["rfilename"].lower().endswith(".safetensors") for f in siblings):
         files, _, _ = gguf.pick_files(siblings)
@@ -2997,6 +3070,17 @@ def install_state(repo, siblings=None):
     has = os.path.isfile(os.path.join(dest, "config.json")) and any(
         n.endswith(".safetensors") for n in os.listdir(dest))
     return "complete" if has and not parts else "partial"
+
+
+PULL_MARKER = ".llm-pull"   # sits in a repo folder from the start of a pull until it completes
+VERIFIED_MANIFEST = ".llm-verified.json"   # {file: sha256} of the files whose checksum a pull has checked
+
+
+def _unfinished(repo_dir):
+    """A pull started here and did not finish: its marker, or a leftover .part file (pulls made before the
+    marker existed)."""
+    return os.path.isfile(os.path.join(repo_dir, PULL_MARKER)) or any(
+        f.endswith(".part") for _, _, fs in os.walk(repo_dir) for f in fs)
 
 
 def scan_partial_downloads():
@@ -3021,8 +3105,7 @@ def scan_partial_downloads():
                 continue
             sizes = [os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(repo_dir) for f in fs
                      if os.path.isfile(os.path.join(d, f))]
-            has_part = any(f.endswith(".part") for _, _, fs in os.walk(repo_dir) for f in fs)
-            if has_part:
+            if _unfinished(repo_dir):
                 out.append({"id": f"{org}/{name}", "gb": round(sum(sizes) / 2**30, 2)})
     return out
 
@@ -3031,7 +3114,7 @@ def forget_partial(repo, assume_yes=False):
     """Delete an unfinished download's folder from the hub cache. Refuses anything that is not literally
     sitting on a .part file, so this can never remove a complete model regardless of its format."""
     dest = _pull_dest(repo)
-    if not os.path.isdir(dest) or not any(n.endswith(".part") for _, _, fs in os.walk(dest) for n in fs):
+    if not os.path.isdir(dest) or not _unfinished(dest):
         print(R(T("Not an unfinished download: {repo}").format(repo=repo)))
         return False
     if not assume_yes and not ask_yn(R(T("Delete the unfinished download of {repo}?").format(repo=repo)), False):
@@ -3041,24 +3124,49 @@ def forget_partial(repo, assume_yes=False):
     return True
 
 
-def hf_search(query, limit=20, source="hf", fmt="mlx"):
-    """MLX (or, with fmt="gguf", GGUF) models on the hub, most downloaded first, with size and engine
-    compatibility. source="modelscope" searches ModelScope instead (ids come back with the "ms:" prefix)."""
+def hf_search(query, limit=20, source="hf", fmt="all"):
+    """Models on the hub, most downloaded first, with size and engine compatibility. fmt="all" (the
+    default) lists MLX repos first and GGUF repos after them; "mlx" / "gguf" ask for one kind only.
+    Every row says which kind it is ("format"). source="modelscope" searches ModelScope instead (ids come
+    back with the "ms:" prefix; MLX only)."""
     if source == "modelscope":
         return ms_search(query, limit)
     from concurrent.futures import ThreadPoolExecutor
-    found = _hf(f"/api/models?search={urllib.parse.quote(query)}&filter={'gguf' if fmt == 'gguf' else 'mlx'}"
-                f"&sort=downloads&direction=-1&limit={limit}")
+    kinds = ["mlx", "gguf"] if fmt == "all" else [fmt]
+    q = urllib.parse.quote(query)
+    gguf_limit = max(8, limit // 2) if fmt == "all" else limit
+
+    def listing(kind):
+        n = gguf_limit if kind == "gguf" else limit
+        return _hf(f"/api/models?search={q}&filter={kind}&sort=downloads&direction=-1&limit={n}")
+    with ThreadPoolExecutor(2) as ex:
+        lists = list(ex.map(listing, kinds))
+    found, seen = [], set()
+    for kind, ms in zip(kinds, lists):                  # MLX first, then GGUF, each most downloaded first
+        for m in ms:
+            if m["id"] not in seen:
+                seen.add(m["id"])
+                found.append((kind, m))
+    if fmt == "all":                                     # MLX rows on top even when a listing mixes kinds
+        found.sort(key=lambda km: hub_route(km[1].get("tags")) == "gguf")
 
     def probe(repo):
-        """(size in GB, storage format the engine can't read yet?, install state) for one repo."""
+        """(size in GB, storage format the engine can't read yet?, install state) for one repo.
+        A GGUF repo's size is the one quantization a pull takes, not every file in it."""
         try:
             info = _hf(f"/api/models/{repo}?blobs=true", timeout=15)
         except Exception:
             return None, False, install_state(repo)
-        names = {f["rfilename"] for f in info.get("siblings", [])}
-        size = sum(f.get("size") or 0 for f in info.get("siblings", [])
-                   if not f["rfilename"].lower().endswith(PULL_SKIP)) / 2**30
+        sib = info.get("siblings", [])
+        names = {f["rfilename"] for f in sib}
+        if any(n.lower().endswith(".gguf") for n in names) and not any(n.lower().endswith(".safetensors") for n in names):
+            try:
+                picked = gguf.pick_files([f for f in sib if f["rfilename"].lower().endswith(".gguf")])[0]
+                size = sum(f.get("size") or 0 for f in picked) / 2**30 or None
+            except gguf.GGUFError:
+                size = None
+            return size, False, install_state(repo, sib)
+        size = sum(f.get("size") or 0 for f in sib if not f["rfilename"].lower().endswith(PULL_SKIP)) / 2**30
         unsupported = False
         if "jang_config.json" in names:  # JANG bundles may use packed storage that needs expansion
             try:
@@ -3066,15 +3174,17 @@ def hf_search(query, limit=20, source="hf", fmt="mlx"):
                 unsupported = bool(rt.get("requires_jang_affine1_expansion"))  # packed ternary runs (ptq1)
             except Exception:
                 pass
-        return size, unsupported, install_state(repo, info.get("siblings", []))
+        return size, unsupported, install_state(repo, sib)
     with ThreadPoolExecutor(8) as ex:
-        probes = list(ex.map(probe, [m["id"] for m in found]))
-    sizes = [p_[0] for p_ in probes]
-    return [{"id": m["id"], "downloads": m.get("downloads", 0), "likes": m.get("likes", 0), "size": sz,
-             "route": "none" if pr[1] else hub_route(m.get("tags")),
-             "compatible": hub_route(m.get("tags")) != "none" and not pr[1],
-             "local": pr[2] == "complete", "partial": pr[2] == "partial",
-             "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75} for m, sz, pr in zip(found, sizes, probes)]
+        probes = list(ex.map(probe, [m["id"] for _, m in found]))
+    out = []
+    for (_, m), (sz, unsupported, state) in zip(found, probes):
+        route = "none" if unsupported else hub_route(m.get("tags"))   # a repo with MLX weights is pulled as MLX
+        out.append({"id": m["id"], "downloads": m.get("downloads", 0), "likes": m.get("likes", 0), "size": sz,
+                    "format": "gguf" if route == "gguf" else "mlx", "route": route, "compatible": route != "none",
+                    "local": state == "complete", "partial": state == "partial",
+                    "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75})
+    return out
 
 
 class _SameHostAuth(urllib.request.HTTPRedirectHandler):
@@ -3093,23 +3203,28 @@ class _SameHostAuth(urllib.request.HTTPRedirectHandler):
 _DOWNLOAD_OPENER = urllib.request.build_opener(_SameHostAuth)
 
 
-def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, retries=6):
+def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, retries=6, trusted=False):
     """Fetch `url` into `path`, resuming with Range, and never leave a short or corrupt file
     under the final name. `size` / `sha256` come from the hub listing (0 / None = unknown).
 
     urllib's read(n) returns b"" on a connection that closed early instead of raising, so a
     clean end of the read loop proves nothing: the size is checked and, when short, the
     transfer is resumed. A server that answers a Range request with 200 (the whole file)
-    would otherwise be appended to the partial — start over in that case."""
+    would otherwise be appended to the partial — start over in that case.
+
+    `trusted`: a full-size file under the final name was already verified against this `sha256` (hf_pull keeps
+    a manifest of verified hashes), so it is not hashed again — re-hashing every shard on each resume took minutes
+    with no progress and let LLMBar's stall watchdog kill the transfer. Anything else full-size is hashed once,
+    with a heartbeat, and downloaded again when it does not match (a shard replaced in place, a damaged file)."""
     on_chunk = on_chunk or (lambda n: None)
     part = path + ".part"
     if os.path.exists(path):
-        if (not size or os.path.getsize(path) == size) and not sha256:
-            return
         if size and os.path.getsize(path) == size:
-            if _sha256(path) == sha256:
+            if not sha256 or trusted or _sha256(path, lambda: on_chunk(0)) == sha256:
                 return
-            os.remove(path)  # same size, wrong content
+            os.remove(path)                    # same size, other content: fetch it again
+        elif not size:
+            return
         else:
             os.replace(path, part)  # a short file under the final name: resume it
     attempt = 0
@@ -3147,18 +3262,20 @@ def download_file(url, path, size, sha256=None, headers=None, on_chunk=None, ret
         attempt += 1
         if attempt > retries:
             raise OSError(f"the connection kept closing early ({got} of {size} bytes)")
-    if sha256 and _sha256(part) != sha256:
+    if sha256 and _sha256(part, lambda: on_chunk(0)) != sha256:   # heartbeat: verifying is not a stall
         os.remove(part)
         raise ValueError("checksum mismatch — the partial download was discarded, run it again")
     os.replace(part, path)
 
 
-def _sha256(path):
+def _sha256(path, beat=None):
     import hashlib
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while chunk := f.read(1 << 24):
             h.update(chunk)
+            if beat:
+                beat()
     return h.hexdigest()
 
 
@@ -3199,16 +3316,24 @@ def hf_pull(repo, progress=False, revision=None):
         print(R(T("Not enough disk space: need {need:.1f} GB, free {free:.1f} GB").format(need=total / 2**30, free=free / 2**30)))
         return False
     print(T("Downloading {repo} ({size:.1f} GB) → {dest}").format(repo=repo, size=total / 2**30, dest=dest), flush=True)
+    with open(os.path.join(dest, PULL_MARKER), "w") as fm:
+        json.dump({"repo": repo, "bytes": total}, fm)
+    manifest_path = os.path.join(dest, VERIFIED_MANIFEST)
+    try:
+        with open(manifest_path) as fm:
+            verified = json.load(fm)
+    except (OSError, ValueError):
+        verified = {}
     state = {"done": 0, "last": 0.0}
     t0, rev = time.time(), info.get("sha", "main")
     headers = {"User-Agent": "AI-llm-Engine"}
     if os.environ.get("HF_TOKEN") and source == "hf":      # the Hugging Face token goes to Hugging Face only
         headers["Authorization"] = "Bearer " + os.environ["HF_TOKEN"]
 
-    def tick(n, name):
+    def tick(n, name, force=False):
         state["done"] += n
         now = time.time()
-        if now - state["last"] > 0.5:
+        if force or now - state["last"] > 0.5:
             state["last"] = now
             if progress:
                 print(f"PROGRESS {min(state['done'], total)} {total} {name}", flush=True)
@@ -3228,17 +3353,32 @@ def hf_pull(repo, progress=False, revision=None):
             if os.path.exists(q):
                 state["done"] += min(os.path.getsize(q), size or os.path.getsize(q))
                 break
+        tick(0, name, force=True)          # what is already on disk shows at once, and counts as a heartbeat
         if source == "modelscope":
             url = (f"{MS_ENDPOINT}/api/v1/models/{urllib.parse.quote(rid)}/repo?Revision={rev}"
                    f"&FilePath={urllib.parse.quote(name)}")
         else:
             url = f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{urllib.parse.quote(name)}"
+        sha = (f.get("lfs") or {}).get("sha256")
         try:
-            download_file(url, path, size, (f.get("lfs") or {}).get("sha256"), headers,
-                          lambda n, name=name: tick(n, name))
+            download_file(url, path, size, sha, headers, lambda n, name=name: tick(n, name),
+                          trusted=bool(sha) and verified.get(name) == sha)
         except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as e:
             print("\n" + R(T("Download failed: {name}: {err}").format(name=name, err=e)))
             return False
+        if sha and verified.get(name) != sha:
+            verified[name] = sha                     # checked once: a later resume does not hash it again
+            try:
+                tmp = manifest_path + ".tmp"
+                with open(tmp, "w") as fm:
+                    json.dump(verified, fm)
+                os.replace(tmp, manifest_path)
+            except OSError:
+                pass
+    try:
+        os.remove(os.path.join(dest, PULL_MARKER))
+    except OSError:
+        pass
     if progress:
         print(f"PROGRESS {total} {total} done", flush=True)
     print("\n" + G(T("Downloaded: {dest}").format(dest=dest)))
@@ -3734,7 +3874,7 @@ def read_doc_cmd(cfg, args):
 def search_cmd(query, as_json=False, source="hf"):
     if not query:
         print_lumo_tip("search")
-        query = input(T("Search MLX models on Hugging Face") + " › ").strip()
+        query = input(T("Search models on Hugging Face (MLX first, then GGUF)") + " › ").strip()
     try:
         res = hf_search(query, source=source)
     except Exception as e:
@@ -3745,7 +3885,8 @@ def search_cmd(query, as_json=False, source="hf"):
         size = f"{m['size']:.1f} GB" if m["size"] is not None else "?"
         ok = {"native": G(T("✓ engine")), "ptq1": Y(T("✓ engine (1.75-bit, experimental)")),
               "mlxlm": CY(T("via mlx-lm"))}.get(m["route"], DIM(T("not supported")))
-        print(f" {i:>2}) {B(m['id'])}  {size}  ⬇{m['downloads']}  {ok}" + (G("  " + T("downloaded")) if m["local"] else ""))
+        ok = {"gguf": CY(T("via llama.cpp"))}.get(m["route"], ok)
+        print(f" {i:>2}) {B(m['id'])}  {DIM(m.get('format', 'mlx').upper())}  {size}  ⬇{m['downloads']}  {ok}" + (G("  " + T("downloaded")) if m["local"] else ""))
     if sys.stdin.isatty() and res:
         ch = input(T("Number to download (Enter to cancel)") + " › ").strip()
         if ch.isdigit() and 1 <= int(ch) <= len(res):
@@ -4538,7 +4679,7 @@ COMMANDS = [
     Command("models", "Models", "List models found locally.", "./llm models", ("--json", "--names")),
     Command("use", "Models", "Select the active model by list number or name (restarts a running engine).",
             "./llm use <#|name>", ()),
-    Command("search", "Models", "Search MLX models on Hugging Face (or ModelScope).",
+    Command("search", "Models", "Search models on Hugging Face (or ModelScope): MLX first, then GGUF.",
             "./llm search <query> [--json] [--source modelscope]", ("--json", "--source")),
     Command("pull", "Models", "Download a model (resumable) into the Hugging Face cache.",
             "./llm pull <org/name>", ("--progress",)),
@@ -4603,7 +4744,9 @@ COMMANDS = [
     Command("calibrate", "Setup & maintenance", "Find the largest context that actually prefills on this Mac.",
             "./llm calibrate [--apply]", ("--apply",)),
     Command("web", "Setup & maintenance", "Web search + the top pages as one JSON line (what the voice chat "
-            "uses).", './llm web search "<query>" [--n 4] [--read 2]', ("--n", "--read")),
+            "uses); `research`: several sources, pages read, a cited answer.",
+            './llm web search "<query>" [--n 4] [--read 2]  |  ./llm web research "<question>" [--mode quick|smart|deep]',
+            ("--n", "--read", "--mode", "--focus", "--json")),
 
     Command("fav", "Advanced", "Star a model (favourites lead every list and model menu).",
             "./llm fav [<#|name>] [--on|--off|--next]", ("--on", "--off", "--next")),
@@ -4755,7 +4898,7 @@ def main():
     os.environ.update(network_env(cfg))      # hub search, downloads and the agent's web tools follow the proxy
     actions = {
         "check": lambda: check_cmd(cfg, "--json" in sys.argv),
-        "web": lambda: web_cmd(sys.argv[2:]),
+        "web": lambda: web_cmd(sys.argv[2:], cfg),
         "inspect": lambda: inspect_cmd(cfg, sys.argv[2:]),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
             setup_gguf() if "--gguf" in sys.argv else (
