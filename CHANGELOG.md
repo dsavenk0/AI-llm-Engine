@@ -2,6 +2,43 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## 1.4.0 — 16 November
+
+### Added
+- **Web research.** With the web switched on, the assistant can research a question across several sources at once
+  — DuckDuckGo, Wikipedia, GitHub, arXiv, OpenAlex, Hacker News and Stack Exchange through their public APIs — read
+  the most relevant pages and PDFs, and answer with numbered sources `[S1]…` that link to what was actually read.
+  Quick, Smart and Deep modes set how far it may go; it stops as soon as the question is answered. The code editor's
+  chat shows each stage live (planning, searching, reading, checking). Also from the terminal:
+  `./llm web research "<question>" --mode smart`. No search server or extra model is needed.
+- **Saved skills.** Reusable instructions in the Agent Skills format used by Codex and Claude Code (`SKILL.md`),
+  available in the code editor's chat, the terminal agent and `./llm chat`. Manage them from the chat — `/skills`,
+  `/skill new|show|save|rm`, `$name` to use one — or simply ask the assistant to create, change or delete a skill;
+  every save and deletion is confirmed first.
+- **Qwen3.5, Qwen3.6 and Qwen3.8 GGUF files run on the built-in decoder**, dense and mixture-of-experts (the
+  35B-A3B models, whose experts can stream from the SSD); no llama.cpp or InferSSD needed. Output matches llama.cpp
+  token for token on Qwen3.5-0.8B, and the MoE layers match mlx-lm's reference implementation. Multi-turn chats
+  with these models re-read the conversation each turn for now.
+- The built-in GGUF decoder reads the 1–3-bit i-quants (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S), so
+  Unsloth's dynamic quantizations no longer fall back to llama.cpp.
+- Experimental, off by default: `LLM_MOE_PREFETCH=auto` reads the next layer's likely experts ahead of time for
+  streamed MLX MoE models.
+
+### Changed
+- Model search lists MLX models first, then GGUF, each labeled **MLX** or **GGUF**, with the real size of the GGUF
+  quantization that will be downloaded.
+- Downloads have their own block in the Models tab: running, queued and paused downloads together with unfinished
+  ones found on disk, each with resume and remove.
+- Dynamic quantizations such as `UD-Q4_K_M` and split files are recognized by name, so the right files are
+  downloaded; quantization helper files (`imatrix`) are no longer offered.
+- `LLM_GGUF_RUNTIME=llama|inferssd` now also applies to files the built-in decoder could run.
+
+### Fixed
+- Resumed downloads no longer stall: already-finished files are not re-checked on every resume, progress shows
+  immediately, and the menu-bar app keeps full speed while its panel is closed.
+- An unfinished download is recognized even when no `.part` file is left, and a paused or partial model can be
+  resumed straight from the search results.
+
 ## 1.3.1 — 15 November
 
 ### Changed

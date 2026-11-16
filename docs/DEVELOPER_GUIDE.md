@@ -189,7 +189,11 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
   **Gemma 2** (soft-capped attention and logits, sliding window on every other layer) and **Gemma 3**
   (sliding-window layers, two rope bases, GeGLU), **Granite** and **MiniCPM** (with LongRoPE), and
   **mixture-of-experts** files (Mixtral-style, Qwen3-MoE, Granite-MoE: experts stay stacked and quantized, a token
-  runs only its top-k with `gather_qmm`). Quantizations `Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K F16 BF16 F32` plus
+  runs only its top-k with `gather_qmm`), and the **Qwen3.5 hybrid** in GGUF — `qwen35` (Qwen3.5 / 3.6 / 3.8 dense)
+  and `qwen35moe` (Qwen3.5 / 3.6 MoE with its gated shared expert): GatedDeltaNet layers with a recurrent state plus
+  gated attention, checked token for token against llama.cpp on Qwen3.5-0.8B and against mlx-lm's Qwen3.5-MoE.
+  A hybrid model's state cannot be rewound, so it runs without prompt-lookup speculation and a new turn re-reads
+  the conversation instead of trimming to the shared prefix. Quantizations `Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K F16 BF16 F32` plus
   `Q2_K Q3_K IQ4_NL IQ4_XS`; vocabularies are byte-level BPE or SentencePiece (incl. the dummy space prefix). The
   weights are repacked into MLX's affine quantization when loaded (Q4/Q5/Q8 exactly; Q6_K into 8 bits; Q2_K, Q3_K and
   the IQ4 types are decoded exactly — checked tensor by tensor against llama.cpp's own dequantization — then
@@ -366,6 +370,7 @@ and blink; model selection, search, settings, Knowledge, browser-assistant and e
 ./llm models | use <n>     discover / select models
 ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
 ./llm web search "<q>"     web search + the top pages as one JSON line (what the voice chat uses)
+./llm web research "<q>" [--mode quick|smart|deep] [--focus …] [--json]   cited multi-source research
 ./llm inspect [<#|name>]   what is inside a model, from its headers: layers, storage types, bits per weight, biggest tensors
 ./llm read <file>          extract text from a PDF/DOCX/PPTX/HTML/text document (or OCR a scan/image) to attach as a source
 ./llm knowledge …          document libraries the chats can search: create, add, search, delete (see Knowledge)
@@ -505,11 +510,12 @@ Optional extras, each off until you ask (nothing is contacted or added to the pr
 
 | Command | What it does |
 |---|---|
-| `/web on` | `web_search` and `web_fetch`: search the internet (DuckDuckGo, no key; `LLM_SEARCH_URL` for a SearxNG) and read pages as clean text. Private/LAN addresses are refused; one question per session before anything goes out. |
+| `/web on` | `web_search` and `web_fetch`: search the internet (DuckDuckGo, no key; `LLM_SEARCH_URL` for a SearxNG) and read pages as clean text. Private/LAN addresses are refused; one question per session before anything goes out. Plus `web_research`: several queries at once over the sources that suit the question — DuckDuckGo, Wikipedia, GitHub, arXiv, OpenAlex, Hacker News, Stack Exchange, through their documented APIs (`GITHUB_TOKEN` optional) — merged, de-duplicated and ranked without a model, the best pages and PDFs read by their relevant passages, and numbered sources `[S1]…` the answer cites (an ID the model invents is dropped; a source only found, not read, is marked so). Modes `quick` / `smart` / `deep` are ceilings (queries, pages, rounds, seconds), not targets; the loaded model plans the queries and names what is still missing, without it one deterministic round is done. `web_search` takes an optional `focus` (`docs`, `academic`, `news`, `discussions`, `auto`). |
 | `/mcp add context7`, `/mcp on` | MCP servers from `.llm/mcp.json` (stdio or HTTP): Context7 for current library docs, [Stitch](https://stitch.withgoogle.com/) for UI designs (`/mcp add stitch`, key in `STITCH_API_KEY`). Switch whole servers or single tools; `/mcp` shows status and what the tool definitions cost per request. |
 | `/workers add openrouter`, `/workers on` | `delegate`: hand a self-contained sub-task to another model — any OpenAI-compatible endpoint (OpenAI, Anthropic, Gemini, a second local engine) or a CLI agent — configured in `.llm/workers.json`. Keys come from environment variables; the worker sees only the task and the files you approve, and each hand-off asks first. |
 | `/fix-tests [command]` | Runs the tests, gives the model only the failing tests with tracebacks, lets it edit (each edit still asks), re-runs. Stops on green, after 5 rounds, or when two attempts change nothing. |
 | `/memory`, `/remember <note>` | Standing project instructions from `.llm/memory.md`, `AGENTS.md` or `CLAUDE.md`. |
+| `/skills`, `/skill show\|new\|save\|rm`, `$name` | **Saved skills** in the Agent Skills format Codex and Claude Code use (a folder with `SKILL.md`: name, description, instructions; optional `scripts/`, `references/`). Found in `.llm/skills`, `.agents/skills`, `.claude/skills` of the project and `~/.llm/skills`, `~/.agents/skills` (other tools' folders such as `~/.codex/skills` or `~/.claude/skills` when named in `LLM_SKILLS_DIRS`); saved only to `.llm/skills` (project) or `~/.llm/skills` (personal). The prompt carries a short catalog; the assistant loads a skill with `use_skill` when the task matches, `$name` puts one into the turn, and you can ask in words to create, change or delete one — every save or delete is approved (a personal one even in `/auto`). `/skill save <name>` turns the conversation into a skill. |
 | automatic | `.llm/map.md` — a model-free map of the project (rebuilt only when files change) and `.llm/session.md` — the agent's own notes, saved on exit and read at start, so a restart does not re-scan the project. `/map` and `/save` do it on demand. |
 | `/compact` | Long sessions are compacted automatically at 70% of the context window; this does it now. |
 
@@ -555,9 +561,12 @@ Changes/git, Assistant, Problems, Terminal). Its theme is LLMBar's theme, one se
 - **Model:** the toolbar menu starts and stops the model and switches between the installed ones (the same
   `./llm start|stop|use`).
 - **Web:** the globe button (off by default) lets the assistant search the internet and read pages; every request is
-  shown in the conversation.
+  shown in the conversation. A `web_research` run shows its stages live in the activity row (planning, searching for
+  …, reading <sites>, checking what is missing, then how many pages were read and sources found).
 - **Pictures:** the assistant can draw (`generate_image`). On first use Chat asks before preparing MFLUX and fitting
   model weights; a skeleton reports progress, then becomes the downloadable picture saved under `.llm/images/`.
+- **Skills:** the same saved skills as the terminal agent (`/skills`, `/skill show|new|save|rm`, `$name` in the
+  message box, or ask in words); a save shows the skill as an approval card first, a deletion always asks.
 - **Assistant tools (MCP)** (opt-in module, *Assistant Tools (MCP)* in the Modules menu): connect MCP servers so the
   assistant can use their tools on the open project. A small catalog (context7, Stitch) and your own servers — a
   program over stdio (`command`/`args`) or a streamable-HTTP URL. The tools run with the project as their working
@@ -754,7 +763,7 @@ downloads one and records it as the Conductor's `vision` role. Apple Vision OCR 
 | native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
 | mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
-| GGUF, own decoder | llama / Qwen2 / Qwen3 / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
+| GGUF, own decoder | llama / Qwen2 / Qwen3 / Qwen3.5 hybrid (`qwen35`, `qwen35moe`) / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
 | GGUF, InferSSD | its explicitly profiled oversized DeepSeek 4.1 / Muse / Qwen 3.6 / Qwen 3.8 MoE architectures | optional, installed separately; never fetched by this project |
 | GGUF, llama.cpp | every other GGUF (other architectures, IQ1–IQ3, per-expert MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
 
@@ -820,6 +829,10 @@ known offsets, in parallel; the pool evicts the least-used expert, and the hot s
 next start is warm. `./llm models` shows such a model as “⇄ streams experts from the SSD” instead of “won't fit”.
 `LLM_MOE_STREAM=auto|on|off` (default auto: only when the model does not fit), `LLM_MOE_CACHE=<experts per
 layer>`, `LLM_MOE_DIRECT=1` (read around the file cache). `/health` reports the pool's hit rate and traffic.
+Experimental, off by default: `LLM_MOE_PREFETCH=auto|on|off` reads the next layer's likely experts while the
+current one computes (the next router applied to this layer's input; `LLM_MOE_PREFETCH_DEPTH` caps the ranks). It
+never changes an answer — a guess enters the pool only when the router picks it — and `/health` reports its
+`prefetch` counters; it stays off until `tests/bench_moe.py --prefetch off,auto` shows it helps on your model.
 Both MLX/safetensors and built-in GGUF routes report the source kind, cache hits and misses, evictions, source
 operations, throughput and resident pool size under `moe_stream`; compare throughput only when `source` matches.
 `tests/bench_moe.py` accepts either an MLX model folder or a `.gguf` file and starts every capacity with a cold

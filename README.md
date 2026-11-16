@@ -87,12 +87,15 @@ documents, Gmail drafts and Calendar events use narrow named operations and offe
 
 Use the compact menu-bar chat or speak naturally in LLM Voice. Conversations stay on the Mac. Ask for an image and
 LLMBar can prepare the optional local generator with your approval; vision models are selected the same way by
-what fits this Mac. Web search remains an explicit option rather than a hidden network dependency.
+what fits this Mac. Web search remains an explicit option rather than a hidden network dependency; when you switch
+it on, the assistant can research a question across several sources — the web, Wikipedia, GitHub, arXiv and
+developer forums — and answer with numbered links to the pages it actually read.
 
 ### Native code editor
 
-Open a project, ask questions about the code, plan a change and review edits before they are applied. The same
-local engine is also available to the editor or coding agent you already use.
+Open a project, ask questions about the code, plan a change and review edits before they are applied. Save the way
+you like recurring tasks done as skills — in the same `SKILL.md` format Codex and Claude Code use — and manage
+them from the chat. The same local engine is also available to the editor or coding agent you already use.
 
 ### Knowledge from your documents
 
