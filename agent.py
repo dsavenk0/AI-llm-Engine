@@ -27,7 +27,7 @@ import time
 import urllib.request
 
 import llm
-from harness import compact, memory, projectmap
+from harness import compact, memory, projectmap, skills
 from llm import B, CY, DIM, G, R, T, Y
 
 MAX_TOOL_OUTPUT = 12000
@@ -114,7 +114,7 @@ class Agent:
         self.context = (llm.health(cfg) or {}).get("context") or 0
 
     def system_prompt(self):
-        return (SYSTEM.format(root=self.root) + memory.system_block(self.root)
+        return (SYSTEM.format(root=self.root) + memory.system_block(self.root) + skills.system_block(self.root)
                 + projectmap.system_block(self.root) + memory.session_block(self.root))
 
     NOTES_PROMPT = (
@@ -141,7 +141,7 @@ class Agent:
         return bool(path)
 
     def tool_schemas(self):
-        return TOOLS + [schema for schema, _ in self.extra.values()]
+        return TOOLS + skills.TOOLS + [schema for schema, _ in self.extra.values()]
 
     def allow_web(self, what):
         if self.web_allowed is None:
@@ -152,9 +152,12 @@ class Agent:
     def set_web(self, on):
         from harness import web
         if on:
-            self.extra.update(web.tools(self.allow_web))
+            from ui.agentloop import complete
+            self.extra.update(web.tools(self.allow_web,
+                                        model=lambda messages, max_tokens: complete(self.cfg["port"], messages, max_tokens),
+                                        progress=lambda stage, text, **info: print(DIM("  · " + text))))
         else:
-            for name in ("web_search", "web_fetch"):
+            for name in ("web_search", "web_fetch", "web_research"):
                 self.extra.pop(name, None)
         self.web_allowed = None
 
@@ -282,6 +285,33 @@ class Agent:
         with open(full, "w") as f:
             f.write(content)
         return f"wrote {path} ({len(content.splitlines())} lines)"
+
+    # ── saved skills (harness/skills.py): read freely; a save or delete asks, outside the project even in /auto
+    def t_use_skill(self, name):
+        s = skills.find(name, self.root)
+        if s is None:
+            return f"error: no skill named {name!r} (available: {', '.join(x.name for x in skills.discover(self.root)) or 'none'})"
+        print(DIM(T("Skill: {name}").format(name=s.name)))
+        return skills.load(s)
+
+    def t_save_skill(self, name, description, instructions, scope="project"):
+        path, old, new = skills.plan_save(name, description, instructions, scope, self.root)
+        self.show_diff(path if scope == "personal" else os.path.relpath(path, self.root), old, new)
+        if not self.confirm(T("Save skill {name}?").format(name=name), force=True):      # never auto: see agentloop
+            return "user declined saving the skill"
+        skills.save(name, description, instructions, scope, self.root)
+        self.messages[0]["content"] = self.system_prompt()
+        return f"saved skill {name} ({path})"
+
+    def t_delete_skill(self, name):
+        s = skills.find(name, self.root)
+        if s is None:
+            return f"error: no skill named {name!r}"
+        if not self.confirm(T("Delete skill {name} ({path})?").format(name=s.name, path=s.folder), force=True):
+            return "user declined deleting the skill"
+        skills.delete(name, self.root)
+        self.messages[0]["content"] = self.system_prompt()
+        return f"deleted skill {name}"
 
     def t_edit_file(self, path, old, new):
         full = self.path(path)
@@ -435,7 +465,19 @@ class Agent:
         return False
 
     def turn(self, user_text):
-        self.messages.append({"role": "user", "content": user_text})
+        expanded, used = skills.expand(user_text, self.root)
+        if used:
+            print(DIM(T("Skill: {name}").format(name=", ".join(used))))
+        msg = {"role": "user", "content": expanded}
+        self.messages.append(msg)
+        try:
+            return self._turn()
+        finally:
+            # a skill is for this turn only: the history keeps the request, not the whole SKILL.md every time
+            if used:
+                msg["content"] = f"{user_text}\n(used skill: {', '.join(used)})"
+
+    def _turn(self):
         for _ in range(MAX_STEPS):
             self.compact()
             msg = self.complete()
@@ -455,7 +497,7 @@ class Agent:
         print(Y(T("Stopped after {n} steps.").format(n=MAX_STEPS)))
 
     def repl(self):
-        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /workers  /fix-tests  /compact  /map  /save  /memory  /remember  /exit"))
+        print(B(T("Agent in {root}").format(root=self.root)) + DIM("  /auto  /clear  /think on|off  /web  /mcp  /workers  /fix-tests  /compact  /map  /save  /memory  /remember  /skills  /exit"))
         while True:
             mode = (G("auto") if self.auto else "ask") + ("" if self.think else " · no-think")
             try:
@@ -522,6 +564,20 @@ class Agent:
                 continue
             if line == "/compact":
                 self.compact(force=True)
+                continue
+            if line.split()[0] in ("/skills", "/skill"):
+                try:
+                    reply, follow = skills.command(line, self.root)
+                except skills.SkillError as e:
+                    print(Y(str(e)))
+                    continue
+                print(DIM(reply))
+                self.messages[0]["content"] = self.system_prompt()
+                if follow:
+                    try:
+                        self.turn(follow)
+                    except KeyboardInterrupt:
+                        print(Y("\n[" + T("interrupted") + "]"))
                 continue
             if line == "/memory":
                 rel, text = memory.load(self.root)

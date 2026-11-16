@@ -17,6 +17,10 @@ func eq<T: Equatable>(_ a: T, _ b: T, _ what: String, line: Int = #line) {
 eq(AgentEvent.parse(line: #"data: {"type":"run","id":"abc"}"#), .run(id: "abc"), "run")
 eq(AgentEvent.parse(line: #"data: {"type":"delta","text":"Hel"}"#), .delta("Hel"), "delta")
 eq(AgentEvent.parse(line: #"data: {"type":"reasoning","text":"hmm"}"#), .reasoning("hmm"), "reasoning")
+eq(AgentEvent.parse(line: #"data: {"type":"web_progress","id":"c9","stage":"searching","text":"Searching: mlx moe","detail":"mlx moe"}"#),
+   .webProgress(id: "c9", stage: "searching", detail: "mlx moe", read: 0, found: 0, state: ""), "web progress")
+eq(AgentEvent.parse(line: #"data: {"type":"web_progress","id":"c9","stage":"done","text":"Done","detail":"","read":3,"found":9,"state":"complete"}"#),
+   .webProgress(id: "c9", stage: "done", detail: "", read: 3, found: 9, state: "complete"), "web progress done")
 eq(AgentEvent.parse(line: #"data: {"type":"tool","id":"c1","name":"search","category":"search","args":{"pattern":"def x","n":3}}"#),
    .tool(id: "c1", name: "search", category: "search", args: ["pattern": "def x", "n": "3"]), "tool with mixed arg types")
 eq(AgentEvent.parse(line: #"data: {"type":"approval","id":"c2","kind":"edit","path":"a.py","old":"x","new":"y"}"#),

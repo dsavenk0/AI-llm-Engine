@@ -13,6 +13,8 @@ enum AgentEvent: Equatable {
     case question(id: String, question: String, options: [String])
     case toolResult(id: String, name: String, ok: Bool, summary: String)
     case imageProgress(id: String, text: String)      // preparation / model download / diffusion stage
+    case webProgress(id: String, stage: String, detail: String, read: Int, found: Int, state: String)
+                                                      // web research: planning / searching / reading / checking / done
     case image(id: String, path: String, prompt: String) // a picture generated and saved in the project
     case note(String)                                 // a remark for the person (not part of the conversation)
     case knowledge([String])                          // the knowledge sources this reply was given ("a.pdf, p. 3")
@@ -49,6 +51,9 @@ enum AgentEvent: Equatable {
             return .imageProgress(id: s("id") ?? "", text: s("text") ?? "Creating image…")
         case "image": return s("path").map { .image(id: s("id") ?? "", path: $0, prompt: s("prompt") ?? "") }
         case "note": return s("text").map { .note($0) }
+        case "web_progress":
+            return .webProgress(id: s("id") ?? "", stage: s("stage") ?? "", detail: s("detail") ?? "",
+                                read: obj["read"] as? Int ?? 0, found: obj["found"] as? Int ?? 0, state: s("state") ?? "")
         case "knowledge": return .knowledge(obj["sources"] as? [String] ?? [])
         case "done": return .done
         case "error": return .error(s("message") ?? "error")

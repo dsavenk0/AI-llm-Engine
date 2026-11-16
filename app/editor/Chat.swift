@@ -337,6 +337,21 @@ final class ChatStore: ObservableObject {
         task = Task { await self.run(history: history, attached: [], inline: [], pictures: [], active: nil) }
     }
 
+    /// One web-research step in the person's language: what is being done and on what.
+    static func webLine(stage: String, detail: String, read: Int, found: Int, state: String) -> String {
+        let d = detail.isEmpty ? "" : ": " + detail
+        switch stage {
+        case "planning": return L("Planning the web search", "Планирую поиск в интернете") + (detail.isEmpty ? "" : " (\(detail))")
+        case "searching": return L("Searching the web", "Ищу в интернете") + d
+        case "reading": return L("Reading", "Читаю") + d
+        case "checking": return L("Checking what is still missing", "Проверяю, чего не хватает")
+        case "done":
+            let tail = state == "complete" || state.isEmpty ? "" : " (\(state))"
+            return L("Web research: \(read) pages read, \(found) sources found", "Поиск в интернете: прочитано страниц — \(read), найдено источников — \(found)") + tail
+        default: return L("Web research", "Поиск в интернете") + d
+        }
+    }
+
     private func apply(_ ev: AgentEvent) {
         mutate { s in
             func lastIs(_ k: ChatItem.Kind) -> Bool { s.items.last?.kind == k }
@@ -396,6 +411,13 @@ final class ChatStore: ObservableObject {
                     _ = applyImage(ev)
                 }
                 if !ok, !lastIs(.error) { s.items.append(ChatItem(kind: .error, text: summary)) }
+            case .webProgress(_, let stage, let detail, let read, let found, let state):
+                // the activity row says, live, that the web is being searched and what for; the steps keep the trail
+                if !lastIs(.activity) { s.items.append(ChatItem(kind: .activity)) }
+                let n = s.items.count - 1
+                let line = Self.webLine(stage: stage, detail: detail, read: read, found: found, state: state)
+                s.items[n].steps.append(line)
+                s.items[n].text = stage == "done" ? line : line + "…"
             case .note(let t): ws.say(t)
             case .knowledge(let sources):
                 s.items.append(ChatItem(kind: .activity,

@@ -743,6 +743,14 @@ class Handler(BaseHTTPRequestHandler):
         run.answer(key, {"approve": bool(body.get("approve")), "text": body.get("text", "")})
         return self._json(200, {"ok": True})
 
+    def _skill_answer(self, text):
+        """A skill command answered without the model, as the same event stream a run sends."""
+        self._headers(200, "text/event-stream; charset=utf-8", extra={"Connection": "close"})
+        self.close_connection = True
+        for ev in ({"type": "delta", "text": text}, {"type": "done"}):
+            self.wfile.write(b"data: " + json.dumps(ev, ensure_ascii=False).encode() + b"\n\n")
+        self.wfile.flush()
+
     def api_agent(self, P, q, body):
         messages = body.get("messages") or []
         if not messages or messages[-1].get("role") != "user":
@@ -750,6 +758,22 @@ class Handler(BaseHTTPRequestHandler):
         items = P.attachments(body.get("attachments")) + P.inline_attachments(body.get("inline"))
         pictures = P.images(body.get("images"))
         msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
+        # saved skills (harness/skills.py): "/skills", "/skill …" are answered here; "$name" puts a skill in the turn
+        skill_reply, skill_used = None, []
+        if isinstance(msgs[-1]["content"], str):
+            from harness import skills
+            try:
+                handled = skills.command(msgs[-1]["content"], P.root)
+            except skills.SkillError as e:
+                handled = (str(e), None)
+            if handled is not None:
+                skill_reply, follow = handled
+                if follow:
+                    msgs[-1]["content"] = follow
+                else:
+                    return self._skill_answer(skill_reply)
+            else:
+                msgs[-1]["content"], skill_used = skills.expand(msgs[-1]["content"], P.root)
         if items:
             msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{attachment_block(items)}"
         if pictures:
@@ -784,6 +808,10 @@ class Handler(BaseHTTPRequestHandler):
                 extra = memory.system_block(P.root)
             except Exception:
                 pass
+            if skill_reply:
+                emit({"type": "note", "text": skill_reply})
+            if skill_used:
+                emit({"type": "note", "text": "Skill: " + ", ".join(skill_used)})
             effort = body.get("effort")
             extra += agentloop.active_note(P, body.get("active"))
             if knowledge and knowledge.get("error"):

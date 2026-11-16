@@ -176,7 +176,7 @@ class TestReviewFixes(Base):
         names = lambda t: {x["function"]["name"] for x in t.schemas()}
         self.assertNotIn("web_search", names(off))
         self.assertLessEqual({"web_search", "web_fetch"}, names(on))
-        self.assertEqual(names(on) - {"web_search", "web_fetch"}, names(off))
+        self.assertEqual(names(on) - {"web_search", "web_fetch", "web_research"}, names(off))
         self.assertIn("unknown tool", off.call("web_search", {"query": "x"}, "c1"))
         self.assertNotIn("internet", agentloop.system_prompt("p"))
         self.assertIn("internet", agentloop.system_prompt("p", web=True))

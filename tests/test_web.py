@@ -139,7 +139,7 @@ class TestWeb(unittest.TestCase):
     def test_tools_ask_before_going_out_and_respect_no(self):
         asked = []
         t = web.tools(lambda what: asked.append(what) or False)
-        self.assertEqual(set(t), {"web_search", "web_fetch"})
+        self.assertEqual(set(t), {"web_search", "web_fetch", "web_research"})
         self.assertIn("declined", t["web_search"][1](query="anything"))
         self.assertIn("declined", t["web_fetch"][1](url=self.base + "/page"))
         self.assertEqual(len(asked), 2)

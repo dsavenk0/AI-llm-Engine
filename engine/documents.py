@@ -167,6 +167,11 @@ def _pdf(data):
     return _result(text, "pdf", pages=pages, note=note)
 
 
+def pdf_text(data):
+    """Text of a PDF given as bytes (downloaded, not a file): {"text", "kind", "pages", "truncated", "note"}."""
+    return _pdf(data)
+
+
 # ───────────────────────────── dispatch ─────────────────────────────
 def extract_text(path):
     """Extract plain text from a document. Returns a dict (see the module docstring); raises DocError when
