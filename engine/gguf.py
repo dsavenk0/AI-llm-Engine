@@ -164,9 +164,11 @@ def has_array(path, key):
 
 
 # ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0
-# Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_NL IQ4_XS
-NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 30}
-NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma2", "gemma3", "granite", "granitemoe", "qwen3moe", "minicpm")
+# Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_NL IQ4_XS and the codebook i-quants IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S
+NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 30,
+                16, 17, 18, 19, 21, 22, 29}          # + IQ2_XXS IQ2_XS IQ3_XXS IQ1_S IQ3_S IQ2_S IQ1_M
+NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma2", "gemma3", "granite", "granitemoe", "qwen3moe", "minicpm",
+                "qwen35", "qwen35moe")
 # pre-tokenizer rules verified against llama.cpp (engine/gguf_tokenizer.py keeps the expressions)
 NATIVE_PRE = ("default", "gpt2", "llama-bpe", "llama3", "smaug-bpe", "qwen2", "qwen35", "deepseek-r1-qwen",
               "smollm", "refact")
@@ -214,7 +216,7 @@ def native_support(path):
             names = tensor_names(path)
             if "blk.0.ffn_gate_exps.weight" not in names or "blk.0.ffn_gate_inp.weight" not in names:
                 return False, "mixture of experts stored per expert"
-            if "blk.0.ffn_gate_shexp.weight" in names:
+            if "blk.0.ffn_gate_shexp.weight" in names and arch != "qwen35moe":
                 return False, "mixture of experts with a shared expert"
         tk = meta.get("tokenizer.ggml.model")
         if tk == "llama":                              # SentencePiece (Gemma, Mistral, MiniCPM): scored pieces
@@ -256,9 +258,37 @@ def vendor_types(path):
     return {t for t in tensor_types(path) if t >= GGML_TYPE_COUNT}
 
 
+_QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z]+|Q\d_K(?:_[A-Z]+)?|Q\d_\d|MXFP4(?:_MOE)?|BF16|F16|F32)(?:_XL|_L)?)"
+                       r"(?=[-_.]|$)", re.I)
+
+
 def guess_quant(filename):
-    m = re.search(r"(IQ\d_[A-Z]+|Q\d_K(?:_[SML])?|Q\d_\d|BF16|F16|F32|Q8_0)", filename, re.I)
-    return m.group(1).upper() if m else "?"
+    """The quantization a file name says, as written: "Q4_K_M", "IQ4_XS", and unsloth's dynamic variants whole —
+    "UD-Q2_K_XL", "UD-IQ4_NL_XL", "MXFP4_MOE" (they used to come out as "Q2_K" or "?")."""
+    name = os.path.basename(filename)
+    if name.lower().endswith(".gguf"):
+        name = name[:-5]
+    part = _PART_RE.match(name + ".gguf")              # "…-BF16-00002-of-00002": the parts share one quantization
+    if part:
+        name = part.group(1)
+    hits = _QUANT_RE.findall(name)
+    return hits[-1].upper() if hits else "?"
+
+
+def _quant_key(q):
+    """How a quantization is matched to the user's spelling: case, '-' or '_' do not matter."""
+    return q.upper().replace("-", "_")
+
+
+def _quant_rank(q):
+    """Preference of a quantization; a dynamic (UD-…, …_XL) variant ranks with the one it builds on."""
+    base = re.sub(r"^UD-", "", q.upper())
+    plain = re.sub(r"_XL$", "", base)
+    # Q4_K_XL ranks as Q4_K_M; Q2_K_XL (no _M variant) as Q2_K; IQ4_NL_XL as IQ4_NL
+    for cand in (base, plain + "_M" if base.endswith("_XL") else base, plain, re.sub(r"_[SML]$", "", plain)):
+        if cand in QUANT_PREFERENCE:
+            return QUANT_PREFERENCE.index(cand)
+    return 99
 
 
 # ───────────────────────────── finding files ─────────────────────────────
@@ -449,17 +479,19 @@ def pick_files(siblings, quant=None):
         if "mmproj" in name.lower():
             projectors.append(f)
             continue
+        if "imatrix" in os.path.basename(name).lower():     # an importance matrix for quantizing, not a model
+            continue
         m = _PART_RE.match(os.path.basename(name))
         group = (os.path.dirname(name), m.group(1) if m else os.path.basename(name)[:-5])
         models.setdefault(group, {"quant": guess_quant(os.path.basename(name)), "files": []})["files"].append(f)
     if not models:
         return [], None, []
     offered = sorted({g["quant"] for g in models.values()},
-                     key=lambda q: QUANT_PREFERENCE.index(q) if q in QUANT_PREFERENCE else 99)
+                     key=lambda q: (_quant_rank(q), q))
     chosen = None
     if quant:
-        want = quant.upper().replace("-", "_")
-        chosen = next((q for q in offered if q.upper() == want), None)
+        want = _quant_key(quant)
+        chosen = next((q for q in offered if _quant_key(q) == want), None)
         if chosen is None:
             raise GGUFError(f"quantization {quant!r} is not in this repo (on offer: {', '.join(offered)})")
     else:

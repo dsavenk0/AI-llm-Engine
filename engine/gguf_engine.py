@@ -27,7 +27,8 @@ class GGUFEngine(CompatEngine):
         self.weight_patch = weight_patch  # (candidate.patch folder, alpha or None), see engine/weightpatch.py
         super().__init__(path, **kw)
         # prompt-lookup speculation: the key/value cache can be trimmed, so rejected drafts are simply forgotten
-        self.speculative = bool(speculative)
+        # a hybrid model's recurrent state cannot be rewound past a rejected draft: no speculation there
+        self.speculative = bool(speculative) and not getattr(self.model, "hybrid", False)
         self.draft_levels = tuple(sorted({min(l, max(1, min(15, draft_max))) for l in DRAFT_LEVELS}))
         self.ngram_min = max(1, min(4, ngram_min))
 

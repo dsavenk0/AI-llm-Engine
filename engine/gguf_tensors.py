@@ -12,10 +12,15 @@ A GGUF stores each weight matrix in one of ggml's block formats. MLX multiplies 
     Q2_K Q3_K        →  scales (and mins) per 16 weights: decoded exactly, then re-quantized per 32 to 4 / 5 bits
                         (the grid is finer than the 2 / 3-bit steps they started from)
     IQ4_NL IQ4_XS    →  16 non-uniform levels (a lookup table): decoded exactly, re-quantized per 32 to 6 bits
+    IQ2_XXS IQ2_XS IQ2_S IQ1_S IQ1_M
+                     →  8-value codebook entries (ggml's lookup grids) with sign bits: decoded exactly,
+                        re-quantized per 32 to 4 bits
+    IQ3_XXS IQ3_S    →  4-value codebook entries with sign bits: decoded exactly, re-quantized per 32 to 5 bits
 
 so the weights are repacked once at load, never expanded to fp16: memory and decode speed stay those of the
-quantized file (the re-quantized ones spend a few bits more than the file does). The remaining i-quants
-(IQ1-IQ3, which need big lookup grids) are refused with a clear error so the caller can fall back to llama.cpp.
+quantized file (the re-quantized ones spend a few bits more than the file does — for the 1–3-bit i-quants about
+twice the file's size, the price of MLX having no codebook matmul). The grids are ggml's tables (ggml-common.h,
+MIT, the ggml authors), kept as text in engine/iq_grids.py.
 """
 import struct
 
@@ -28,10 +33,13 @@ Q6K_BITS = 8
 TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 2: ("Q4_0", 32, 18), 3: ("Q4_1", 32, 20), 6: ("Q5_0", 32, 22),
          7: ("Q5_1", 32, 24), 8: ("Q8_0", 32, 34), 12: ("Q4_K", 256, 144), 13: ("Q5_K", 256, 176),
          14: ("Q6_K", 256, 210), 30: ("BF16", 1, 2), 10: ("Q2_K", 256, 84), 11: ("Q3_K", 256, 110),
-         20: ("IQ4_NL", 32, 18), 23: ("IQ4_XS", 256, 136)}
-OTHER = {15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS", 19: "IQ1_S", 21: "IQ3_S", 22: "IQ2_S", 29: "IQ1_M"}
+         20: ("IQ4_NL", 32, 18), 23: ("IQ4_XS", 256, 136),
+         16: ("IQ2_XXS", 256, 66), 17: ("IQ2_XS", 256, 74), 22: ("IQ2_S", 256, 82), 18: ("IQ3_XXS", 256, 98),
+         21: ("IQ3_S", 256, 110), 19: ("IQ1_S", 256, 50), 29: ("IQ1_M", 256, 56)}
+OTHER = {15: "Q8_K"}
 # bits the exactly decoded values are re-quantized to (per group of 32)
-REQUANT_BITS = {"Q6_K": 8, "Q2_K": 4, "Q3_K": 5, "IQ4_NL": 6, "IQ4_XS": 6}
+REQUANT_BITS = {"Q6_K": 8, "Q2_K": 4, "Q3_K": 5, "IQ4_NL": 6, "IQ4_XS": 6,
+                "IQ2_XXS": 4, "IQ2_XS": 4, "IQ2_S": 4, "IQ1_S": 4, "IQ1_M": 4, "IQ3_XXS": 5, "IQ3_S": 5}
 # The representation produced for MLX. Kept in one place so the memory planner and persistent expert cache do
 # not guess a layout independently from `load_matrix`.
 MLX_BITS = {"Q4_0": 4, "Q4_1": 4, "Q5_0": 5, "Q5_1": 5, "Q8_0": 8,
@@ -163,7 +171,7 @@ def decode_blocks(name, blocks):
         return np.concatenate(parts, axis=1).astype(np.uint8), scale, bias, 5
     if name == "Q6_K":
         return _requantize(q6k_values(blocks), Q6K_BITS)
-    if name in ("Q2_K", "Q3_K", "IQ4_NL", "IQ4_XS"):
+    if name in EXACT:
         return _requantize(EXACT[name](blocks), REQUANT_BITS[name])
     raise UnsupportedQuant(f"no decoder for {name}")
 
@@ -265,7 +273,150 @@ def iq4xs_values(blocks):
     return out
 
 
-EXACT = {"Q2_K": q2k_values, "Q3_K": q3k_values, "IQ4_NL": iq4nl_values, "IQ4_XS": iq4xs_values}
+# ───────────────────────────── the codebook i-quants (ggml-quants.c dequantize_row_iq*) ─────────────────────────────
+_GRIDS = None
+IQ1S_DELTA = 0.125
+
+
+def _grids():
+    """ggml's lookup grids: entry → its 8 (IQ2, IQ1) or 4 (IQ3) values, and the 7-bit → 8-bit sign table."""
+    global _GRIDS
+    if _GRIDS is None:
+        from .iq_grids import load
+        _GRIDS = load()
+        _GRIDS["f2xxs"] = _GRIDS["iq2xxs_grid"].astype(np.float32)
+        _GRIDS["f2xs"] = _GRIDS["iq2xs_grid"].astype(np.float32)
+        _GRIDS["f2s"] = _GRIDS["iq2s_grid"].astype(np.float32)
+        _GRIDS["f3xxs"] = _GRIDS["iq3xxs_grid"].astype(np.float32)
+        _GRIDS["f3s"] = _GRIDS["iq3s_grid"].astype(np.float32)
+        _GRIDS["f1s"] = _GRIDS["iq1s_grid"].astype(np.float32)
+    return _GRIDS
+
+
+_BIT = np.arange(8, dtype=np.uint8)
+
+
+def _signed(grid_vals, sign_bytes):
+    """grid values [..., 8] times ±1 by the bits of sign_bytes [...] (bit j → element j)."""
+    neg = (sign_bytes[..., None] >> _BIT) & 1
+    return grid_vals * (1.0 - 2.0 * neg.astype(np.float32))
+
+
+def _u32(b):
+    return np.ascontiguousarray(b).view("<u4")
+
+
+def _u16(b):
+    return np.ascontiguousarray(b).view("<u2")
+
+
+def iq2xxs_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    q = blocks[:, 2:66].reshape(n, 8, 8)
+    aux = _u32(q[:, :, 4:8]).reshape(n, 8)
+    db = d[:, None] * (0.5 + (aux >> 28).astype(np.float32)) * 0.25
+    sidx = (aux[:, :, None] >> (7 * np.arange(4, dtype=np.uint32))) & 127
+    vals = _signed(G["f2xxs"][q[:, :, 0:4]], G["ksigns_iq2xs"][sidx])          # [n, 8, 4, 8]
+    return (vals * db[:, :, None, None]).reshape(n, 256)
+
+
+def _iq2_scales(d, sc):
+    db0 = d[:, None] * (0.5 + (sc & 0xF).astype(np.float32)) * 0.25
+    db1 = d[:, None] * (0.5 + (sc >> 4).astype(np.float32)) * 0.25
+    return np.stack([db0, db0, db1, db1], axis=2)                              # [n, 8, 4]: l // 2 picks the half
+
+
+def iq2xs_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    qs = _u16(blocks[:, 2:66]).reshape(n, 8, 4)
+    vals = _signed(G["f2xs"][qs & 511], G["ksigns_iq2xs"][qs >> 9])
+    return (vals * _iq2_scales(d, blocks[:, 66:74])[..., None]).reshape(n, 256)
+
+
+def iq2s_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    qs = blocks[:, 2:34].reshape(n, 8, 4).astype(np.uint16)
+    signs = blocks[:, 34:66].reshape(n, 8, 4)
+    qh = blocks[:, 66:74].astype(np.uint16)
+    hi = (qh[:, :, None] << np.array([8, 6, 4, 2], np.uint16)) & 0x300
+    vals = _signed(G["f2s"][qs | hi], signs)
+    return (vals * _iq2_scales(d, blocks[:, 74:82])[..., None]).reshape(n, 256)
+
+
+def iq3xxs_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    qs = blocks[:, 2:66].reshape(n, 8, 8)
+    aux = _u32(blocks[:, 66:98]).reshape(n, 8)
+    db = d[:, None] * (0.5 + (aux >> 28).astype(np.float32)) * 0.5
+    sidx = (aux[:, :, None] >> (7 * np.arange(4, dtype=np.uint32))) & 127
+    grid = G["f3xxs"][qs].reshape(n, 8, 4, 8)                                   # two 4-value entries per 8
+    vals = _signed(grid, G["ksigns_iq2xs"][sidx])
+    return (vals * db[:, :, None, None]).reshape(n, 256)
+
+
+def iq3s_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    qs = blocks[:, 2:66].reshape(n, 8, 4, 2).astype(np.uint16)
+    qh = blocks[:, 66:74].astype(np.uint16)
+    signs = blocks[:, 74:106].reshape(n, 8, 4)
+    sc = blocks[:, 106:110]
+    nib = np.stack([sc & 0xF, sc >> 4], axis=2).reshape(n, 8).astype(np.float32)   # ib32 even: low, odd: high
+    db = d[:, None] * (1 + 2 * nib)
+    shifts = np.array([[8, 7], [6, 5], [4, 3], [2, 1]], np.uint16)
+    hi = (qh[:, :, None, None] << shifts) & 256
+    grid = G["f3s"][qs | hi].reshape(n, 8, 4, 8)
+    vals = _signed(grid, signs)
+    return (vals * db[:, :, None, None]).reshape(n, 256)
+
+
+def iq1s_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    d = _f16(blocks[:, 0:2])
+    qs = blocks[:, 2:34].reshape(n, 8, 4).astype(np.uint16)
+    qh = _u16(blocks[:, 34:50]).reshape(n, 8)
+    dl = d[:, None] * (2 * ((qh >> 12) & 7).astype(np.float32) + 1)
+    delta = np.where(qh & 0x8000, -IQ1S_DELTA, IQ1S_DELTA).astype(np.float32)
+    idx = qs | (((qh[:, :, None] >> (3 * np.arange(4, dtype=np.uint16))) & 7) << 8)
+    vals = (G["f1s"][idx] + delta[:, :, None, None]) * dl[:, :, None, None]
+    return vals.reshape(n, 256)
+
+
+def iq1m_values(blocks):
+    G = _grids()
+    n = blocks.shape[0]
+    qs = blocks[:, 0:32].reshape(n, 8, 4).astype(np.uint16)
+    qh = blocks[:, 32:48].reshape(n, 8, 2).astype(np.uint16)
+    sc = _u16(blocks[:, 48:56]).reshape(n, 4)
+    u = (sc[:, 0] >> 12) | ((sc[:, 1] >> 8) & 0x00F0) | ((sc[:, 2] >> 4) & 0x0F00) | (sc[:, 3] & 0xF000)
+    d = np.ascontiguousarray(u.astype("<u2")).view(np.float16).astype(np.float32)
+    s = sc[:, np.arange(8) // 2]                                                # [n, 8]: the word of each ib
+    sh = (6 * (np.arange(8) % 2)).astype(np.uint16)
+    dl1 = d[:, None] * (2 * ((s >> sh) & 7).astype(np.float32) + 1)
+    dl2 = d[:, None] * (2 * ((s >> (sh + 3)) & 7).astype(np.float32) + 1)
+    h0, h1 = qh[:, :, 0], qh[:, :, 1]
+    idx = np.stack([qs[:, :, 0] | ((h0 << 8) & 0x700), qs[:, :, 1] | ((h0 << 4) & 0x700),
+                    qs[:, :, 2] | ((h1 << 8) & 0x700), qs[:, :, 3] | ((h1 << 4) & 0x700)], axis=2)
+    delta = np.stack([h0 & 0x08, h0 & 0x80, h1 & 0x08, h1 & 0x80], axis=2)
+    delta = np.where(delta, -IQ1S_DELTA, IQ1S_DELTA).astype(np.float32)
+    dl = np.stack([dl1, dl1, dl2, dl2], axis=2)
+    vals = (G["f1s"][idx] + delta[..., None]) * dl[..., None]
+    return vals.reshape(n, 256)
+
+
+EXACT = {"Q2_K": q2k_values, "Q3_K": q3k_values, "IQ4_NL": iq4nl_values, "IQ4_XS": iq4xs_values,
+         "IQ2_XXS": iq2xxs_values, "IQ2_XS": iq2xs_values, "IQ2_S": iq2s_values, "IQ3_XXS": iq3xxs_values,
+         "IQ3_S": iq3s_values, "IQ1_S": iq1s_values, "IQ1_M": iq1m_values}
 
 
 def _requantize(w, bits):
@@ -296,7 +447,7 @@ def load_matrix(gf, info, chunk_rows=2048):
     """A 2-D tensor as (w uint32, scales f16, biases f16, bits) numpy arrays ready for mx.quantized_matmul."""
     name = info.type_name
     rows, cols = info.shape
-    if name not in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K", "Q2_K", "Q3_K", "IQ4_NL", "IQ4_XS"):
+    if name not in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K") and name not in EXACT:
         raise UnsupportedQuant(f"{info.name}: {name}")
     _, block, size = TYPES[info.type]
     if cols % block:

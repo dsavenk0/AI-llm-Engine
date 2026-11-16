@@ -82,6 +82,23 @@ class TestHeader(unittest.TestCase):
         self.assertEqual(gguf.guess_quant("llama-3.2-1b-instruct-Q6_K.gguf"), "Q6_K")
         self.assertEqual(gguf.guess_quant("model-IQ4_XS.gguf"), "IQ4_XS")
         self.assertEqual(gguf.guess_quant("mystery.gguf"), "?")
+        # unsloth's dynamic quants and split files keep their whole name (they came out as "Q2_K" or "?")
+        self.assertEqual(gguf.guess_quant("Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf"), "UD-Q2_K_XL")
+        self.assertEqual(gguf.guess_quant("Qwen3.6-35B-A3B-UD-IQ4_NL_XL.gguf"), "UD-IQ4_NL_XL")
+        self.assertEqual(gguf.guess_quant("Qwen3.6-35B-A3B-MXFP4_MOE.gguf"), "MXFP4_MOE")
+        self.assertEqual(gguf.guess_quant("BF16/Qwen3.6-35B-A3B-BF16-00002-of-00002.gguf"), "BF16")
+
+    def test_a_dynamic_quant_is_offered_and_chosen_by_its_own_name(self):
+        sib = [{"rfilename": f"m-{q}.gguf", "size": 1} for q in ("UD-IQ1_M", "UD-Q2_K_XL", "UD-Q4_K_M", "MXFP4_MOE")]
+        _, chosen, offered = gguf.pick_files(sib)
+        self.assertEqual(chosen, "UD-Q4_K_M")                       # ranked as the Q4_K_M it builds on
+        self.assertNotIn("?", offered)
+        self.assertEqual(gguf.pick_files(sib, "ud_q2_k_xl")[1], "UD-Q2_K_XL")
+        # a dynamic quant with no _M sibling ranks with its base, not after a whole-precision file
+        only = [{"rfilename": f"m-{q}.gguf", "size": 1} for q in ("UD-Q2_K_XL", "BF16", "UD-IQ1_S")]
+        self.assertEqual(gguf.pick_files(only)[1], "UD-Q2_K_XL")
+        sib.append({"rfilename": "m-imatrix.gguf", "size": 1})      # bartowski ships one next to the quants
+        self.assertNotIn("?", gguf.pick_files(sib)[2])
 
     def test_inferssd_accepts_only_its_declared_routed_moe_profiles(self):
         supported = make_gguf(os.path.join(self.dir, "q.gguf"), arch="qwen35moe", experts=256)
@@ -631,8 +648,8 @@ class TestHeaderAndSupportDetails(unittest.TestCase):
         self.assertEqual((ok, why), (False, "llama3 rope scaling without its frequency table"))
         ok, why = gguf.native_support(self.write("l3ok.gguf", rope_factors=[1.0] * (self.S.HEAD_DIM // 2)))
         self.assertEqual((ok, why), (True, ""))
-        ok, why = gguf.native_support(self.write("q.gguf", tensor_type_override=("blk.0.ffn_up.weight", 21)))
-        self.assertEqual((ok, why), (False, "quantization type(s) [21]"))
+        ok, why = gguf.native_support(self.write("q.gguf", tensor_type_override=("blk.0.ffn_up.weight", 39)))
+        self.assertEqual((ok, why), (False, "quantization type(s) [39]"))
         ok, why = gguf.native_support(self.write("phi.gguf", arch="llama", extra_meta={"general.architecture": "phi3"}))
         self.assertEqual((ok, why), (False, "architecture 'phi3'"))
         ok, why = gguf.native_support(os.path.join(self.dir, "missing.gguf"))

@@ -38,7 +38,7 @@ class TestSupportProbe(Base):
         S.write(gemma, arch="gemma3")
         self.assertEqual(gguf.native_support(gemma), (True, ""))
         iq = os.path.join(self.dir, "iq.gguf")
-        S.write(iq, tensor_type_override=("blk.0.ffn_up.weight", 21))           # IQ3_S: a lookup grid we do not read
+        S.write(iq, tensor_type_override=("blk.0.ffn_up.weight", 39))           # MXFP4: a format this decoder does not read
         self.assertIn("quantization", gguf.native_support(iq)[1])
         spm = os.path.join(self.dir, "spm.gguf")
         S.write(spm, extra_meta={"tokenizer.ggml.model": "llama"})

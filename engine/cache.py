@@ -144,6 +144,15 @@ class SSMCache:
         itself is float32 by design (the delta rule accumulates in it)."""
         return None if self.conv is None else self.conv.dtype
 
+    # mlx-lm's verbs, as on KVCache: a recurrent state is never trimmable, and trimming nothing is a no-op
+    def is_trimmable(self):
+        return False
+
+    def trim(self, n):
+        if n:
+            raise ValueError("a recurrent state cannot be trimmed: restore a snapshot instead")
+        return 0
+
     def begin_verify(self):
         self.verifying = True
         self.before = (self.state, self.offset)

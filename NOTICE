@@ -18,6 +18,16 @@ mlx-lm (https://github.com/ml-explore/mlx-lm) — MIT License
   engine/gated_delta.py: gated delta rule Metal kernel; Qwen3.5 / Qwen3-Next
   model structure. License text: third_party/LICENSE.mlx-lm
 
+ggml / llama.cpp (https://github.com/ggml-org/llama.cpp) — MIT License
+  Copyright (c) 2023-2026 The ggml authors.
+  engine/iq_grids.py: the i-quant lookup grids of ggml-common.h; the IQ1–IQ3
+  block layouts decoded in engine/gguf_tensors.py and the Qwen3.5 GGUF tensor
+  layout read in engine/dense.py follow ggml-quants.c and llama.cpp's converter.
+  The predictive expert-read value in engine/moe_stream.py is re-derived from
+  InferSSD (https://github.com/wici-ai/inferssd, Apache-2.0),
+  engine/ggml/src/ggml-ssd/place/runtime-policy.h. License text:
+  third_party/LICENSE.ggml
+
 mlx-vlm (https://github.com/Blaizzy/mlx-vlm) — MIT License
   Copyright © 2025 Prince Canuma.
   engine/vision.py: Qwen3-VL vision tower; M-RoPE position indexing in

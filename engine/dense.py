@@ -4,6 +4,14 @@ One implementation covers the Llama family as ggml names it: llama (incl. Mistra
 qwen2 (incl. DeepSeek-R1-Distill-Qwen, MiMo's base), qwen3, granite, and Gemma 3 (sliding-window layers in a 5:1 pattern,
 two rope bases, a norm after the attention and after the feed-forward, GeGLU). Mixture-of-experts feed-forwards
 (Mixtral, Qwen3-MoE, Granite-MoE) keep the experts stacked and run only the routed ones with `gather_qmm`.
+
+Qwen3.5 (`qwen35`, and `qwen35moe` with routed experts plus a gated shared expert) is a hybrid: three of every four
+layers are GatedDeltaNet linear attention with a recurrent state (engine/cache.py SSMCache, the delta rule on
+engine/gated_delta.py's Metal kernel), the fourth is gated full attention (the query projection also yields a
+sigmoid gate on the output). Its GGUF follows llama.cpp's converter: A is stored as -exp(A_log), the RMSNorm
+weights other than the gated one have their +1 folded in, and the value heads of every linear-attention tensor
+are in ggml's *tiled* order — so the key/query heads are tiled (not repeated per group) to meet them, and no
+weight has to be permuted back.
 Weights stay in the quantized form of the
 file (engine/gguf_tensors.py); the residual stream is float32, matmul inputs and the KV cache float16.
 
@@ -216,15 +224,28 @@ class Config:
     n_expert: int = 0                    # mixture of experts: experts per layer and how many a token uses
     n_expert_used: int = 0
     expert_norm: bool = True             # the chosen experts' weights are renormalised to sum to 1
+    expert_scale: float = 1.0            # a multiplier on the chosen experts' weights (llama.cpp: expert_weights_scale)
+    # Qwen3.5 hybrid: every `full_attn_interval`-th layer is attention, the others GatedDeltaNet
+    full_attn_interval: int = 0
+    attn_gated: bool = False             # the query projection yields [query | gate] per head
+    ssm_conv: int = 0                    # depthwise causal convolution width
+    ssm_dk: int = 0                      # key (= value) head size of the linear attention
+    ssm_nk: int = 0                      # key heads
+    ssm_nv: int = 0                      # value heads (a multiple of the key heads)
     extra: dict = field(default_factory=dict)
 
     def is_local(self, i):
         return bool(self.window and self.window_pattern and (i % self.window_pattern) != self.window_pattern - 1)
 
+    def is_recurrent(self, i):
+        return bool(self.full_attn_interval) and (i + 1) % self.full_attn_interval != 0
+
 
 # ggml's rope type per architecture (llama.cpp: llama_model_rope_type)
 ROPE_TRADITIONAL = {"llama": True, "qwen2": False, "qwen3": False, "gemma2": False, "gemma3": False,
-                    "granite": True, "granitemoe": True, "qwen3moe": False, "minicpm": True}
+                    "granite": True, "granitemoe": True, "qwen3moe": False, "minicpm": True,
+                    "qwen35": False, "qwen35moe": False}
+HYBRID = ("qwen35", "qwen35moe")
 SUPPORTED = tuple(ROPE_TRADITIONAL)
 
 
@@ -497,7 +518,11 @@ def _expert_safe_groups(layer, idx):
     return groups
 
 
-from .cache import KVCache  # noqa: E402,F401  (one implementation for every engine: engine/cache.py)
+from .cache import KVCache, SSMCache  # noqa: E402,F401  (one implementation for every engine: engine/cache.py)
+
+
+def nn_softplus(x):
+    return mx.logaddexp(x, 0.0)
 
 
 def _rms(x, w, eps):
@@ -526,10 +551,25 @@ def _softcap_attention(q, k, v, scale, mask, cap):
 class Layer:
     def __init__(self, cfg, tensors, i):
         t = lambda name: tensors[f"blk.{i}.{name}"]
-        self.attn_norm, self.ffn_norm = t("attn_norm.weight"), t("ffn_norm.weight")
-        self.q, self.k, self.v, self.o = (t(f"attn_{n}.weight") for n in ("q", "k", "v", "output"))
-        self.q_norm = tensors.get(f"blk.{i}.attn_q_norm.weight")
-        self.k_norm = tensors.get(f"blk.{i}.attn_k_norm.weight")
+        opt = lambda name: tensors.get(f"blk.{i}.{name}")
+        self.recurrent = cfg.is_recurrent(i)
+        self.attn_norm = t("attn_norm.weight")
+        # Qwen3.5 names the norm before its feed-forward "post_attention_norm"; Gemma uses that name for a second
+        # norm on the attention output
+        self.ffn_norm = t("post_attention_norm.weight") if cfg.full_attn_interval else t("ffn_norm.weight")
+        self.q = self.k = self.v = self.o = self.q_norm = self.k_norm = None
+        if self.recurrent:
+            self.qkv, self.z = t("attn_qkv.weight"), t("attn_gate.weight")
+            self.beta, self.alpha = t("ssm_beta.weight"), t("ssm_alpha.weight")
+            self.dt, self.ssm_a, self.conv = t("ssm_dt.bias"), t("ssm_a"), t("ssm_conv1d.weight")
+            self.ssm_norm, self.ssm_out = t("ssm_norm.weight"), t("ssm_out.weight")
+        else:
+            self.q, self.k, self.v, self.o = (t(f"attn_{n}.weight") for n in ("q", "k", "v", "output"))
+            self.q_norm = opt("attn_q_norm.weight")
+            self.k_norm = opt("attn_k_norm.weight")
+        # a shared expert next to the routed ones, scaled by a sigmoid gate of its own (Qwen3.5-MoE)
+        self.sh_gate, self.sh_up, self.sh_down = (opt(f"ffn_{n}_shexp.weight") for n in ("gate", "up", "down"))
+        self.sh_router = opt("ffn_gate_inp_shexp.weight")
         self.router = tensors.get(f"blk.{i}.ffn_gate_inp.weight")
         if self.router is not None:                          # a mixture-of-experts layer
             self.gate_e, self.up_e, self.down_e = (t(f"ffn_{n}_exps.weight") for n in ("gate", "up", "down"))
@@ -537,14 +577,17 @@ class Layer:
             self.streamed = isinstance(self.gate_e, StreamedExperts)
         else:
             self.gate, self.up, self.down = t("ffn_gate.weight"), t("ffn_up.weight"), t("ffn_down.weight")
-        self.post_attn_norm = tensors.get(f"blk.{i}.post_attention_norm.weight")
-        self.post_ffn_norm = tensors.get(f"blk.{i}.post_ffw_norm.weight")
+        self.post_attn_norm = None if cfg.full_attn_interval else opt("post_attention_norm.weight")
+        self.post_ffn_norm = opt("post_ffw_norm.weight")
 
     def params(self):
         ms = (self.q, self.k, self.v, self.o, self.gate, self.up, self.down)
         if self.router is not None:
             ms = (self.q, self.k, self.v, self.o, self.router, self.gate_e, self.up_e, self.down_e)
-        return [m for m in ms]
+        if self.recurrent:
+            ms = ms + (self.qkv, self.z, self.beta, self.alpha, self.ssm_out, self.conv)
+        ms = ms + (self.sh_gate, self.sh_up, self.sh_down)
+        return [m for m in ms if m is not None]
 
 
 class DenseModel:
@@ -572,6 +615,12 @@ class DenseModel:
         R = mx.float32 if self.wide else mx.float16
         for L in self.layers:                  # weights in the dtype they are used in, converted once
             L.attn_norm, L.ffn_norm = L.attn_norm.astype(R), L.ffn_norm.astype(R)
+            if L.recurrent:
+                L.conv = L.conv.astype(mx.float16).T          # [K, channels]: one row per tap
+                L.ssm_a, L.dt = L.ssm_a.astype(mx.float32), L.dt.astype(mx.float32)
+                L.ssm_norm = L.ssm_norm.astype(R)
+            if L.sh_router is not None:
+                L.sh_router = L.sh_router.astype(mx.float32).reshape(-1, 1)
             if L.q_norm is not None:
                 L.q_norm, L.k_norm = L.q_norm.astype(M), L.k_norm.astype(M)
             if L.post_attn_norm is not None:
@@ -616,7 +665,62 @@ class DenseModel:
                 "pool_gb": round(sum(p.nbytes for p in pools) / 2**30, 2)}
 
     def make_cache(self):
-        return [KVCache() for _ in self.layers]
+        return [SSMCache() if L.recurrent else KVCache() for L in self.layers]
+
+    @property
+    def hybrid(self):
+        return bool(self.cfg.full_attn_interval)
+
+    def _gdn(self, layer, h, cache):
+        """One GatedDeltaNet layer on its normed input `h` [B, S, D]: projections, the causal depthwise
+        convolution over the cached tail, the delta-rule recurrence, the gated norm and the output projection.
+        Follows engine/model.py's Qwen3.5 (verified against the reference) with ggml's tensor layout."""
+        from .gated_delta import gated_delta_kernel
+        c = self.cfg
+        F16, F32 = mx.float16, mx.float32
+        B, S, _ = h.shape
+        nk, nv, dk = c.ssm_nk, c.ssm_nv, c.ssm_dk
+        key_dim, K = nk * dk, c.ssm_conv
+        qkv = layer.qkv(h).astype(F16)                                      # [B, S, 2*key_dim + nv*dk]
+        z = layer.z(h)
+        beta = mx.sigmoid(layer.beta(h).astype(F32))
+        # ssm_a is -exp(A_log): the decay is exp(A * softplus(alpha + dt_bias))
+        g = mx.exp(layer.ssm_a * nn_softplus(layer.alpha(h).astype(F32) + layer.dt))
+        conv_dim = qkv.shape[-1]
+        state = cache.conv if cache.conv is not None else mx.zeros((B, K - 1, conv_dim), dtype=F16)
+        conv_in = mx.concatenate([state, qkv], axis=1)
+        w = layer.conv                                                      # [K, channels]
+        co = conv_in[:, 0:S] * w[0]
+        for j in range(1, K):
+            co = co + conv_in[:, j:j + S] * w[j]
+        co = (co * mx.sigmoid(co)).astype(F16)                              # silu
+        inv = dk ** -0.5
+        q = (inv * inv) * mx.fast.rms_norm(co[..., :key_dim].reshape(B, S, nk, dk), None, 1e-6)
+        k = inv * mx.fast.rms_norm(co[..., key_dim:2 * key_dim].reshape(B, S, nk, dk), None, 1e-6)
+        v = co[..., 2 * key_dim:].reshape(B, S, nv, dk)
+        if nv != nk:                       # value heads are tiled [k0, k1, …, k0, k1, …]: tile the keys to match
+            q, k = mx.tile(q, (1, 1, nv // nk, 1)), mx.tile(k, (1, 1, nv // nk, 1))
+        out, cache.state = gated_delta_kernel(q, k, v, g.astype(F16), beta.astype(F16), cache.state)
+        cache.conv = mx.contiguous(conv_in[:, -(K - 1):])
+        cache.offset += S
+        zz = z.reshape(B, S, nv, dk).astype(F32)
+        o = _rms(out.astype(F32), layer.ssm_norm, c.eps) * (zz * mx.sigmoid(zz))
+        return layer.ssm_out(o.reshape(B, S, -1).astype(self.act))
+
+    def _ffn(self, layer, h, R):
+        """The feed-forward of one layer on its normed input: routed experts (plus a gated shared expert where
+        the model has one), or the plain gated MLP."""
+        c = self.cfg
+        if layer.router is not None:
+            d = self._moe(layer, h)
+            if layer.sh_up is not None:
+                g = layer.sh_gate(h).astype(R)
+                s = layer.sh_down(((mx.sigmoid(g) * g) * layer.sh_up(h).astype(R)).astype(self.act)).astype(R)
+                d = d + s * mx.sigmoid(h.astype(mx.float32) @ layer.sh_router).astype(R)
+            return d
+        g = layer.gate(h).astype(R)
+        act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
+        return layer.down((act * layer.up(h).astype(R)).astype(self.act)).astype(R)
 
     def _moe(self, layer, h):
         """Route each token to its top-k experts (softmax over all, optionally renormalised over the chosen),
@@ -634,6 +738,8 @@ class DenseModel:
         w = mx.take_along_axis(probs, idx, axis=-1)
         if c.expert_norm:
             w = w / w.sum(-1, keepdims=True)
+        if c.expert_scale != 1.0:
+            w = w * c.expert_scale
         if layer.streamed and idx.shape[1] > 1:
             groups = _expert_safe_groups(layer, idx)
         else:
@@ -720,7 +826,16 @@ class DenseModel:
         for li, (layer, kv) in enumerate(zip(self.layers, cache)):
             local = c.is_local(li)
             h = _rms(x, layer.attn_norm, c.eps).astype(M)
-            q = layer.q(h).reshape(B, L, c.n_head, c.head_dim)
+            if layer.recurrent:
+                x = x + st(self._gdn(layer, h, kv).astype(R))
+                x = x + st(self._ffn(layer, _rms(x, layer.ffn_norm, c.eps).astype(M), R))
+                continue
+            gate = None
+            if c.attn_gated:                             # [query | gate] per head
+                qg = layer.q(h).reshape(B, L, c.n_head, 2 * c.head_dim)
+                q, gate = qg[..., :c.head_dim], qg[..., c.head_dim:].reshape(B, L, -1)
+            else:
+                q = layer.q(h).reshape(B, L, c.n_head, c.head_dim)
             k = layer.k(h).reshape(B, L, c.n_head_kv, c.head_dim)
             v = layer.v(h).reshape(B, L, c.n_head_kv, c.head_dim)
             if layer.q_norm is not None:
@@ -738,18 +853,15 @@ class DenseModel:
                 a = _softcap_attention(q, k, v, scale, m, c.attn_softcap).astype(M)
             else:
                 a = mx.fast.scaled_dot_product_attention(q.astype(F16), k, v, scale=scale, mask=m).astype(M)
-            o = layer.o(a.transpose(0, 2, 1, 3).reshape(B, L, -1)).astype(R)
+            a = a.transpose(0, 2, 1, 3).reshape(B, L, -1)
+            if gate is not None:
+                a = (a.astype(F32) * mx.sigmoid(gate.astype(F32))).astype(M)
+            o = layer.o(a).astype(R)
             if layer.post_attn_norm is not None:
                 o = _rms(o, layer.post_attn_norm, c.eps)
             x = x + st(o) * c.residual_scale
             h = _rms(x, layer.ffn_norm, c.eps).astype(M)
-            if layer.router is not None:
-                d = self._moe(layer, h)
-            else:
-                g = layer.gate(h).astype(R)
-                act = _gelu_tanh(g) if c.gelu else mx.sigmoid(g) * g
-                inner = (act * layer.up(h).astype(R)).astype(M)
-                d = layer.down(inner).astype(R)
+            d = self._ffn(layer, h, R)
             if layer.post_ffn_norm is not None:
                 d = _rms(d, layer.post_ffn_norm, c.eps)
             x = x + st(d) * c.residual_scale
@@ -887,26 +999,41 @@ def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_
     if g("attention.sliding_window") and arch not in ("gemma2", "gemma3"):
         raise Unsupported("sliding-window attention")
     names = gf.tensors
+    hybrid = arch in HYBRID
     n_expert = int(g("expert_count", 0) or 0)
+    if n_expert and "blk.0.ffn_gate_up_exps.weight" in names:
+        raise Unsupported("mixture of experts with fused gate/up expert tensors")
     if n_expert and ("blk.0.ffn_gate_exps.weight" not in names or "blk.0.ffn_gate_inp.weight" not in names):
         raise Unsupported("mixture of experts stored per expert (or with a shared expert)")
-    if any(n.startswith("blk.0.ffn_gate_shexp") or n.startswith("blk.0.ffn_up_shexp") for n in names):
+    if not hybrid and any(n.startswith("blk.0.ffn_gate_shexp") or n.startswith("blk.0.ffn_up_shexp") for n in names):
         raise Unsupported("mixture of experts with a shared expert")
     vocab = names["token_embd.weight"].shape[0]
     cfg = Config(
         arch=arch, n_layer=int(g("block_count")), n_embd=n_embd, n_head=n_head,
-        n_head_kv=int(g("attention.head_count_kv", n_head)), n_ff=int(g("feed_forward_length")), head_dim=head_dim,
+        n_head_kv=int(g("attention.head_count_kv", n_head)), n_ff=int(g("feed_forward_length", 0) or 0),
+        head_dim=head_dim,
         vocab=vocab, eps=float(g("attention.layer_norm_rms_epsilon", 1e-5)), rope_base=float(g("rope.freq_base", 10000.0)),
         rope_dims=int(g("rope.dimension_count", head_dim)), rope_traditional=ROPE_TRADITIONAL[arch],
-        qkv_bias="blk.0.attn_q.bias" in names, qk_norm="blk.0.attn_q_norm.weight" in names,
+        qkv_bias="blk.0.attn_q.bias" in names, qk_norm=any(n.endswith("attn_q_norm.weight") for n in names),
         tied_output="output.weight" not in names, context=int(g("context_length", 4096)),
     )
+    if hybrid:
+        cfg.full_attn_interval = int(g("full_attention_interval", 4) or 4)
+        cfg.attn_gated = True
+        cfg.ssm_conv, cfg.ssm_dk = int(g("ssm.conv_kernel")), int(g("ssm.state_size"))
+        cfg.ssm_nk, cfg.ssm_nv = int(g("ssm.group_count")), int(g("ssm.time_step_rank"))
+        if cfg.ssm_nv % cfg.ssm_nk or int(g("ssm.inner_size")) != cfg.ssm_nv * cfg.ssm_dk:
+            raise Unsupported("linear-attention head sizes this decoder does not lay out")
+        if cfg.n_layer % cfg.full_attn_interval == 0 and cfg.is_recurrent(cfg.n_layer - 1):
+            raise Unsupported("a hybrid layout without a final attention layer")
     cfg.n_expert, cfg.n_expert_used = n_expert, int(g("expert_used_count", 0) or 0)
     if n_expert:
         if not 0 < cfg.n_expert_used <= n_expert:
             raise Unsupported("the number of experts used per token is missing")
-        # Mixtral and Granite-MoE renormalise the chosen weights; Qwen3-MoE says so in its config
-        cfg.expert_norm = bool(g("expert_weights_norm", True)) if arch != "qwen3moe" else True
+        # Mixtral and Granite-MoE renormalise the chosen weights; Qwen3-MoE says so in its config; Qwen3.5-MoE too
+        cfg.expert_norm = bool(g("expert_weights_norm", True)) if arch not in ("qwen3moe", "qwen35moe") else True
+        scale = float(g("expert_weights_scale", 0.0) or 0.0)
+        cfg.expert_scale = scale if scale not in (0.0, 1.0) else 1.0
     if g("attention.scale"):                                  # Granite family multipliers
         cfg.attn_scale = float(g("attention.scale"))
     if g("embedding_scale"):
@@ -949,16 +1076,30 @@ def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_
     tensors["output_norm.weight"] = mx.array(T.load_dense(gf, names["output_norm.weight"]))
     if "output.weight" in names:
         tensors["output.weight"] = _linear(gf, names["output.weight"], T)
+    dense_t = lambda name: mx.array(T.load_dense(gf, names[name]))
     for i in range(cfg.n_layer):
         for n in ("attn_norm", "ffn_norm"):
-            tensors[f"blk.{i}.{n}.weight"] = mx.array(T.load_dense(gf, names[f"blk.{i}.{n}.weight"]))
+            if f"blk.{i}.{n}.weight" in names or not hybrid:
+                tensors[f"blk.{i}.{n}.weight"] = dense_t(f"blk.{i}.{n}.weight")
         for n in ("attn_q_norm", "attn_k_norm", "post_attention_norm", "post_ffw_norm"):
             if f"blk.{i}.{n}.weight" in names:
-                tensors[f"blk.{i}.{n}.weight"] = mx.array(T.load_dense(gf, names[f"blk.{i}.{n}.weight"]))
+                tensors[f"blk.{i}.{n}.weight"] = dense_t(f"blk.{i}.{n}.weight")
         moe = f"blk.{i}.ffn_gate_inp.weight" in names
+        recurrent = cfg.is_recurrent(i)
+        if recurrent:
+            for n in ("attn_qkv", "attn_gate", "ssm_beta", "ssm_alpha", "ssm_out"):
+                tensors[f"blk.{i}.{n}.weight"] = _linear(gf, names[f"blk.{i}.{n}.weight"], T)
+            for n in ("ssm_dt.bias", "ssm_a", "ssm_conv1d.weight", "ssm_norm.weight"):
+                tensors[f"blk.{i}.{n}"] = dense_t(f"blk.{i}.{n}")
+        if f"blk.{i}.ffn_up_shexp.weight" in names:
+            for n in ("gate", "up", "down"):
+                tensors[f"blk.{i}.ffn_{n}_shexp.weight"] = _linear(gf, names[f"blk.{i}.ffn_{n}_shexp.weight"], T)
+            tensors[f"blk.{i}.ffn_gate_inp_shexp.weight"] = dense_t(f"blk.{i}.ffn_gate_inp_shexp.weight")
         for n, bn in (("attn_q", "attn_q.bias"), ("attn_k", "attn_k.bias"), ("attn_v", "attn_v.bias"),
                       ("attn_output", None), ("ffn_gate", None), ("ffn_up", None), ("ffn_down", None)):
             if moe and n.startswith("ffn_"):
+                continue
+            if recurrent and n.startswith("attn_"):
                 continue
             bias = names.get(f"blk.{i}.{bn}") if bn else None
             tensors[f"blk.{i}.{n}.weight"] = _linear(gf, names[f"blk.{i}.{n}.weight"], T, bias)

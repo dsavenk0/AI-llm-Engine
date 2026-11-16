@@ -245,7 +245,7 @@ class TestBlockDecoders(unittest.TestCase):
     def test_unknown_formats_are_refused(self):
         from engine import gguf_tensors as T
         with self.assertRaises(T.UnsupportedQuant):
-            T.decode_blocks("IQ3_S", np.zeros((1, 110), np.uint8))
+            T.decode_blocks("Q8_K", np.zeros((1, 292), np.uint8))          # an intermediate type, never stored
 
 
 class TestPacking(unittest.TestCase):
@@ -333,7 +333,7 @@ class TestFile(unittest.TestCase):
     def test_load_matrix_refuses_what_it_cannot_do(self):
         from engine import gguf_tensors as T
         p = os.path.join(self.dir, "bad.gguf")
-        write_file(p, [("odd", (48, 1), 8, bytes(34 * 2)), ("k2", (256, 1), 21, bytes(110)),
+        write_file(p, [("odd", (48, 1), 8, bytes(34 * 2)), ("k2", (256, 1), 15, bytes(292)),
                        ("f", (32, 1), 0, bytes(128))])
         gf = T.GGUFFile(p)
         for name in ("odd", "k2", "f"):
