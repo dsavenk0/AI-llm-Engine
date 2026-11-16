@@ -18,6 +18,13 @@ from mlx.utils import tree_flatten
 
 from engine import moe_stream as M
 
+
+def setUpModule():
+    # every Streamer saves its hot set on close: keep the tests' sets out of the user's ~/.cache (they used to pile
+    # up there, one tmp*.json per test model)
+    if "LLM_MOE_USAGE_DIR" not in os.environ:
+        os.environ["LLM_MOE_USAGE_DIR"] = tempfile.mkdtemp(prefix="moe-usage-test-")
+
 CFG = {"model_type": "qwen3_moe", "hidden_size": 128, "num_hidden_layers": 3, "intermediate_size": 256,
        "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 32, "num_experts": 16,
        "num_experts_per_tok": 2, "decoder_sparse_step": 1, "mlp_only_layers": [], "moe_intermediate_size": 64,
@@ -133,6 +140,149 @@ class TestEquivalence(Base):
         pools = sum(p.nbytes for p in st.pools.values())
         self.assertLess(held, 0.35 * whole)                              # the experts were dropped from the tree
         self.assertLess(pools, 0.35 * (whole - held))                    # and 4/16 of them are resident
+
+
+class TestPrefetch(Base):
+    """Reading the next layer's likely experts ahead (LLM_MOE_PREFETCH): never a different answer, only reads."""
+
+    def streamed_mode(self, capacity, mode, cfg_layers=None):
+        old = os.environ.get("LLM_MOE_PREFETCH")
+        os.environ["LLM_MOE_PREFETCH"] = mode
+        try:
+            return self.streamed(capacity)
+        finally:
+            if old is None:
+                os.environ.pop("LLM_MOE_PREFETCH")
+            else:
+                os.environ["LLM_MOE_PREFETCH"] = old
+
+    def decode(self, m, toks, steps):
+        from mlx_lm.models.cache import make_prompt_cache
+        c = make_prompt_cache(m)
+        out = [np.asarray(m(mx.array([toks]), cache=c))]
+        for t in steps:
+            out.append(np.asarray(m(mx.array([[t]]), cache=c)))
+        return out
+
+    def test_every_mode_decodes_exactly_what_the_resident_model_does(self):
+        want = self.decode(self.eager, [3, 9, 27], [40, 41, 42, 7, 8, 9, 10, 11, 12])
+        for mode in ("off", "on", "auto"):
+            m, st = self.streamed_mode(4, mode)
+            got = self.decode(m, [3, 9, 27], [40, 41, 42, 7, 8, 9, 10, 11, 12])
+            for a, b in zip(got, want):
+                np.testing.assert_array_equal(a, b, mode)
+            s = st.stats()["prefetch"]
+            self.assertEqual(s["mode"], mode)
+            self.assertEqual(s["layers_predicted"], 2)                    # 3 MoE layers: 2 have a next one
+            if mode == "off":
+                self.assertEqual(s["issued"], 0)
+            if mode == "on":
+                self.assertGreater(s["issued"], 0)
+                self.assertEqual(s["issued"], s["used"] + s["unused"] + sum(len(p.staged) for p in st.pools.values()))
+
+    def test_layers_are_linked_in_the_order_they_run_not_by_name(self):
+        d = tempfile.mkdtemp()
+        build(d, cfg={"num_hidden_layers": 12})
+        m = load_lazy(d)
+        st = M.stream_experts(m, d, plan(4))
+        self.addCleanup(st.close)
+        layers = m.model.layers
+        for i in range(11):
+            self.assertIs(layers[i].mlp.switch_mlp._next.pool, layers[i + 1].mlp.switch_mlp.pool, f"layer {i}")
+        self.assertIsNone(layers[11].mlp.switch_mlp._next)
+
+    def test_the_guess_is_the_next_layers_own_choice_when_fed_the_same_stream(self):
+        # with the same residual stream, w_next / w_this turns this layer's normed input into the next one's
+        m, _ = self.streamed_mode(16, "on")
+        a, b = m.model.layers[0], m.model.layers[1]
+        h = mx.random.normal((1, 1, CFG["hidden_size"]))
+        guess = a.mlp.switch_mlp._guess(a.post_attention_layernorm(h))
+        logits = b.mlp.gate(b.post_attention_layernorm(h)).reshape(-1)
+        want = np.argsort(-np.asarray(logits.astype(mx.float32)))[:2]
+        self.assertEqual(sorted(np.asarray(guess).tolist()), sorted(want.tolist()))
+
+    def test_a_failed_speculative_read_falls_back_to_reading_on_demand(self):
+        m, st = self.streamed_mode(4, "on")
+        pool = next(iter(st.pools.values()))
+        bad = M.ThreadPoolExecutor(1)
+        self.addCleanup(bad.shutdown)
+        real = pool._read_expert
+        pool._read_expert = lambda e, bufs: (_ for _ in ()).throw(OSError("disk went away"))
+        pool.prefetch([7], bad)
+        pool._read_expert = real
+        pool.ensure([7])
+        slot = pool.resident[7]
+        for (p, k), arr in pool.arrays.items():
+            size, npdt, _, shape, where = pool.slab[p, k]
+            path, off = where(7)
+            want = np.frombuffer(st.files.read(path, off, size), dtype=npdt).reshape(shape)
+            got = np.asarray(arr[slot].view(mx.uint16) if arr.dtype == mx.bfloat16 else arr[slot])
+            np.testing.assert_array_equal(got, want)
+
+    def test_a_guess_is_never_issued_for_a_resident_or_already_pending_expert(self):
+        m, st = self.streamed_mode(4, "on")
+        pool = next(iter(st.pools.values()))
+        pool.ensure([1, 2])
+        cold = [e for e in range(16) if e not in pool.resident][:3]         # the pool may start warm from a saved set
+        first = pool.prefetch([1, 2] + cold[:2], st.prefetchers)
+        again = pool.prefetch(cold, st.prefetchers)
+        self.assertEqual(first, cold[:2])
+        self.assertEqual(again, cold[2:])
+        pool.drop_staged()
+        self.assertEqual(pool.staged, {})
+        self.assertEqual(pool.prefetch_unused, 3)
+
+    def test_close_waits_for_speculative_reads_in_flight(self):
+        m, st = self.streamed_mode(4, "on")
+        pool = next(iter(st.pools.values()))
+        started, release = threading.Event(), threading.Event()
+        real = pool._read_expert
+
+        def slow(e, bufs):
+            started.set()
+            release.wait(5)
+            return real(e, bufs)
+        pool._read_expert = slow
+        pool.prefetch([9], st.prefetchers)
+        started.wait(5)
+        threading.Timer(0.2, release.set).start()
+        st.close()                                                       # must not close the files under the read
+        self.assertEqual(st.files.fds, {})
+
+
+class TestPrefetchPolicy(unittest.TestCase):
+    def test_a_read_that_lands_in_every_window_is_worth_its_probability(self):
+        self.assertAlmostEqual(M.read_value(0.8, 0, 100, [500, 400]), 0.8)
+
+    def test_a_read_the_window_ends_before_starting_costs_a_whole_read_if_wrong(self):
+        self.assertAlmostEqual(M.read_value(0.8, 200, 100, [100]), -0.2)
+
+    def test_a_read_half_done_when_asked_is_worth_p_minus_the_rest(self):
+        self.assertAlmostEqual(M.read_value(0.8, 0, 100, [50]), 0.3)
+
+    def test_no_window_measured_yet_means_its_probability(self):
+        self.assertAlmostEqual(M.read_value(0.6, 0, 100, []), 0.6)
+
+    def test_the_best_run_stops_where_the_sum_peaks(self):
+        self.assertEqual(M.best_run([0.5, 0.2, -0.9, 0.3]), 2)
+        self.assertEqual(M.best_run([-0.1, 0.05]), 0)
+        self.assertEqual(M.best_run([]), 0)
+
+    def test_use_probability_starts_at_one_half_and_learns(self):
+        pol = M.PrefetchPolicy(2, mode="auto")
+        self.assertEqual(pol.use_probability(0), 0.5)
+        pol.novel[0], pol.used[0] = 8, 8
+        self.assertAlmostEqual(pol.use_probability(0), 0.9)
+
+    def test_off_reads_nothing_and_depth_bounds_the_ranks(self):
+        class P:
+            resident, staged = {}, {}
+        self.assertEqual(M.PrefetchPolicy(2, mode="off").choose(P(), [1, 2, 3]), [])
+        self.assertEqual(M.PrefetchPolicy(2, mode="on").choose(P(), [1, 2, 3]), [1, 2])
+        pol = M.PrefetchPolicy(2, mode="auto")
+        pol.read_us, pol.windows = 100.0, [10.0] * 8                       # every window ends before any read starts
+        self.assertEqual(pol.choose(P(), [1, 2, 3]), [])                  # nothing is worth reading
+        self.assertEqual(pol.declined, 2)
 
 
 class TestUnquantized(Base):

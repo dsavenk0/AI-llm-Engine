@@ -1,10 +1,12 @@
 """Expert streaming on a real MLX/safetensors or GGUF MoE model, against the resident model.
 
-    .venv/bin/python tests/bench_moe.py [model folder] [capacities ...]
+    .venv/bin/python tests/bench_moe.py [model folder] [capacities ...] [--prefetch off,on,auto] [--repeat N]
 
 For each pool size: resident memory, load time, decode speed on a first pass (cold pools) and a second (warm),
 the hit rate and source traffic. Safetensors reads go around the page cache (LLM_MOE_DIRECT=1) so the disk is
-measured, not RAM that happens to hold the file; run it with LLM_MOE_DIRECT=0 to see the cached case. GGUF
+measured, not RAM that happens to hold the file; run it with LLM_MOE_DIRECT=0 to see the cached case.
+`--prefetch` runs each pool size once per speculative-read mode (LLM_MOE_PREFETCH), alternating, `--repeat` times,
+so the modes are compared on the same machine state rather than one after a warm-up of the other. GGUF
 reports logical mmap source traffic plus quantized decoding time, as the run heading says.
 Stop the engine first — the model is loaded here, several times, one after another.
 """
@@ -28,7 +30,7 @@ PROMPTS = ["Explain how a hash table handles collisions, in one paragraph.",
            "What are the main causes of the French Revolution? Answer in a few sentences."]
 
 
-def run(path, capacity, tokens=64):
+def run(path, capacity, tokens=64, prefetch=None):
     usage = tempfile.TemporaryDirectory(prefix="ai-llm-moe-bench-")
     is_gguf = path.lower().endswith(".gguf")
     if is_gguf:
@@ -37,6 +39,8 @@ def run(path, capacity, tokens=64):
     else:
         env = {"LLM_MOE_STREAM": "off"} if capacity == 0 else {
                "LLM_MOE_STREAM": "on", "LLM_MOE_CACHE": str(capacity), "LLM_MOE_USAGE_DIR": usage.name}
+    if prefetch:
+        env["LLM_MOE_PREFETCH"] = prefetch
     os.environ.update(env)
     t0 = time.time()
     # the RAM guard is raised to 95 % here: a benchmark on a busy Mac would otherwise be refused before it starts
@@ -59,7 +63,7 @@ def run(path, capacity, tokens=64):
            "warm_tps": rows[1], "hit_rate": s and s["hit_rate"], "gb_read": s and s["gb_read"],
            "read_mbps": s and s["read_mbps"], "read_ops": s and s["read_ops"],
            "evictions": s and s["evictions"], "source": s and s["source"],
-           "peak_gb": mx.get_peak_memory() / 2**30}
+           "peak_gb": mx.get_peak_memory() / 2**30, "prefetch": (s or {}).get("prefetch")}
     e.sleep()                              # also joins safetensors/GGUF expert readers before cleanup
     del e
     gc.collect()
@@ -73,18 +77,28 @@ def main():
     args = sys.argv[1:]
     path = os.path.expanduser(args[0]) if args and not args[0].isdigit() else os.path.expanduser(
         "~/.cache/huggingface/hub/mlx-community/OLMoE-1B-7B-0125-Instruct-4bit")
-    caps = [int(a) for a in args if a.isdigit()] or [0, 64, 32, 16, 8]
+    opt = lambda name, default: args[args.index(name) + 1] if name in args else default
+    modes = [m for m in opt("--prefetch", "").split(",") if m] or [None]
+    repeat = int(opt("--repeat", "1"))
+    skip = {opt("--prefetch", None), opt("--repeat", None)}
+    caps = [int(a) for a in args if a.isdigit() and a not in skip] or [0, 64, 32, 16, 8]
     source = "GGUF mmap+decode" if path.lower().endswith(".gguf") else f"safetensors direct reads: {os.environ['LLM_MOE_DIRECT']}"
     print(f"{os.path.basename(path)} · {source} · RAM in use {memory.used_fraction():.0%}")
-    print(f"{'experts/layer':>13} {'resident GB':>11} {'load s':>7} {'cold tok/s':>10} {'warm tok/s':>10} "
-          f"{'hit rate':>8} {'GB read':>8} {'read MB/s':>9} {'evictions':>9}")
-    for c in caps:
-        r = run(path, c)
-        print(f"{('all' if c == 0 else c):>13} {r['resident_gb']:>11.2f} {r['load_s']:>7.1f} {r['cold_tps']:>10.1f} "
-              f"{r['warm_tps']:>10.1f} {('-' if r['hit_rate'] is None else format(r['hit_rate'], '.1%')):>8} "
-              f"{('-' if r['gb_read'] is None else format(r['gb_read'], '.2f')):>8} "
-              f"{('-' if r['read_mbps'] is None else format(r['read_mbps'], '.0f')):>9} "
-              f"{('-' if r['evictions'] is None else r['evictions']):>9}", flush=True)
+    print(f"{'experts/layer':>13} {'prefetch':>8} {'resident GB':>11} {'load s':>7} {'cold tok/s':>10} "
+          f"{'warm tok/s':>10} {'hit rate':>8} {'GB read':>8} {'read MB/s':>9} {'evictions':>9} "
+          f"{'pf used':>8} {'pf late':>8} {'pf unused':>9}")
+    for _ in range(repeat):
+        for c in caps:
+            for m in (modes if c else [None]):
+                r = run(path, c, prefetch=m)
+                pf = r["prefetch"] or {}
+                print(f"{('all' if c == 0 else c):>13} {(m or '-'):>8} {r['resident_gb']:>11.2f} {r['load_s']:>7.1f} "
+                      f"{r['cold_tps']:>10.1f} {r['warm_tps']:>10.1f} "
+                      f"{('-' if r['hit_rate'] is None else format(r['hit_rate'], '.1%')):>8} "
+                      f"{('-' if r['gb_read'] is None else format(r['gb_read'], '.2f')):>8} "
+                      f"{('-' if r['read_mbps'] is None else format(r['read_mbps'], '.0f')):>9} "
+                      f"{('-' if r['evictions'] is None else r['evictions']):>9} "
+                      f"{pf.get('used', '-'):>8} {pf.get('late', '-'):>8} {pf.get('unused', '-'):>9}", flush=True)
 
 
 if __name__ == "__main__":
