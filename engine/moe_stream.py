@@ -616,12 +616,17 @@ def _layer_of(name):
     return re.split(r"\.switch_mlp\.|\.experts\.", name)[0]
 
 
-def plan(folder, config, mem_limit, total_ram, headroom_gb=2.5, idx=None):
+def plan(folder, config, mem_limit, total_ram, headroom_gb=2.5, idx=None, free=None):
     """None when the model is not a MoE or fits whole; else {"capacity": experts per layer, …}.
 
     `auto` streams only when the weights plus headroom would not fit under the RAM limit; `on` always (to try it
     on a model that fits), `off` never. The capacity is what is left of the budget after the always-resident
-    part, spread over the MoE layers — but never below what one token needs (top-k) times two."""
+    part, spread over the MoE layers — but never below what one token needs (top-k) times two.
+
+    `free` is what may still be allocated now (memory.headroom_bytes when the model loads). Given, the budget is
+    the smaller of the two: the apps already open are counted, so on a busy Mac a model keeps fewer experts (and
+    one that would fit only an empty Mac streams) instead of filling the RAM until every request is refused.
+    Free memory alone never refuses a model: it gets the least that works, and requests check the RAM as usual."""
     if mode() == "off":
         return None
     tc = config.get("text_config") or config
@@ -633,26 +638,32 @@ def plan(folder, config, mem_limit, total_ram, headroom_gb=2.5, idx=None):
     if not experts:
         return None
     total = (experts + rest) / GiB
-    budget = total_ram * mem_limit / GiB - headroom_gb
+    budget_ram = total_ram * mem_limit / GiB - headroom_gb
+    budget = budget_ram if free is None else min(budget_ram, free / GiB - headroom_gb)
     if mode() != "on" and total <= budget:
         return None
     top_k = tc.get("num_experts_per_tok") or tc.get("num_experts_per_token") or 2
     layers = len({_layer_of(k) for k, v in idx.items() if _is_expert(k, v[4])})
     per_expert = experts / max(1, layers) / n_exp                      # bytes of one expert, all its matrices
     forced = os.environ.get("LLM_MOE_CACHE")
-    room = budget - rest / GiB
-    cap = int(forced) if forced else int(room * GiB // max(1, layers * per_expert))
-    cap = min(cap, n_exp)
+
+    def capacity(budget_gb):
+        return int(max(0.0, budget_gb - rest / GiB) * GiB // max(1, layers * per_expert))
+
+    cap = min(int(forced) if forced else capacity(budget), n_exp)
     need = max(2 * top_k, top_k + 2)
     # A pool of any size works (a long prompt is split into groups, a step that wants more experts than fit is
     # too), so a capacity the user forced is honoured. An automatic one must leave room for two tokens' experts,
     # or the model would read most of what it uses from disk on every token.
+    if cap < need and not forced and capacity(budget_ram) >= need:
+        cap = min(need, n_exp)                  # what is free now is short, the Mac is not: the least that works
     if cap < need and not forced:
         raise StreamError(
             f"even streamed, this model needs about {(rest + layers * per_expert * need) / GiB + headroom_gb:.1f} GB "
             f"({need} experts resident per layer next to the {rest / GiB:.1f} GB that is always loaded); "
             f"{total_ram * mem_limit / GiB:.1f} GB is available")
     return {"capacity": cap, "thrashing": cap < top_k, "experts": n_exp, "top_k": top_k, "layers": layers, "total_gb": total,
+            "limited": budget < budget_ram and not forced, "free_gb": None if free is None else free / GiB,
             "experts_gb": experts / GiB, "resident_gb": (rest + layers * cap * per_expert) / GiB}
 
 

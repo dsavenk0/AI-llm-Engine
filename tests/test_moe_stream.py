@@ -440,6 +440,23 @@ class TestPlan(unittest.TestCase):
         self.assertTrue(4 <= p["capacity"] <= 9, p)
         self.assertLess(p["resident_gb"], p["total_gb"])
 
+    def test_the_apps_already_open_leave_fewer_experts_but_never_too_few(self):
+        """`free` (what may be allocated now) lowers the pool below what the RAM alone would allow; when even the
+        least that works is not free now, the model still gets that much (the Mac has the room), not a refusal."""
+        os.environ.pop("LLM_MOE_STREAM", None)
+        os.environ.pop("LLM_MOE_CACHE", None)
+        experts, rest = M.expert_bytes(self.dir)
+        ram = 64 * 2**30                                                  # the whole model fits an empty Mac
+        self.assertIsNone(M.plan(self.dir, self.cfg, 0.88, ram, headroom_gb=0))
+        self.assertIsNone(M.plan(self.dir, self.cfg, 0.88, ram, headroom_gb=0, free=2 * (rest + experts)))
+        p = M.plan(self.dir, self.cfg, 0.88, ram, headroom_gb=0, free=rest + experts * 0.5)
+        self.assertTrue(p["limited"])
+        self.assertTrue(4 <= p["capacity"] <= 9, p)                        # half of the 16 experts
+        p = M.plan(self.dir, self.cfg, 0.88, ram, headroom_gb=0, free=0)
+        self.assertEqual((p["capacity"], p["limited"]), (4, True))          # top-k 2: two tokens' worth
+        os.environ["LLM_MOE_CACHE"] = "3"
+        self.assertEqual(M.plan(self.dir, self.cfg, 0.88, ram, headroom_gb=0, free=0)["capacity"], 3)
+
     def test_off_and_on_and_the_forced_capacity(self):
         os.environ["LLM_MOE_STREAM"] = "off"
         self.assertIsNone(M.plan(self.dir, self.cfg, 0.88, 1 * 2**30))

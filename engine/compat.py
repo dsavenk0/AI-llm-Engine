@@ -189,7 +189,8 @@ class CompatEngine(DecodeLoop):
         plan = None
         if os.path.isdir(self.path):
             try:
-                plan = moe_stream.plan(self.path, self.config, self.mem_limit, memory.TOTAL)
+                plan = moe_stream.plan(self.path, self.config, self.mem_limit, memory.TOTAL,
+                                       free=memory.headroom_bytes(self.mem_limit))
             except moe_stream.StreamError as e:
                 raise MemoryLimitError(str(e)) from None
         if plan:
@@ -197,6 +198,9 @@ class CompatEngine(DecodeLoop):
                 self.model, self.tok, self.moe = moe_stream.load(self.path, plan, self.log)
                 streamed = (f", experts streamed from disk: {plan['capacity']} of {plan['experts']} per layer "
                             f"resident ({plan['resident_gb']:.1f} of {plan['total_gb']:.1f} GiB)")
+                if plan.get("limited"):
+                    streamed += (f" — fewer for the apps already open ({max(0.0, plan['free_gb']):.1f} GiB free "
+                                 f"under the limit); more after a restart with more free memory")
                 if plan["thrashing"]:
                     self.log(f"moe: a pool of {plan['capacity']} is smaller than the {plan['top_k']} experts one "
                              f"token uses — every token will read from disk")
