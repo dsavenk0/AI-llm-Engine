@@ -923,6 +923,7 @@ struct SettingsTab: View {
     @ObservedObject var e: EngineState
     @State private var advanced = false
     @State private var customURL = ""
+    @State private var speechNote = ""          // the neural voice's install progress / state
 
     var model: ModelInfo? { e.models.first { $0.path == e.modelPath } }
 
@@ -1040,6 +1041,7 @@ struct SettingsTab: View {
                 toggle(L("Voice chat module", "Модуль: голосовой чат"),
                        Binding(get: { AppHost.enabled(.voice) }, set: { AppHost.setEnabled(.voice, $0); e.objectWillChange.send() }),
                        hint: L("Off: no voice chat, and the widget's voice button does nothing", "Выкл.: нет голосового чата, кнопка виджета ничего не делает"))
+                if AppHost.enabled(.voice) { speechVoiceSettings }
                 toggle(L("Knowledge module", "Модуль: Knowledge"),
                        Binding(get: { AppHost.enabled(.knowledge) }, set: { AppHost.setEnabled(.knowledge, $0); e.objectWillChange.send() }),
                        hint: L("Off: no Knowledge page in Tools and no books button in the chats; indexed data stays on disk",
@@ -1180,6 +1182,87 @@ struct SettingsTab: View {
             }
             Hint(text: hint)
         }.help(hint)
+    }
+
+    /// Which system voice reads replies aloud, per language (app/core/SpeechVoices.swift), and where to get better ones.
+    var speechVoiceSettings: some View {
+        let ru = useRussian
+        func picker(_ lang: String, _ title: String) -> some View {
+            let voices = SpeechVoices.installed(lang)
+            let options = [("", L("Auto — the best installed", "Авто — лучший установленный"))]
+                + voices.map { ($0.identifier, "\($0.name) (\(SpeechVoices.quality($0, russian: ru)))") }
+            return labeledPicker(title, Binding(get: { SpeechVoices.chosen(lang) ?? "" },
+                                                set: { SpeechVoices.choose($0.isEmpty ? nil : $0, for: lang); e.objectWillChange.send() }),
+                                 options)
+        }
+        let compactOnly = ["ru", "en"].allSatisfy { lang in SpeechVoices.installed(lang).allSatisfy { $0.quality == .default } }
+        let neural = (UserDefaults.standard.string(forKey: NeuralVoice.engineKey) ?? "system") == "qwen3tts"
+        return VStack(alignment: .leading, spacing: 6) {
+            labeledPicker(L("Voice engine", "Движок голоса"),
+                          Binding(get: { UserDefaults.standard.string(forKey: NeuralVoice.engineKey) ?? "system" },
+                                  set: { v in
+                                      UserDefaults.standard.set(v, forKey: NeuralVoice.engineKey)
+                                      e.objectWillChange.send()
+                                      if v == "qwen3tts" { prepareNeuralVoice() } else { speechNote = "" }
+                                  }),
+                          [("system", L("System (default)", "Системный (по умолчанию)")),
+                           ("qwen3tts", L("Qwen3-TTS — neural, ~1.6 GB", "Qwen3-TTS — нейросеть, ~1,6 ГБ"))])
+            if neural {
+                labeledPicker(L("Neural voice", "Голос нейросети"),
+                              Binding(get: { NeuralVoice.speaker },
+                                      set: { UserDefaults.standard.set($0, forKey: NeuralVoice.speakerKey); e.objectWillChange.send() }),
+                              NeuralVoice.speakers.map { ($0, $0.replacingOccurrences(of: "_", with: " ").capitalized) })
+                Hint(text: speechNote.isEmpty
+                     ? L("Loaded only while the voice chat is open. English and 8 more languages; Russian stays with the system voice.",
+                         "Загружается, только пока открыт голосовой чат. Английский и ещё 8 языков; русский читает системный голос.")
+                     : speechNote)
+            }
+            picker("ru", L("Russian voice", "Голос: русский"))
+            picker("en", L("English voice", "Голос: английский"))
+            HStack {
+                Hint(text: compactOnly
+                     ? L("Only compact voices are installed — they sound robotic. Enhanced and Premium voices are a free download.",
+                         "Установлены только компактные голоса — они звучат роботизированно. Улучшенные и премиум-голоса скачиваются бесплатно.")
+                     : L("Replies are read by the voice chosen for their language.", "Ответ читается голосом, выбранным для его языка."))
+                Spacer()
+                Button(L("Get better voices…", "Скачать голоса…")) { SpeechVoices.openDownloads() }
+                    .buttonStyle(NeonButton(color: HUD.cyan)).fixedSize()
+            }
+        }.padding(.leading, 8)
+    }
+
+    /// The neural voice was chosen: install its environment and model in the background if they are missing.
+    /// Only one preparation at a time, however often the picker is set (SwiftUI may call the setter repeatedly).
+    static var preparingVoice = false
+
+    func prepareNeuralVoice() {
+        guard !SettingsTab.preparingVoice else { return }
+        SettingsTab.preparingVoice = true
+        let failed = L("Could not install the neural voice — the system voice keeps reading.",
+                       "Не удалось установить нейросетевой голос — читает системный.")
+        CLI.run(["speech", "status"]) { _, out in
+            let env = out.contains("\"installed\": true"), model = out.contains("\"model\": true")
+            if env && model { speechNote = ""; SettingsTab.preparingVoice = false; return }
+            // the model goes through the one download queue (shown under Downloads, pausable, never twice); only
+            // the small environment is installed here
+            func fetchModel() {
+                if model { speechNote = L("The neural voice is ready.", "Нейросетевой голос готов."); return }
+                speechNote = L("Downloading the voice model — see Downloads in the Models tab.",
+                               "Скачиваю модель голоса — см. «Загрузки» во вкладке «Модели».")
+                Downloader.shared.start(NeuralVoice.model) {
+                    CLI.run(["speech", "status"]) { _, again in
+                        speechNote = again.contains("\"model\": true")
+                            ? L("The neural voice is ready.", "Нейросетевой голос готов.") : ""
+                    }
+                }
+            }
+            if env { fetchModel(); SettingsTab.preparingVoice = false; return }
+            speechNote = L("Installing the neural voice…", "Устанавливаю нейросетевой голос…")
+            CLI.run(["speech", "setup", "--no-model"]) { code, _ in
+                SettingsTab.preparingVoice = false
+                if code == 0 { fetchModel() } else { speechNote = failed }
+            }
+        }
     }
 
     func toggle(_ label: String, _ b: Binding<Bool>, hint: String) -> some View {

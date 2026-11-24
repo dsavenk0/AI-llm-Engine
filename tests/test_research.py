@@ -270,7 +270,7 @@ class TestCli(unittest.TestCase):
     def test_flag_values_are_consumed_but_question_words_are_kept(self):
         import llm
         seen = {}
-        with mock.patch.object(llm, "web_research_cmd", lambda cfg, q, mode, focus, as_json: seen.update(
+        with mock.patch.object(llm, "web_research_cmd", lambda cfg, q, mode, focus, as_json, evidence=False: seen.update(
                 q=q, mode=mode, focus=focus, json=as_json) or True):
             llm.web_cmd(["research", "is", "smart", "auto", "pilot", "safe", "--mode", "deep", "--json"], cfg={})
         self.assertEqual(seen, {"q": "is smart auto pilot safe", "mode": "deep", "focus": "auto", "json": True})

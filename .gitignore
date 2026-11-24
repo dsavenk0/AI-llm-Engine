@@ -21,6 +21,7 @@ dist/
 docs/*.dmg
 llama.cpp/
 .venv-images/
+.venv-speech/
 .build-cache/
 docs/LLMBar-*-offline.dmg
 

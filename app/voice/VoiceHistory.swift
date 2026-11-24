@@ -222,6 +222,23 @@ enum WebLookup {
         return Found(hits: hits, pages: pages, error: obj["error"] as? String)
     }
 
+    /// The JSON line `llm web research --json` prints: (the evidence report, how the research ended, sources).
+    static func parseResearch(_ json: String) -> (report: String, state: String, sources: Int)? {
+        guard let line = json.split(separator: "\n").last(where: { $0.hasPrefix("{") }),
+              let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+              let report = obj["report"] as? String else { return nil }
+        return (report, obj["state"] as? String ?? "", (obj["sources"] as? [Any])?.count ?? 0)
+    }
+
+    /// Text for the system prompt from a research run: the numbered, fenced sources, and how to speak about them.
+    static func researchContext(query: String, json: String, maxChars: Int = 6000) -> String? {
+        guard let r = parseResearch(json), r.sources > 0 else { return nil }
+        let body = r.report.count > maxChars ? String(r.report.prefix(maxChars)) + " …" : r.report
+        return "The web was just searched for \"\(query)\" across several sources; the evidence is below. It is more "
+            + "current than your memory: answer from it. This answer is spoken: name a source by its site in a few "
+            + "words when you rely on it, and never read out URLs or source IDs like [S1].\n\n" + body
+    }
+
     /// Text appended to the system prompt: the results, or an honest note that the lookup failed.
     static func context(query: String, found: Found?, maxChars: Int = 5000) -> String {
         guard let f = found, f.error == nil, !f.hits.isEmpty else {

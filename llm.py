@@ -1510,10 +1510,11 @@ def inspect_cmd(cfg, args):
     return True
 
 
-def web_research_cmd(cfg, question, mode="smart", focus="auto", as_json=False):
+def web_research_cmd(cfg, question, mode="smart", focus="auto", as_json=False, evidence=False):
     """`./llm web research "<question>" [--mode quick|smart|deep] [--focus …] [--json]`: several queries over the
     sources that suit the question, the best pages read, an answer with checked citations by the running model —
-    or, with no model running, the evidence itself with its sources."""
+    or, with no model running (or `--evidence`, for a caller that answers itself, like LLM Voice), the evidence
+    itself with its sources. The JSON carries that evidence as "report"."""
     from harness import research
     model = None
     if health(cfg):
@@ -1523,14 +1524,15 @@ def web_research_cmd(cfg, question, mode="smart", focus="auto", as_json=False):
     progress = None if quiet else (lambda stage, text, **info: print(DIM("· " + text), flush=True))
     result = research.run(question, mode=mode, focus=focus, model=model, progress=progress)
     text = None
-    if model is not None and result["ledger"].items:
+    if model is not None and result["ledger"].items and not evidence:
         try:
             text = research.answer(result, model)
         except Exception as e:                       # a dropped or malformed stream: the evidence still stands
             text = None
             result["errors"]["model"] = f"{type(e).__name__}: {e}"[:200]
     if as_json:
-        print(json.dumps({**research.as_json(result), "answer": text}, ensure_ascii=False))
+        print(json.dumps({**research.as_json(result), "answer": text, "report": research.report(result)},
+                         ensure_ascii=False))
     elif text:
         print("\n" + text)
     else:
@@ -1546,7 +1548,7 @@ def web_cmd(args, cfg=None):
     from concurrent.futures import ThreadPoolExecutor
     from harness import web
     if args[:1] == ["research"]:
-        mode, focus, as_json, words, i = "smart", "auto", False, [], 1
+        mode, focus, as_json, evidence, words, i = "smart", "auto", False, False, [], 1
         while i < len(args):                        # only a flag's own value is consumed, never a word of the question
             if args[i] in ("--mode", "--focus") and i + 1 < len(args):
                 mode, focus = (args[i + 1], focus) if args[i] == "--mode" else (mode, args[i + 1])
@@ -1554,6 +1556,8 @@ def web_cmd(args, cfg=None):
                 continue
             if args[i] == "--json":
                 as_json = True
+            elif args[i] == "--evidence":
+                evidence = True
             else:
                 words.append(args[i])
             i += 1
@@ -1562,7 +1566,7 @@ def web_cmd(args, cfg=None):
             print(T("Usage:") + ' ./llm web research "<question>" [--mode quick|smart|deep] '
                   '[--focus auto|web|docs|academic|news|discussions] [--json]')
             return False
-        return web_research_cmd(cfg or load_cfg(), question[:600], mode, focus, as_json)
+        return web_research_cmd(cfg or load_cfg(), question[:600], mode, focus, as_json, evidence)
     words, opts, i = [], {}, 0
     while i < len(args):
         if args[i] in ("--n", "--read") and i + 1 < len(args):
@@ -1691,6 +1695,60 @@ def setup(compat=False):
 
 
 IMAGES_VENV = os.path.join(DATA, ".venv-images")
+SPEECH_VENV = os.path.join(DATA, ".venv-speech")
+SPEECH_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit"
+# mlx-audio without its extras (transformers, sounddevice, servers…): Qwen3-TTS needs only these next to it; scipy
+# because mlx-audio's codec package imports it. Pinned: its private module layout is what engine/tts.py relies on.
+SPEECH_PACKAGES = ("mlx>=0.32.4", "numpy", "tqdm", "tokenizers", "scipy")
+SPEECH_MLX_AUDIO = "mlx-audio==0.6.5"
+
+
+def speech_status():
+    """{"installed", "model", "path"} of the optional neural voice for LLM Voice."""
+    py = os.path.join(SPEECH_VENV, "bin", "python")
+    path = _pull_dest(SPEECH_MODEL)
+    # the environment counts once its packages are in it, not when the venv merely exists (a failed pip leaves one)
+    pkgs = glob.glob(os.path.join(SPEECH_VENV, "lib", "python3*", "site-packages"))
+    ready = os.path.exists(py) and any(os.path.isdir(os.path.join(d, n)) for d in pkgs for n in ("mlx_audio",)) and \
+        any(os.path.isdir(os.path.join(d, "scipy")) for d in pkgs)
+    return {"installed": ready, "model": install_state(SPEECH_MODEL) == "complete", "path": path}
+
+
+def speech_cmd(args):
+    """`./llm speech setup|status|serve`: the neural voice LLM Voice can use instead of the system one (off by
+    default; chosen in LLMBar's settings). `setup` makes its own small environment and downloads the model (~1.6 GB);
+    `serve` runs engine/tts.py in it — LLM Voice starts it while its window is open and stops it after."""
+    sub = args[0] if args else "status"
+    st = speech_status()
+    if sub == "status":
+        print(json.dumps(st))
+        return True
+    if sub == "setup":
+        py = os.path.join(SPEECH_VENV, "bin", "python")
+        env = network_env(load_cfg())
+        if not os.path.exists(py):
+            print(T("Creating the voice environment…"), flush=True)
+            if subprocess.run([find_python(), "-m", "venv", SPEECH_VENV]).returncode != 0:
+                return False
+        steps = ([py, "-m", "pip", "install", "-q", "--upgrade", *SPEECH_PACKAGES],
+                 [py, "-m", "pip", "install", "-q", "--no-deps", SPEECH_MLX_AUDIO])
+        for cmd in steps:
+            if subprocess.run(cmd, env=env).returncode != 0:
+                print(R(T("Could not install the voice environment.")))
+                return False
+        # `--no-model`: LLMBar downloads the model through its own download queue (visible, pausable, one at a time)
+        if not st["model"] and "--no-model" not in args and not hf_pull(SPEECH_MODEL, "--progress" in args):
+            return False
+        print(G(T("The neural voice is ready.")))
+        return True
+    if sub == "serve":
+        py = os.path.join(SPEECH_VENV, "bin", "python")
+        if not (st["installed"] and st["model"]):
+            print(json.dumps({"error": "the neural voice is not installed: ./llm speech setup"}), flush=True)
+            return False
+        os.execv(py, [py, "-I", os.path.join(BASE, "engine", "tts.py"), st["path"]])
+    print(T("Usage:") + " ./llm speech setup [--no-model]|status|serve")
+    return False
 
 
 def setup_images():
@@ -4752,6 +4810,8 @@ COMMANDS = [
             "link to the engine (models, start/stop, page Q&A).", "./llm assistant setup|serve|install|uninstall|status|token",
             ("--json", "--reveal")),
 
+    Command("speech", "Setup & maintenance", "The optional neural voice for LLM Voice (Qwen3-TTS): setup, status, serve.",
+            "./llm speech setup|status|serve", ()),
     Command("setup", "Setup & maintenance", "Install the engine's environment, or an optional module.",
             "./llm setup [--compat|--ocr|--audio|--gguf|--images]",
             ("--compat", "--ocr", "--audio", "--gguf", "--images")),
@@ -4923,6 +4983,7 @@ def main():
         "check": lambda: check_cmd(cfg, "--json" in sys.argv),
         "web": lambda: web_cmd(sys.argv[2:], cfg),
         "inspect": lambda: inspect_cmd(cfg, sys.argv[2:]),
+        "speech": lambda: speech_cmd(sys.argv[2:]),
         "setup": lambda: setup_images() if "--images" in sys.argv else (
             setup_gguf() if "--gguf" in sys.argv else (
                 setup_ocr() if "--ocr" in sys.argv else (

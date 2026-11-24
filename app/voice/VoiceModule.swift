@@ -238,6 +238,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var silenceTimer: Timer?
     private var ask: Task<Void, Never>?
     private let synth = AVSpeechSynthesizer()
+    private let neural = NeuralVoice()          // the optional neural voice (LLMBar settings); system voice otherwise
+    private var replyNeural: Bool?              // one voice for a whole reply, decided by its first sentence
     private var pendingUtterances = 0
     private var streamDone = true
     private var modelTask: Task<Bool, Never>?
@@ -257,6 +259,9 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         localeID = UserDefaults.standard.string(forKey: "voiceLocale") ?? ""
         super.init()
         synth.delegate = self
+        neural.onFinished = { [weak self] in self?.utteranceDone() }
+        neural.onFallback = { [weak self] text in self?.speakSystem(text) }
+        neural.onLevel = { [weak self] level in self?.levelTarget = level }
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -286,7 +291,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         switch state {
         case .listening: finishListening()
         case .speaking, .thinking:
-            ask?.cancel(); synth.stopSpeaking(at: .immediate); pendingUtterances = 0
+            ask?.cancel(); silence()
             begin()
         case .starting: break
         default: begin()
@@ -303,8 +308,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     func stopReply() {
         dialogActive = false                       // do not start listening again when the reading breaks off
         ask?.cancel()
-        synth.stopSpeaking(at: .immediate)
-        pendingUtterances = 0
+        silence()
         stopCapture()                              // a barge-in listener may be open over the reply
         state = .idle
         levelTarget = 0
@@ -313,7 +317,8 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// Listening starts at once — the microphone and the recogniser do not need the model — while the model is
     /// brought up beside it; the question waits for the model only when it has been asked.
     func begin() {
-        synth.stopSpeaking(at: .immediate); pendingUtterances = 0   // pressing to speak always silences the reply
+        silence()                                                  // pressing to speak always silences the reply
+        neural.start(root: Setup.llmRoot)                          // the neural voice loads while the person talks
         heard = ""
         Task { await startListening() }
         Task { await refreshModel() }                              // the model's name is on screen at once
@@ -424,8 +429,17 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         dialogActive = false
         silenceTimer?.invalidate()
         ask?.cancel()
-        synth.stopSpeaking(at: .immediate)
+        silence()
+        neural.shutdown()                          // the neural voice's model leaves memory with the window
         stopCapture()
+    }
+
+    /// Stop reading the reply, whichever voice reads it.
+    private func silence() {
+        synth.stopSpeaking(at: .immediate)
+        neural.stop()
+        pendingUtterances = 0
+        replyNeural = nil
     }
 
     // ---- the model
@@ -714,8 +728,7 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// whole new utterance, which is then sent as the next turn (so the answer is supplemented, ChatGPT-style).
     private func onBargeIn() {
         vtrace("onBargeIn — cutting the reply off")
-        synth.stopSpeaking(at: .immediate)
-        pendingUtterances = 0
+        silence()
         heard = ""
         Task { await startListening() }
     }
@@ -876,9 +889,15 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return clearlyNeeds ? String(question.prefix(120)) : nil
     }
 
-    /// Runs the search (`llm web search`) and turns what came back into text for the system prompt.
+    /// Researches the question on the web (`llm web research`, quick mode: several sources at once, the best pages
+    /// read, numbered evidence — Voice's own model then answers from it) and turns it into text for the system
+    /// prompt; the plain `llm web search` stays as the fallback when research finds nothing.
     private func webContext(_ query: String) async -> String {
         let root = Setup.llmRoot
+        let research = await Task.detached {
+            Voice.runLLM(["web", "research", query, "--mode", "quick", "--evidence", "--json"], root: root)
+        }.value
+        if let ctx = WebLookup.researchContext(query: query, json: research) { return ctx }
         let out = await Task.detached { Voice.runLLM(["web", "search", query, "--n", "4", "--read", "2"], root: root) }.value
         return WebLookup.context(query: query, found: WebLookup.parse(out))
     }
@@ -1038,12 +1057,31 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private func say(_ sentence: String) {
         let text = Sentences.spoken(sentence)
         guard speakReplies, speakCurrent, !text.isEmpty else { return }
-        let u = AVSpeechUtterance(string: text)
         let lang = NLLanguageRecognizer.dominantLanguage(for: text)?.rawValue
-        if let lang, let voice = AVSpeechSynthesisVoice(language: lang) ?? AVSpeechSynthesisVoice(language: String(lang.prefix(2))) {
+        // the first sentence of a reply picks its voice (a Russian reply stays with the system voice); the rest
+        // follows it, so two voices never read over each other
+        if pendingUtterances == 0 || replyNeural == nil { replyNeural = neural.takes(lang) }
+        pendingUtterances += 1
+        enterSpeaking()
+        if replyNeural == true, neural.ready {
+            neural.speak(text, lang: lang ?? "en")
+        } else {
+            speakSystem(text, lang: lang)
+        }
+    }
+
+    /// One sentence by the system voice (already counted in pendingUtterances).
+    private func speakSystem(_ text: String, lang: String? = nil) {
+        let u = AVSpeechUtterance(string: text)
+        let lang = lang ?? NLLanguageRecognizer.dominantLanguage(for: text)?.rawValue
+        // the person's chosen voice for this language, else the best installed one (Premium > Enhanced > compact)
+        if let lang, let voice = SpeechVoices.voice(for: lang) {
             u.voice = voice
         }
-        pendingUtterances += 1
+        synth.speak(u)
+    }
+
+    private func enterSpeaking() {
         if state != .speaking {
             state = .speaking
             // Barge-in exists only in dialog mode: with it off nothing listens while the reply is read, so
@@ -1051,7 +1089,6 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             if dialogMode { Task { await startListening(bargeIn: true) } }
             else { vtrace("speaking, but dialogMode is off — no barge-in listener") }
         }
-        synth.speak(u)
     }
 
     // ---- AVSpeechSynthesizerDelegate: the orb breathes with the words
@@ -1062,14 +1099,17 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        Task { @MainActor in
-            self.pendingUtterances = max(0, self.pendingUtterances - 1)
-            if self.pendingUtterances == 0, self.streamDone {
-                self.stopCapture()                  // end the barge-in listener before the dialog listener opens
-                self.state = .idle
-                self.levelTarget = 0
-                self.resumeDialog()
-            }
+        Task { @MainActor in self.utteranceDone() }
+    }
+
+    /// A sentence has been read, by either voice: when it was the last and the reply is complete, listen again.
+    private func utteranceDone() {
+        pendingUtterances = max(0, pendingUtterances - 1)
+        if pendingUtterances == 0, streamDone {
+            stopCapture()                           // end the barge-in listener before the dialog listener opens
+            state = .idle
+            levelTarget = 0
+            resumeDialog()
         }
     }
 }
