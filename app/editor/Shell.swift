@@ -123,8 +123,26 @@ private struct Toolbar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "folder.fill").foregroundColor(Palette.accent)
-            Text(ws.projectName).bold()
+            // the project is a menu, not a label: another folder or a recent project is always one click away
+            Menu {
+                Button("Open Folder…") { ws.onChooseProject?() }
+                let recent = Workspace.recentProjects.filter { $0 != ws.root }
+                if !recent.isEmpty {
+                    Section("Recent") {
+                        ForEach(recent.prefix(8), id: \.self) { p in
+                            Button((p as NSString).lastPathComponent) { ws.onOpenProject?(p) }
+                                .help((p as NSString).abbreviatingWithTildeInPath)
+                        }
+                    }
+                }
+                Divider()
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: ws.root)]) }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "folder.fill").foregroundColor(Palette.accent)
+                    Text(ws.projectName).bold()
+                }
+            }.menuStyle(.borderlessButton).fixedSize().help("Switch project (⌘O opens a folder)")
             if ws.git?.repo == true { BranchMenu(ws: ws) }
             Spacer()
             Picker("", selection: $ws.mode) {

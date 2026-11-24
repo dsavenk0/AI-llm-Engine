@@ -81,7 +81,35 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
             panel.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent()
         }
         panel.beginSheetModal(for: window) { [weak self] r in
-            if r == .OK, let url = panel.url { self?.open(url.path) }
+            if r == .OK, let url = panel.url { self?.switchProject(to: url.path) }
+        }
+    }
+
+    /// Open another project in this window — from the toolbar's project menu or the recent list — after asking what
+    /// to do with unsaved files.
+    func switchProject(to path: String) {
+        confirmLeaving { [weak self] in self?.open(path) }
+    }
+
+    /// Run `go` once nothing unsaved would be lost: at once when every file is saved, else after the person chose to
+    /// save or discard (nothing when they cancel).
+    private func confirmLeaving(_ go: @escaping () -> Void) {
+        let dirty = ws.open.filter(\.dirty)
+        if dirty.isEmpty { go(); return }
+        let a = NSAlert()
+        a.messageText = "\(dirty.count) file(s) have unsaved changes"
+        a.informativeText = dirty.map { $0.path }.joined(separator: "\n")
+        a.addButton(withTitle: "Save and switch")
+        a.addButton(withTitle: "Discard and switch")
+        a.addButton(withTitle: "Cancel")
+        switch a.runModal() {
+        case .alertFirstButtonReturn:
+            Task { @MainActor in
+                if await self.ws.saveAllAndWait() { go() }
+                else { self.ws.say("Could not save every file; the project was not switched", bad: true) }
+            }
+        case .alertSecondButtonReturn: go()
+        default: break
         }
     }
 
@@ -98,26 +126,7 @@ final class EditorWindowController: NSObject, NSWindowDelegate {
         }
         guard panel.runModal() == .OK, let url = panel.url else { return false }
         // switching the project replaces every open buffer: unsaved work must not vanish silently
-        let dirty = ws.open.filter(\.dirty)
-        if !dirty.isEmpty {
-            let a = NSAlert()
-            a.messageText = "\(dirty.count) file(s) have unsaved changes"
-            a.informativeText = dirty.map { $0.path }.joined(separator: "\n")
-            a.addButton(withTitle: "Save and switch")
-            a.addButton(withTitle: "Discard and switch")
-            a.addButton(withTitle: "Cancel")
-            switch a.runModal() {
-            case .alertFirstButtonReturn:
-                Task { @MainActor in
-                    if await self.ws.saveAllAndWait() { self.open(url.path) }
-                    else { self.ws.say("Could not save every file; the project was not switched", bad: true) }
-                }
-                return true
-            case .alertSecondButtonReturn: break
-            default: return false
-            }
-        }
-        open(url.path)
+        switchProject(to: url.path)
         return true
     }
 
@@ -313,7 +322,7 @@ final class EditorModule: NSObject, NSMenuItemValidation {
         c.show(near: current?.window)
         controllers.append(c)
         c.ws.onChooseProject = { [weak c] in c?.chooseProjectSheet() }
-        c.ws.onOpenProject = { [weak c] path in c?.open(path) }
+        c.ws.onOpenProject = { [weak c] path in c?.switchProject(to: path) }
         if let p = project { c.open(p) }
         else { c.ws.needsProject = true; c.ws.starting = false }         // the welcome screen, with the picker on top
     }
