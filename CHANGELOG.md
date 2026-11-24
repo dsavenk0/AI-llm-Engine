@@ -2,6 +2,62 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## 1.5.0 — 25 November
+
+### Added
+- **Inkling 2 Mini** (Thinking Machines) runs from its MLX version, before any released mlx-lm supports it: text,
+  reasoning, tool calls and images. On a 16 GB Mac its experts are read from the SSD as needed.
+- **Sub-agents in the terminal chat.** `/agents <name> <task>` opens a helper in its own Terminal window, where you
+  watch it work; when it is done the window closes and its report comes back to the chat. `/agents` shows what is
+  running, and `stop`, `say`, `show`, `log` and `result` manage each one. Ready-made explorer, reviewer and fixer
+  agents are included; your own are Markdown files in Claude Code's agent format, and the model can write one for
+  you or hand a task to an agent itself.
+- **Saved terminal chats.** Keep as many chats as you like and come back to any of them: `llm -c` continues the
+  last one, `llm -r` lets you pick one, and inside a chat `/chats`, `/open N`, `/rename`, `/delete N` and `/new`
+  manage them (`llm chats` lists them from the shell). Every message is saved as it is written, so closing the
+  window or pressing Ctrl+C loses nothing.
+- **Images in Qwen3.5 and Qwen3.6 GGUF models on the built-in decoder.** Their image projector (`mmproj`) is read
+  by the engine itself and loaded with the first picture, in about a second, while the model keeps running — no
+  switch to another runtime. Answers match llama.cpp's on Qwen3.5-0.8B. A model whose projector the engine does
+  not read starts on llama.cpp, which stays the fallback.
+- **A better voice for LLM Voice.** It now reads with the best system voice installed for each language, and
+  LLMBar's settings let you choose the voice per language and open the system's free download of Enhanced and
+  Premium voices. Optionally, a neural voice — Qwen3-TTS, chosen in the same settings and downloaded only then
+  (~1.6 GB) — reads English and eight more languages; it runs only while the voice chat is open, and Russian
+  replies stay with the system voice. LLM Voice also searches the web with the new multi-source research.
+- **Drag files into the terminal chat.** Drop a file or picture into Terminal, iTerm or the code editor's terminal
+  and it goes with your message; drop a folder and the chat offers to open it as the project.
+- A [privacy policy](PRIVACY.md): what stays on your Mac and the only times the app goes online. [NOTICE](NOTICE)
+  now asks that this repository not be used to train AI models.
+
+### Changed
+- **The terminal chat and the coding agent are one chat.** It talks, and works on a project once you attach one
+  with `/project` or say yes when it asks; the chat remembers its project. The command line works like Claude
+  Code, Codex and Gemini CLI: `llm` opens a chat, `llm "question"` starts one, `llm -p "question"` prints one
+  answer for scripts (also as JSON), `-n` names a chat and `--fork-session` continues in a copy, `-m` picks the
+  model, `--version` prints the version; `@file` adds a file to a message; the menu moved to `llm menu`.
+  `./llm install-cli` adds an `llm` command usable from any folder.
+- The terminal menu groups its actions, shows only the ones that apply, and takes the main one on Enter;
+  **New chat** and **Continue a chat…** open in new Terminal windows.
+- Search labels each GGUF model by what will run it, read from the file's architecture before downloading:
+  **engine**, **llama.cpp**, or **not supported** for draft models (such as DSpark) and experimental
+  architectures; the GGUF label is yellow.
+- The code editor's project name is a menu: open another folder or a recent project without leaving the window
+  (unsaved files are asked about first).
+- Right-click a model name to copy it or open its page on Hugging Face or ModelScope; the button that switches
+  models now says **Select**; the Terminal menu leads the Diagnostics section.
+- A mixture-of-experts model read from the SSD counts the apps already open: on a busy Mac it keeps fewer experts in
+  memory and answers, where before every request was refused for lack of memory.
+
+### Fixed
+- A model is never downloaded twice at once: a second download of the same model (from the app and the terminal,
+  say) is refused instead of writing into the same file.
+- Ctrl+C in the terminal chat stops the answer instead of closing the chat; leaving takes Ctrl+C twice. An answer
+  that starts repeating itself, or the same action tried over and over, is stopped instead of hanging, and leaving
+  the chat no longer waits for the model.
+- Inkling 2 with reasoning switched off no longer returns an empty answer: the reasoning it may still write shows as
+  reasoning, and the answer follows it.
+
 ## 1.4.0 — 16 November
 
 ### Added

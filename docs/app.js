@@ -128,7 +128,7 @@
       feat9_title: "Optional Modules, Off by Default",
       feat9_desc: "Knowledge — libraries of your PDFs, notes and code that a chat searches before answering, citing pages, with no extra model and nothing running until you add documents; a browser assistant for Safari and Chrome, ModelScope as a second model source, pictures drawn right in the chat through mflux, web research across several sources with numbered citations, saved skills in the Codex / Claude Code format, assistant tools over MCP servers, activation edits, another OpenAI-compatible server as the assistant's model, proxy and CA settings. None of it runs until you ask.",
       feat10_title: "GGUF on the Engine's Own Decoder",
-      feat10_desc: "Llama, Qwen2 and Qwen3 GGUF files are repacked into MLX quantization on load and run by the engine itself — the same server, prompt cache and speculation as everything else, with logits that match llama.cpp's. Anything else falls back to llama.cpp, downloaded only when needed.",
+      feat10_desc: "Llama, Qwen2, Qwen3 and Qwen3.5 / 3.6 GGUF files, i-quants included, are repacked into MLX quantization on load and run by the engine itself — the same server, prompt cache and speculation as everything else, with logits that match llama.cpp's; Qwen3.5 / 3.6 read images with their own projector. Anything else falls back to llama.cpp, downloaded only when needed.",
 
       perf_kicker: "// VERIFIED BENCHMARKS",
       perf_headline: "Real numbers. No cherry-picking.",
@@ -320,7 +320,7 @@
       feat9_title: "Необязательные модули — выключены по умолчанию",
       feat9_desc: "Knowledge — библиотеки ваших PDF, заметок и кода, в которых чат ищет перед ответом и ссылается на страницы, без второй модели и без работы, пока документов нет; браузерный ассистент для Safari и Chrome, ModelScope как второй источник моделей, картинки прямо в чате через mflux, исследование в интернете по нескольким источникам с пронумерованными ссылками, сохраняемые скилы в формате Codex / Claude Code, инструменты ассистента через MCP-серверы, правки активаций, другой OpenAI-совместимый сервер как модель ассистента, настройки прокси и CA. Ничего не работает, пока вы не попросите.",
       feat10_title: "GGUF на собственном декодере движка",
-      feat10_desc: "Файлы GGUF семейств Llama, Qwen2 и Qwen3 при загрузке перепаковываются в квантизацию MLX и исполняются самим движком — тот же сервер, кэш промпта и спекуляция, а логиты совпадают с llama.cpp. Всё остальное идёт через llama.cpp, который скачивается только по необходимости.",
+      feat10_desc: "Файлы GGUF семейств Llama, Qwen2, Qwen3 и Qwen3.5 / 3.6, включая i-кванты, при загрузке перепаковываются в квантизацию MLX и исполняются самим движком — тот же сервер, кэш промпта и спекуляция, а логиты совпадают с llama.cpp; Qwen3.5 / 3.6 читают картинки своим проектором. Всё остальное идёт через llama.cpp, который скачивается только по необходимости.",
 
       perf_kicker: "// ВЕРИФИЦИРОВАННЫЕ ЗАМЕРЫ",
       perf_headline: "Реальные цифры без прикрас.",

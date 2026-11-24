@@ -17,8 +17,9 @@ subscription, no account: download a model once and it works offline, with nothi
 - **🌐 A browser agent that never phones home.** In Safari, Firefox and Chromium it can read the page, answer
   questions, fill forms and carry out multi-step tasks. It uses the DOM when possible, vision when necessary, and
   asks before sending, buying, deleting or overwriting anything.
-- **🧠 Local models without the usual limits.** Run MLX and GGUF models, including models larger than available RAM.
-  LLMBar checks compatibility and memory before a download, then chooses the best available engine automatically.
+- **🧠 Local models without the usual limits.** Run MLX and GGUF models, including models larger than available RAM —
+  Inkling 2 Mini runs on a 16 GB Mac with its experts read from the SSD, ahead of upstream support. LLMBar checks
+  compatibility and memory before a download, then chooses the best available engine automatically.
 - **🛡 Built for everyday Macs.** System-wide memory protection keeps a 16 GB Mac responsive, even while several
   apps share the model.
 - **⚡ Fast on Apple Silicon.** Native Metal execution, prompt caching and speculative generation make local chat
@@ -89,13 +90,21 @@ Use the compact menu-bar chat or speak naturally in LLM Voice. Conversations sta
 LLMBar can prepare the optional local generator with your approval; vision models are selected the same way by
 what fits this Mac. Web search remains an explicit option rather than a hidden network dependency; when you switch
 it on, the assistant can research a question across several sources — the web, Wikipedia, GitHub, arXiv and
-developer forums — and answer with numbered links to the pages it actually read.
+developer forums — and answer with numbered links to the pages it actually read. LLM Voice reads replies with the
+best system voice installed for each language, or with an optional on-device neural voice.
 
 ### Native code editor
 
 Open a project, ask questions about the code, plan a change and review edits before they are applied. Save the way
 you like recurring tasks done as skills — in the same `SKILL.md` format Codex and Claude Code use — and manage
 them from the chat. The same local engine is also available to the editor or coding agent you already use.
+
+### Terminal chat and agents
+
+`llm` opens a chat in any folder and works like the coding CLIs you know: `llm -c` continues the last chat,
+`llm -r` picks one of the saved ones, `llm -p` answers once for scripts. Attach a project when the chat needs your
+files, and hand a task to a sub-agent that works in its own window and reports back. Ctrl+C stops an answer, never
+the chat.
 
 ### Knowledge from your documents
 
