@@ -39,3 +39,10 @@ Qwen2-VL image processor (Hugging Face transformers) — Apache License 2.0
   engine/vision.py: smart_resize and patch layout algorithm.
 
 Model weights are not part of this repository and carry their own licenses.
+
+Zero data retention / training policy for LLMs
+  The authors ask that this repository — its code, documentation, issues and
+  history — not be collected, retained or used to train, fine-tune or evaluate
+  machine-learning models, including large language models, and not be kept in
+  datasets for that purpose. This is a request, not an additional license
+  term: the Apache License, Version 2.0 alone governs the use of this code.

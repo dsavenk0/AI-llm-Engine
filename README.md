@@ -121,6 +121,8 @@ the time of day, moves its eyes and gives advice for the CLI section you are cur
 - Scans and text-only image fallback use Apple Vision locally.
 - Google OAuth tokens live in Keychain and are not exposed to browser pages.
 - Cloud-backed extras are optional and clearly separated from offline features.
+- No telemetry, and nothing you type is used for training. What is kept and when the app goes online:
+  [PRIVACY.md](PRIVACY.md).
 
 ## Performance
 
@@ -156,7 +158,7 @@ Run `./llm help` from a source checkout for the current CLI reference.
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Model weights are not included and keep their own
-licenses.
+licenses. [NOTICE](NOTICE) also asks that this repository not be used to train AI models.
 
 ---
 
