@@ -102,6 +102,9 @@ class TestHeader(unittest.TestCase):
             f.write(b"\0llama\0spark2_5\0")
         self.assertEqual(gguf.hub_gguf_route("spark2_5", (), False, d)[0], "gguf")
         self.assertEqual(gguf.hub_gguf_route("brand-new-arch", (), False, d)[0], "none")   # the library says no
+        route, why = gguf.hub_gguf_route("inkling2", (), False, d)
+        self.assertEqual(route, "none")
+        self.assertIn("MLX version runs", why)                     # engine/inkling2 runs the MLX checkpoints
 
     def test_a_dynamic_quant_is_offered_and_chosen_by_its_own_name(self):
         sib = [{"rfilename": f"m-{q}.gguf", "size": 1} for q in ("UD-IQ1_M", "UD-Q2_K_XL", "UD-Q4_K_M", "MXFP4_MOE")]

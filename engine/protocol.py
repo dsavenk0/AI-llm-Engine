@@ -41,6 +41,8 @@ OPTIONAL = (
     "parser_markers",     # the reasoning / tool-call tags of this model's template
     "parse_tool_calls",   # a model-specific tool-call parser; the server's own is the fallback
     "moe_stats",          # expert-pool hit rate and traffic, while a MoE model streams its experts
+    "output_filter",      # output_filter(thinking_open) -> .feed(text)/.finish(): rewrites a model's own reply
+                          # format into the markers the parser knows (Inkling 2), before parsing
 )
 
 # the keys every generate() ends with; a backend that cannot fill one reports None, never omits it

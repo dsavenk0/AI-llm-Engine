@@ -177,7 +177,8 @@ class CompatEngine(DecodeLoop):
     def _load(self):
         from mlx_lm import load
         from mlx.utils import tree_flatten
-        from . import moe_stream
+        from . import inkling2, moe_stream
+        inkling2.register()                  # architectures mlx-lm 0.32 does not have yet (Inkling 2)
         t0 = time.time()
         streamed = ""
         plan = None

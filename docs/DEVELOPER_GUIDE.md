@@ -810,7 +810,7 @@ downloads one and records it as the Conductor's `vision` role. Apple Vision OCR 
 |---|---|---|
 | native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
-| mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only | optional: `./llm setup --compat` |
+| mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only; Inkling 2 with images | optional: `./llm setup --compat` |
 | GGUF, own decoder | llama / Qwen2 / Qwen3 / Qwen3.5 hybrid (`qwen35`, `qwen35moe`) / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
 | GGUF, InferSSD | its explicitly profiled oversized DeepSeek 4.1 / Muse / Qwen 3.6 / Qwen 3.8 MoE architectures | optional, installed separately; never fetched by this project |
 | GGUF, llama.cpp | every other GGUF (other architectures, IQ1–IQ3, per-expert MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
@@ -824,7 +824,7 @@ What each route can do (also printed under every model by `./llm models` and in 
 | GGUF, own decoder | — (an image projector sends it to llama.cpp) | ✓ | when the template speaks `<tool_call>` | — | ✓ | ✓ |
 | GGUF, InferSSD | — | ✓ | ✓ | — | its runtime | SSD expert executor |
 | GGUF, llama.cpp | ✓ (with a projector) | ✓ | ✓ | — | its own `ngram-mod` | — |
-| mlx-lm | — | ✓ | when the template speaks tools | — | — | — |
+| mlx-lm | — (Inkling 2: ✓) | ✓ | when the template speaks tools | — | — | — |
 
 A Mixture-of-Experts GGUF file on the engine's own decoder streams its experts from disk when the complete
 decoded expert set would not fit the current safe RAM headroom (`LLM_GGUF_STREAM_EXPERTS=0` disables it) — a
@@ -902,6 +902,18 @@ disk, speed is set by the hit rate and the SSD (~2 GB/s here). It pays where rou
 shared expert and many experts per token's pick — the models that are far larger than memory in the first place.
 Not done: prefetching the next layer's experts while this one computes, and per-expert files with scales for
 architectures whose mlx-lm loader does not stack them (those load whole, with a note in the log).
+
+**Inkling 2** (Thinking Machines, `model_type` `inkling2_loop`; e.g. `mlx-community/Inkling-2-Mini-4bit`) runs
+on the mlx-lm route although no released mlx-lm has it: `engine/inkling2/` is mlx-lm pull request #2086 (MIT),
+with the few pieces of mlx-lm's main branch it needs (stacked experts with a per-expert nvfp4 scale), and
+`register()` makes mlx-lm load it like its own. The model is a looped MoE — layers 6–17 run three times per token,
+128 experts per layer in nvfp4 / mxfp8 — with relative-position and depth attention, whose Metal kernels come
+from the pull request. Its experts stream from the SSD like any MLX MoE (they are 14.6 of its 16.1 GiB), and
+since the loop visits a core layer three times, a token touches up to 24 of that layer's experts. Its reply
+format (`<|content_thinking|>`, `<|content_text|>`, `<|content_invoke_tool_json|>` segments) is rewritten for
+the server's parser by `engine/inkling2/chat.py`; `reasoning_effort` "none" turns reasoning off. Images go
+through its vision tower (40-pixel blocks, scaled to `--max-pixels`). Its GGUF files need llama.cpp support that
+is not released yet: search labels them so and points to the MLX version.
 
 Not supported: non-MLX, non-GGUF weights, 1-bit affine JANG. Speculative decoding with a trained drafter (DFlash,
 DSpark) is not implemented: measured, the vendor's own numbers say it does not pay on Apple Silicon (≈1.2× at best on

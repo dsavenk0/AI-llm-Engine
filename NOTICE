@@ -16,7 +16,9 @@ jang / jangq (https://github.com/jjang-ai/jangq) — Apache License 2.0
 mlx-lm (https://github.com/ml-explore/mlx-lm) — MIT License
   Copyright © 2023 Apple Inc.
   engine/gated_delta.py: gated delta rule Metal kernel; Qwen3.5 / Qwen3-Next
-  model structure. License text: third_party/LICENSE.mlx-lm
+  model structure. engine/inkling2/: the Inkling 2 model, its Metal kernels and
+  checkpoint renaming (pull request #2086, not yet released) and the expert
+  layers of mlx-lm's main branch it needs. License text: third_party/LICENSE.mlx-lm
 
 ggml / llama.cpp (https://github.com/ggml-org/llama.cpp) — MIT License
   Copyright (c) 2023-2026 The ggml authors.

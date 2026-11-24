@@ -67,6 +67,10 @@ TOPK_ROUTERS = {"Qwen3MoeSparseMoeBlock", "Qwen2MoeSparseMoeBlock", "OlmoeSparse
                 "Qwen3NextSparseMoeBlock"}
 # the names mlx-lm gives the stacked expert projections of a layer
 GLU = ("gate_proj", "up_proj", "down_proj")
+# Inkling 2 (engine/inkling2): gate and up in one stacked matrix, their rows alternating
+GATE_UP = ("gate_up_proj", "down_proj")
+# what one expert's matrix may consist of; global_scale is nvfp4's per-expert tensor scale (shape (experts,))
+PARTS = ("weight", "scales", "biases", "global_scale")
 MLP = ("fc1", "fc2")
 
 
@@ -101,10 +105,12 @@ _PER_EXPERT = re.compile(r"\.experts\.\d+\.")
 
 
 def _is_expert(name, shape):
-    """A tensor of the routed experts: stacked ([E, …] under switch_mlp) or one expert's own (experts.N.…)."""
+    """A tensor of the routed experts: stacked ([E, …] under switch_mlp, or under mlp.experts as Inkling 2 keeps
+    them) or one expert's own (experts.N.…)."""
     if "shared" in name:
         return False
-    return (len(shape) >= 3 and ".switch_mlp." in name) or bool(_PER_EXPERT.search(name))
+    return ((len(shape) >= 3 and (".switch_mlp." in name or ".mlp.experts." in name))
+            or bool(_PER_EXPERT.search(name)))
 
 
 # what each checkpoint calls an expert's matrices, by the name mlx-lm gives the module
@@ -119,7 +125,7 @@ def find_tensors(idx, path, proj, n_experts):
     {"weight": …, "scales": …, "biases": …} with the parts that exist."""
     base = path.rsplit(".", 1)[0] + ".experts."
     out = {}
-    for part in ("weight", "scales", "biases"):
+    for part in PARTS:
         stacked = idx.get(f"{path}.{proj}.{part}")
         if stacked is not None:
             out[part] = stacked
@@ -176,7 +182,7 @@ class Files:
 
     def read_into(self, path, offset, out):
         """Fill the writable buffer `out` from the file at `offset` — no intermediate copy."""
-        view = memoryview(out).cast("B")
+        view = memoryview(out.reshape(-1) if hasattr(out, "reshape") else out).cast("B")   # 0-d arrays too
         n = os.preadv(self._fd(path), [view], offset)
         if n != len(view):
             raise StreamError(f"{path}: wanted {len(view)} bytes at {offset}, the file gave {n} (truncated?)")
@@ -205,7 +211,7 @@ class LayerPool:
         self.readers = readers
         self.slab, self.parts, self.arrays = {}, {}, {}
         for p in names:
-            self.parts[p] = [k for k in ("weight", "scales", "biases") if k in tensors[p]]
+            self.parts[p] = [k for k in PARTS if k in tensors[p]]
             for k in self.parts[p]:
                 t = tensors[p][k]
                 path, off, nbytes, dt, shape = t[0] if isinstance(t, list) else t
@@ -249,7 +255,7 @@ class LayerPool:
         """Read one expert tensor straight into its row of the staging block."""
         key, i, e, blocks = job
         path, off = self.slab[key][4](e)
-        self.files.read_into(path, off, blocks[key][i])
+        self.files.read_into(path, off, blocks[key][i:i + 1])     # a slice: writable even when a row is a scalar
 
     def _read_expert(self, e, bufs):
         """A speculative read: every tensor of expert `e` into its own CPU buffers (one expert per job, like
@@ -510,6 +516,7 @@ class StreamedSwitch(nn.Module):
         super().__init__()
         self.pool, self.names, self.activation, self.quant = pool, names, activation, quant
         self.glu = names == GLU
+        self.gate_up = names == GATE_UP
         # set by stream_experts: the model's prefetch policy, and a _Link when the next layer's picks can be guessed
         self._policy = None
         self._next = None
@@ -519,10 +526,14 @@ class StreamedSwitch(nn.Module):
         if self.quant["bits"]:
             return mx.gather_qmm(x, p[proj, "weight"], p[proj, "scales"], p.get((proj, "biases")),
                                  rhs_indices=local, transpose=True, group_size=self.quant["group_size"],
-                                 bits=self.quant["bits"], mode=self.quant["mode"], sorted_indices=srt)
+                                 bits=self.quant["bits"], mode=self.quant["mode"],
+                                 global_scale=p.get((proj, "global_scale")), sorted_indices=srt)
         return mx.gather_mm(x, p[proj, "weight"].swapaxes(-1, -2), rhs_indices=local, sorted_indices=srt)
 
     def _run(self, x, local, srt=False):
+        if self.gate_up:
+            gu = self._gather(x, "gate_up_proj", local, srt)
+            return self._gather(self.activation(gu[..., 0::2], gu[..., 1::2]), "down_proj", local, srt)
         if self.glu:
             up = self._gather(x, "up_proj", local, srt)
             gate = self._gather(x, "gate_proj", local, srt)
@@ -602,7 +613,7 @@ def mode():
 
 
 def _layer_of(name):
-    return name.split(".switch_mlp.")[0] if ".switch_mlp." in name else _PER_EXPERT.split(name)[0]
+    return re.split(r"\.switch_mlp\.|\.experts\.", name)[0]
 
 
 def plan(folder, config, mem_limit, total_ram, headroom_gb=2.5, idx=None):
@@ -734,9 +745,12 @@ def stream_experts(model, folder, plan_, log=print):
     swapped, streamed = 0, []
     for path, mod in list(model.named_modules()):
         cname = type(mod).__name__
-        if cname not in ("SwitchGLU", "SwitchMLP"):
+        if cname == "Experts" and "gate_up_proj" in mod and "down_proj" in mod:
+            names, activation = GATE_UP, mod.act_fn                       # Inkling 2: act_fn(gate, up)
+        elif cname in ("SwitchGLU", "SwitchMLP"):
+            names, activation = (GLU if cname == "SwitchGLU" else MLP), mod.activation
+        else:
             continue
-        names = GLU if cname == "SwitchGLU" else MLP
         first = getattr(mod, names[0])
         n_exp = first["weight"].shape[0]
         tensors = {}
@@ -759,13 +773,13 @@ def stream_experts(model, folder, plan_, log=print):
         parent = model
         for part in parent_path.split(".") if parent_path else []:
             parent = parent[int(part)] if part.isdigit() else getattr(parent, part)
-        sw = StreamedSwitch(pool, names, mod.activation, quant)
+        sw = StreamedSwitch(pool, names, activation, quant)
         sw._policy = st.policy
         setattr(parent, attr, sw)
         streamed.append((path, sw))
         swapped += 1
     if not swapped:
-        raise StreamError("no SwitchGLU / SwitchMLP layers in this model: nothing to stream")
+        raise StreamError("no expert layers (SwitchGLU, SwitchMLP, Inkling 2's Experts) in this model: nothing to stream")
     _link_predictions(model, streamed, st)
     return st
 
@@ -815,6 +829,8 @@ def _link_predictions(model, streamed, st):
 def load(folder, plan_, log=print):
     """(model, tokenizer, Streamer) — the model without its experts, which come from `folder` as needed."""
     from mlx_lm import load as mlx_load
+    from . import inkling2
+    inkling2.register()                          # architectures mlx-lm 0.32 does not have yet
     model, tok = mlx_load(folder, lazy=True)
     st = stream_experts(model, folder, plan_, log)
     mx.eval(model.parameters())                  # the experts are gone from the tree: only the rest is read

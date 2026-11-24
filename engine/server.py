@@ -816,6 +816,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ENGINE.parser_markers() if protocol.can(ENGINE, "parser_markers") else {},
             ENGINE.parse_tool_calls if protocol.can(ENGINE, "parse_tool_calls") else parse_tool_calls)
         parser = OutputParser(thinking_open, bool(tools), **markers)
+        filt = ENGINE.output_filter(bool(thinking_open)) if protocol.can(ENGINE, "output_filter") else None
         yield ("ready", rid, created)
 
         reasoning, content, stats = [], [], {}
@@ -841,10 +842,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if isinstance(item, dict):
                     stats = item
                     break
-                for kind, s in parser.feed(item[1]):
+                for kind, s in parser.feed(filt.feed(item[1]) if filt else item[1]):
                     (reasoning if kind == "reasoning" else content).append(s)
                     yield ("delta", kind, s)
-            for kind, s in parser.finish():
+            for kind, s in (parser.feed(filt.finish()) if filt else []) + parser.finish():
                 (reasoning if kind == "reasoning" else content).append(s)
                 yield ("delta", kind, s)
         except MemoryLimitError as e:
@@ -1314,6 +1315,10 @@ def main():
         Backend = GGUFEngine
     else:
         Backend = Engine if backend == "native" else CompatEngine
+        if backend == "mlxlm":
+            from engine.inkling2 import engine as inkling
+            if inkling.handles(ARGS.model):
+                Backend = inkling.InklingEngine        # its own chat format on the same mlx-lm path
     log(f"backend: {'native engine' if backend == 'native' else 'GGUF on the MLX decoder' if backend == 'gguf' else 'mlx-lm'}")
     init = lambda: Backend(ARGS.model, vision=not ARGS.no_vision, max_context=ARGS.context,
                            max_tokens=ARGS.max_tokens, prefill_step=ARGS.prefill_step, max_pixels=ARGS.max_pixels,

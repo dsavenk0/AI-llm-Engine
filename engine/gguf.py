@@ -417,8 +417,13 @@ def hub_gguf_route(arch, tags=(), projector=False, data_dir=None):
         return "native", ""
     known = llamacpp_knows(arch, data_dir)
     if known is False or (known is None and arch in INFERSSD_PROFILES):
-        return "none", f"architecture {arch} is not supported"
+        hint = MLX_INSTEAD.get(arch.split("_")[0].rstrip("0123456789") or arch, "")
+        return "none", f"architecture {arch} is not supported" + (f"; {hint}" if hint else "")
     return "gguf", ""
+
+
+# GGUF architectures the installed llama.cpp may not know whose MLX checkpoints run on this engine (engine/inkling2)
+MLX_INSTEAD = {"inkling": "its MLX version runs on this engine"}
 
 
 # Profiles declared by InferSSD's typed launcher at the reviewed 0.1.4/e91c7d7 revision. Keep this exact: a

@@ -466,7 +466,8 @@ def streamable_gb(path, files, cfgj):
         for name, t in header.items():
             if name == "__metadata__" or "shared" in name:
                 continue
-            if (len(t.get("shape", ())) >= 3 and ".switch_mlp." in name) or re.search(r"\.experts\.\d+\.", name):
+            stacked = ".switch_mlp." in name or ".mlp.experts." in name        # (the second: Inkling 2)
+            if (len(t.get("shape", ())) >= 3 and stacked) or re.search(r"\.experts\.\d+\.", name):
                 a, b = t["data_offsets"]
                 total += b - a
     return total / 2**30
@@ -505,6 +506,10 @@ def inspect_model(path):
     tpl = tpl or str(_json(os.path.join(path, "tokenizer_config.json")).get("chat_template", ""))
     efforts = jang.get("reasoning", {}).get("supported_reasoning_efforts") or \
         sorted(set(re.findall(r"reasoning_effort\s*==\s*'(\w+)'", tpl)))
+    # Inkling 2 (engine/inkling2): reasons through reasoning_effort, reads images on the mlx-lm route too
+    inkling = str(cfgj.get("model_type", "")).startswith("inkling2")
+    if inkling and not efforts:
+        efforts = ["low", "medium", "high", "xhigh"]
 
     name = os.path.basename(path.rstrip("/"))
     parts = path.split(os.sep)
@@ -514,8 +519,9 @@ def inspect_model(path):
     if route == "ptq1" and not jang:
         fmt = "TQ1" if cfgj.get("model_type") == TQ1_TYPE else "PTQ1"
     return {"path": path, "name": name, "size": size, "format": fmt, "type": mtype, "route": route,
-            "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl,
-            "thinking_default": "enable_thinking" in tpl and template_thinks_by_default(tpl),
+            "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl or inkling,
+            "thinking_default": inkling or ("enable_thinking" in tpl and template_thinks_by_default(tpl)),
+            "mlxlm_vision": inkling,
             "efforts": efforts, "hadamard": bool(cfgj.get("hadamard") or jang.get("hadamard")),
             "tool_calls": "<tool_call>" in tpl or "tools" in tpl,
             "supported": not problems, "problems": problems,
@@ -558,7 +564,8 @@ def route_features(cfg, m):
         which = {"native": "engine", "ptq1": "engine-ptq1", "mlxlm": "mlx-lm"}.get(route, route)
     f = []
     if m.get("vision") and (which in ("engine", "engine-ptq1", "llama.cpp") or
-                            (which == "engine-gguf" and gguf.native_vision(m["path"]))):
+                            (which == "engine-gguf" and gguf.native_vision(m["path"])) or
+                            (which == "mlx-lm" and m.get("mlxlm_vision"))):
         f.append("vision")
     if m.get("thinking"):
         f.append("thinking")
