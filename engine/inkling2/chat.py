@@ -11,8 +11,9 @@ The model answers in segments, each `<|message_model|>[name]<|content_KIND|>…<
 One closing marker ends every kind, so the server's OutputParser (which knows `…</think>` reasoning and
 `<tool_call>…</tool_call>`) cannot read it as it is. `StreamFilter` rewrites the stream as it comes: a thinking
 segment ends in `</think>`, a tool call is wrapped in `<tool_call>…</tool_call>`, the other markers go. The
-parser then starts in reasoning mode when thinking is on, as for a model whose prompt opens `<think>`; a reply
-that skips its reasoning closes it at once.
+parser always starts in reasoning mode (`opens_reasoning`), as for a model whose prompt opens `<think>`: told
+`reasoning_effort: "none"`, the template asks for effort 0, and the model may still write a short thinking
+segment — reasoning, not the answer, and not to be lost. A reply that skips its reasoning closes it at once.
 """
 import json
 import re
@@ -26,8 +27,10 @@ HEAD = "<|message_model|>"                                   # a message header,
 
 
 class StreamFilter:
-    def __init__(self, thinking_open):
-        self.reasoning = bool(thinking_open)    # the parser is in reasoning mode until it sees </think>
+    opens_reasoning = True                      # the server starts its parser in reasoning mode
+
+    def __init__(self, thinking_open=True):
+        self.reasoning = True                   # the parser is in reasoning mode until it sees </think>
         self.kind = None                        # the segment being written: "think", "text", "tool"
         self.buf = ""
 
@@ -64,8 +67,9 @@ class StreamFilter:
         return "".join(out)
 
     def _body(self, s):
-        # reasoning written while the parser no longer expects any (thinking off, or a second thinking segment
-        # after the answer began) has nowhere to go: it is not the answer
+        if self.kind is None and s.strip():
+            return self._close_reasoning() + s          # text outside any segment: take it as the answer
+        # a second thinking segment after the answer began has nowhere to go: it is not the answer
         return "" if self.kind == "think" and not self.reasoning else s
 
     def _marker(self, m):

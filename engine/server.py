@@ -815,8 +815,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ARGS.reasoning_parser, ARGS.tool_parser,
             ENGINE.parser_markers() if protocol.can(ENGINE, "parser_markers") else {},
             ENGINE.parse_tool_calls if protocol.can(ENGINE, "parse_tool_calls") else parse_tool_calls)
-        parser = OutputParser(thinking_open, bool(tools), **markers)
         filt = ENGINE.output_filter(bool(thinking_open)) if protocol.can(ENGINE, "output_filter") else None
+        # a filter that marks reasoning itself (Inkling 2: a model that may reason even when told not to) has the
+        # parser start in reasoning mode and closes it where the answer begins
+        parser = OutputParser(thinking_open or getattr(filt, "opens_reasoning", False), bool(tools), **markers)
         yield ("ready", rid, created)
 
         reasoning, content, stats = [], [], {}

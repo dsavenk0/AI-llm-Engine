@@ -90,6 +90,9 @@ class _Decoder:
 class CompatEngine(DecodeLoop):
     backend = "mlx-lm"
     REQUIRES_MLX_LM = True       # a subclass with its own model code (engine/gguf_engine.py) sets this False
+    # a subclass whose chat format the template detection below cannot read (Inkling 2) states what it has
+    THINKS = None
+    CALLS_TOOLS = None
 
     def __init__(self, path, vision=False, max_context=0, max_tokens=8192, prefill_step=512,
                  thinking=None, effort="medium", mem_limit=0.88, sampling_override=None,
@@ -124,7 +127,8 @@ class CompatEngine(DecodeLoop):
         # nothing). Reasons by default unless the template itself pre-fills an empty, closed think
         # block (Qwen3.5-0.8B does; Qwen3 leaves `<think>` to the model, so it thinks unless told not to).
         self.think_tags = self._think_tags(tpl)
-        self.supports_thinking = bool(self.think_tags or "enable_thinking" in tpl)
+        self.supports_thinking = bool(self.think_tags or "enable_thinking" in tpl) if self.THINKS is None \
+            else self.THINKS
         default_prompt = self._render_default([{"role": "user", "content": "hi"}])
         self.thinking_default = bool(self.supports_thinking and not (
             self.think_tags and default_prompt.rstrip().endswith(self.think_tags[1])))
@@ -163,7 +167,8 @@ class CompatEngine(DecodeLoop):
         arch = tc.get("model_type") or self.config.get("model_type")
         log(f"mlx-lm backend: {arch}, {self.model_bytes / GiB:.2f} GiB, thinking="
             f"{'supported' if self.supports_thinking else 'no'}, tool calls="
-            f"{'yes' if self.tok.has_tool_calling else 'no'}, sampling from {self.sampling_source}")
+            f"{'yes' if (self.tok.has_tool_calling if self.CALLS_TOOLS is None else self.CALLS_TOOLS) else 'no'}, "
+            f"sampling from {self.sampling_source}")
 
     # ───────────────────────── loading / sleep ─────────────────────────
     def _read_configs(self, path):

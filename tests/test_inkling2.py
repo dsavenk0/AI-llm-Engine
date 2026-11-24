@@ -378,7 +378,8 @@ class TestChatFormat(unittest.TestCase):
         from engine.inkling2 import chat
         from engine.server import OutputParser
         f = chat.StreamFilter(thinking)
-        p = OutputParser(thinking, tools, think_end="</think>", tool_start="<tool_call>", tool_end="</tool_call>")
+        p = OutputParser(thinking or f.opens_reasoning, tools, think_end="</think>", tool_start="<tool_call>",
+                         tool_end="</tool_call>")                     # as the server builds it
         out = {"reasoning": "", "content": ""}
         chunks = pieces or [reply[i:i + 3] for i in range(0, len(reply), 3)]       # markers cut anywhere
         for c in chunks:
@@ -400,8 +401,16 @@ class TestChatFormat(unittest.TestCase):
         reply = "<|message_model|><|content_text|>Paris.<|end_message|>"
         self.assertEqual(self.run_stream(reply, False)[0], {"reasoning": "", "content": "Paris."})
         self.assertEqual(self.run_stream(reply, True)[0], {"reasoning": "", "content": "Paris."})
+
+    def test_reasoning_the_model_writes_when_told_not_to_is_kept_as_reasoning(self):
+        """reasoning_effort "none" asks for effort 0; the model may still think: that is reasoning, not lost, and
+        a reply cut off inside it has no answer rather than an empty one that swallowed the tokens."""
         stray = "<|message_model|><|content_thinking|>hmm<|end_message|><|message_model|><|content_text|>Paris.<|end_message|>"
-        self.assertEqual(self.run_stream(stray, False)[0], {"reasoning": "", "content": "Paris."})
+        self.assertEqual(self.run_stream(stray, False)[0], {"reasoning": "hmm", "content": "Paris."})
+        cut = "<|message_model|><|content_thinking|>Plan the story: a keeper, a storm"
+        self.assertEqual(self.run_stream(cut, False)[0], {"reasoning": "Plan the story: a keeper, a storm", "content": ""})
+        bare = "Paris."                                        # no segment markers at all: the answer
+        self.assertEqual(self.run_stream(bare, False)[0], {"reasoning": "", "content": "Paris."})
 
     def test_a_tool_call(self):
         from engine.inkling2 import chat

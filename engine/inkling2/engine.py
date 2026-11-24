@@ -56,6 +56,9 @@ def handles(path):
 
 
 class InklingEngine(CompatEngine):
+    THINKS = True                               # reasoning_effort "none" turns it off
+    CALLS_TOOLS = True                          # <|content_invoke_tool_json|>, parsed by chat.parse_tool_calls
+
     def __init__(self, path, **kw):
         super().__init__(path, **kw)
         vision = self.config.get("vision_config") or {}
@@ -64,7 +67,6 @@ class InklingEngine(CompatEngine):
         self.image_block = vision.get("native_patch_size", 20) * vision.get("adapter_merge_size", 2)
         self.max_pixels = kw.get("max_pixels") or 1024 * 1024
         # the template thinks unless told reasoning_effort "none" (its default effort is 0.9)
-        self.supports_thinking = True
         self.thinking_default = True
         if kw.get("thinking") is None:
             self.thinking = True
