@@ -359,7 +359,12 @@ and blink; model selection, search, settings, Knowledge, browser-assistant and e
 `LLM_NO_ANIMATION=1` or `LLM_REDUCE_MOTION=1` keeps the final static frame.
 
 ```
-./llm                      interactive menu
+./llm ["question"]         a new chat (a quoted question starts it); starts the model when needed
+./llm -c | -r [N|id]       continue the last chat | pick a saved one (or open that one)
+./llm -p "question"        one answer to stdout for scripts; a piped stdin is added (cat log | llm -p "why?")
+./llm chats [rm N]         list the saved chats / delete one
+./llm menu                 interactive menu
+./llm --version            the version
 ./llm help [<command>]     every command, grouped; one command's usage and flags
 ./llm <command> --help     the same, for one command, before running it
 ./llm completion zsh|bash  a tab-completion script: source <(./llm completion zsh)
@@ -371,12 +376,14 @@ and blink; model selection, search, settings, Knowledge, browser-assistant and e
 ./llm check [--json]       is everything there to run the engine? (Python, libraries, network, disk, models)
 ./llm web search "<q>"     web search + the top pages as one JSON line (what the voice chat uses)
 ./llm web research "<q>" [--mode quick|smart|deep] [--focus …] [--json]   cited multi-source research
+./llm install-cli          an `llm` command for any folder (a shim in ~/.local/bin; --uninstall removes it)
+./llm menu                 the menu: grouped actions, Enter = new chat; New chat / Continue a chat… open in new windows
 ./llm inspect [<#|name>]   what is inside a model, from its headers: layers, storage types, bits per weight, biggest tensors
 ./llm read <file>          extract text from a PDF/DOCX/PPTX/HTML/text document (or OCR a scan/image) to attach as a source
 ./llm knowledge …          document libraries the chats can search: create, add, search, delete (see Knowledge)
 ./llm transcribe <audio>   on-device speech-to-text with Whisper (MLX); install once with ./llm setup --audio
 ./llm say "<text>"         on-device text-to-speech with Kokoro (MLX): plays it and saves a WAV
-./llm agent [dir]          terminal coding agent (files, search, edits, shell)
+./llm agent [dir]          the chat with a project attached (= ./llm --project dir)
 ./llm connect [client]     register the model in Continue, Kilo Code or opencode
 ./llm free                 quit vMLX / oMLX / Ollama to free memory
 ./llm steer [repo|folder]   apply an activation edit (and fetch its base model) · `steer off`
@@ -389,11 +396,32 @@ and blink; model selection, search, settings, Knowledge, browser-assistant and e
 Language is English by default and Russian when the system locale is Russian. You can force it with `LLM_LANG=ru` or
 in Settings.
 
-`./llm chat` keeps its history **per project in the same file the code editor uses**: `/history` lists the chats,
-`/open <N>` continues one (also one started in the editor), `/rename <N> <title>`, `/delete <N>`, `/new`. Asking
-in plain words for a picture ("generate an image of...") or to hear something read back calls the image/speech
-modules on its own once they are installed; `/draw <prompt>` and `/speak <text>` do the same directly and offer
-to install the module first if it is missing.
+### The terminal chat
+
+`./llm` (or `./llm chat`) is **one chat** that talks and, when a project is attached, works on it — there is no
+separate "agent mode". The command line uses Claude Code's names where Claude Code, Codex and Gemini CLI agree:
+`llm "question"`, `-c` / `--continue`, `-r` / `--resume [N|id|name] ["question"]`, `--fork-session`, `-n` /
+`--name`, `-p` / `--print` (piped stdin is added) with `--output-format text|json` and `--max-turns N`,
+`--no-session-persistence`, `-m` / `--model`, `--append-system-prompt`, `-v` / `--version`; plus `--project <dir>`
+(`-C`) and `--auto`. Inside: `/help`, `/new` (`/clear`), `/chats` (`/resume`), `/fork`, `/status`, `/model`,
+`/compact`, `/diff`, `/exit`, and `@path` adds a file's text to the message.
+
+- **Many chats, saved as they go.** Each chat is a JSON-lines file in
+  `~/Library/Application Support/LLMBar/sessions/`; every message is written the moment it exists, so Ctrl+C, a
+  crash or a closed window loses nothing (tool calls cut off mid-turn are closed as cancelled when the chat is
+  reopened). `/chats` lists them, `/open N` continues one, `/rename [N] <title>`, `/delete N`, `/new`; from the
+  shell `llm chats`, `llm chats rm N`, `llm -r`. Chats unused for 30 days, and beyond the newest 100, are removed
+  when a new chat starts.
+- **A project on request.** Without a project the model has no file tools; `/project` attaches the folder the
+  chat was started in (`/project <dir>`, `/project off`), or the model asks for it with `attach_project` and you
+  answer yes or no. The chat remembers its project and reopens on it.
+- **Interrupting.** Ctrl+C stops the answer (or the running tool) and keeps what was written; Ctrl+C twice in a
+  row at the prompt leaves. A reply that starts repeating itself is cut, the same tool call three times in a row
+  stops the turn, each reply is capped at 8192 tokens and given up after 300 s without output, and after 30 steps
+  the chat asks before going on (harness/guard.py).
+- Asking in plain words for a picture or to hear something read back calls the image/speech modules once they
+  are installed; `/draw <prompt>` and `/speak <text>` do the same directly. `/image <path> [question]` asks about a
+  picture, `/retry` asks the last question again, `"""` starts and ends several lines. `/help` lists everything.
 
 ## API
 
@@ -499,9 +527,29 @@ the own GGUF decoder), `./llm steer off` removes it, `/health` shows `steer`, an
 refused at start (it belongs to one model). The SSD prefix cache of a steered model is kept separate. A research and
 red-teaming tool for models you own.
 
-### Coding agent
+### Sub-agents
 
-`./llm agent [folder]` is a terminal coding agent that needs only this engine, with no VS Code and no Kilo. It can list,
+`/agents` lists the agents and what this chat has started; `/agents <name> <task>` opens one **in its own Terminal
+window**: you watch it work there and answer its questions there (its approvals are its own). When it is done it
+writes its report and the window closes; the chat shows `● #N name finished` and the report goes to the model with
+your next message (`/agents result N` shows it). From the chat: `/agents stop N` (it still reports what it had),
+`/agents say N <message>` (read before its next step; to a finished agent: it goes on in a new window, same
+conversation), `/agents show N` (its window to the front), `/agents log N`, `/agents retry N`. The prompt shows how
+many are working (`⚙2`, `? 1` when one waits for you). Agent windows run at the engine's `background` priority,
+so the chat is answered first. A report that arrives after the chat was closed comes in when it is reopened.
+
+The model can hand a task over itself with `run_agent`; that agent works inline, its steps shown, since the model
+waits for the report anyway. Definitions are Markdown with front matter, Claude Code's `.claude/agents/` format
+(`name`, `description`, optional `tools` — Claude Code's tool names such as `Read`, `Grep`, `Bash` are understood):
+`.llm/agents/` and `.claude/agents/` of the project, `~/.llm/agents/`, `LLM_AGENTS_DIRS`, and the built-in
+`explorer` (read only), `reviewer` (read only plus commands) and `fixer` (all tools). `/agents new <name> <what it
+does>` has the model write one (you approve the file), `/agents show|rm <name>`. Code: harness/agents.py
+(definitions), agent.py `Run` / `WindowRun` / `SubAgent` / `agent_window`.
+
+### Working on a project
+
+With a project attached (`/project`, `./llm --project <folder>` or `./llm agent [folder]`) the chat is a coding
+agent that needs only this engine, with no VS Code and no Kilo. It can list,
 read and search files, write files, make exact edits and run shell commands, all scoped to the folder. Writes, edits
 and commands show a diff or the command line and ask first; `/auto` approves them for the session. It speaks the
 user's language.

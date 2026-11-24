@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from harness import skills
+os.environ.setdefault("LLM_SESSIONS_DIR", __import__("tempfile").mkdtemp(prefix="llm-test-chats-"))  # never the real chats
 
 
 def write_skill(base, folder, text, extra=None):

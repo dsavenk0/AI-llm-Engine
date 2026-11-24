@@ -13,6 +13,7 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+os.environ.setdefault("LLM_SESSIONS_DIR", __import__("tempfile").mkdtemp(prefix="llm-test-chats-"))  # never the real chats
 import agent  # noqa: E402
 import llm  # noqa: E402
 from harness import delegate, mcp, trust  # noqa: E402

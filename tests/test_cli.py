@@ -17,6 +17,7 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import llm  # noqa: E402
+os.environ.setdefault("LLM_SESSIONS_DIR", __import__("tempfile").mkdtemp(prefix="llm-test-chats-"))  # never the real chats
 
 MODEL = {"name": "Demo-Model", "path": "/tmp/demo", "size": 4.0, "vision": True, "thinking": True}
 
@@ -744,56 +745,6 @@ class TestChatTools(unittest.TestCase):
             out = llm._tool_speak({"text": "hello"})
         self.assertEqual(out, "The text was read aloud to the user.")
 
-    def _tool_names_offered(self, images, kokoro):
-        """Drives a real `chat()` turn against mocked /health + kokoro_available and returns the tool
-        names the first request actually carried — not just whether IMAGE_TOOL/SPEAK_TOOL look well-formed."""
-        import contextlib
-        import io
-        import tempfile as _tmp
-        from unittest import mock
-        from engine import audio
-        from harness import chats as store
-
-        sent = []
-
-        def fake_input(prompt="", _n=iter(["hi"])):
-            try:
-                return next(_n)
-            except StopIteration:
-                raise EOFError
-
-        def fake_urlopen(req, timeout=None):
-            body = json.loads(req.data)
-            sent.append(body.get("tools") or [])
-            ev = {"choices": [{"delta": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
-            lines = [b"data: " + json.dumps(ev).encode(), b"data: [DONE]"]
-
-            class _Stream:
-                def __enter__(self): return self
-                def __exit__(self, *a): return False
-                def __iter__(self): return iter(lines)
-            return _Stream()
-
-        m = {"name": "m", "thinking": False, "efforts": []}
-        with mock.patch.object(llm, "current_model", return_value=m), \
-                mock.patch.object(llm, "health", return_value={"images": images}), \
-                mock.patch.object(audio, "kokoro_available", return_value=kokoro), \
-                mock.patch.object(llm, "mcfg", return_value={"effort": None}), \
-                mock.patch.object(llm, "think_enabled", return_value=False), \
-                mock.patch.object(llm, "served_name", return_value="m"), \
-                mock.patch.object(store, "default_dir", return_value=_tmp.mkdtemp()), \
-                mock.patch("builtins.input", fake_input), mock.patch("urllib.request.urlopen", fake_urlopen), \
-                mock.patch("os.getcwd", return_value="/work/proj"), contextlib.redirect_stdout(io.StringIO()):
-            llm.chat({"port": 1, "api_key": ""})
-        return {t["function"]["name"] for t in sent[0]} if sent else set()
-
-    def test_chat_always_understands_image_requests_and_gates_optional_speech_on_installation(self):
-        """Image intent must reach the preparation path even before mflux is installed; speech stays gated."""
-        self.assertEqual(self._tool_names_offered(images=True, kokoro=True), {"generate_image", "speak"})
-        self.assertEqual(self._tool_names_offered(images=False, kokoro=False), {"generate_image"})
-        self.assertEqual(self._tool_names_offered(images=True, kokoro=False), {"generate_image"})
-        self.assertEqual(self._tool_names_offered(images=False, kokoro=True), {"generate_image", "speak"})
-
 
 def _dispatch_names():
     """The real command names in llm.py's `main()` dispatch, found by parsing the source (the same `ast`
@@ -832,8 +783,8 @@ class TestHelp(unittest.TestCase):
         return rv, buf.getvalue()
 
     def test_every_dispatch_command_is_registered(self):
-        # "", "--help" and "-h" are aliases ("" == menu, the other two == help), not commands of their own
-        real = _dispatch_names() - {"", "--help", "-h"}
+        # aliases, not commands of their own: "" == chat, "--help"/"-h" == help, "--version"/"-v" == version
+        real = _dispatch_names() - {"", "--help", "-h", "--version", "-v"}
         self.assertTrue(real)                      # the parse itself must have found something
         self.assertEqual(real, {c.name for c in llm.COMMANDS})
 
@@ -1698,3 +1649,44 @@ class TestFavouriteModels(unittest.TestCase):
         with redirect_stdout(buf):
             llm.fav_cmd(self.cfg, ["--json"])
         self.assertEqual(json.loads(buf.getvalue()), [self.paths["beta"]])     # only what exists on disk
+
+
+class TestMenuWindowsAndCommand(unittest.TestCase):
+    """The menu's new windows and the `llm` command shim (no Terminal is opened, no real HOME touched)."""
+
+    def test_a_new_window_runs_this_llm_in_the_callers_folder(self):
+        import llm
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            with open(cmd[-1]) as f:
+                seen["script"] = f.read()
+            return mock.Mock(returncode=0)
+        with mock.patch.object(llm.subprocess, "run", fake_run):
+            self.assertTrue(llm.new_window(["agent", "/tmp/proj x"], cwd="/tmp/proj x"))
+        self.assertEqual(seen["cmd"][:3], ["open", "-a", "Terminal"])
+        self.assertIn("cd '/tmp/proj x'", seen["script"])
+        self.assertIn(os.path.join(llm.BASE, "llm") + " agent '/tmp/proj x'", seen["script"])
+        os.remove(seen["cmd"][-1])
+
+    def test_the_shim_is_installed_and_another_programs_llm_is_left_alone(self):
+        import llm
+        home = tempfile.mkdtemp()
+        shim = os.path.join(home, ".local", "bin", "llm")
+        with mock.patch.object(llm, "CLI_SHIM", shim):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(llm.install_cli())
+            with open(shim) as f:
+                body = f.read()
+            self.assertIn(llm.CLI_MARK, body)
+            self.assertIn(os.path.join(llm.BASE, "llm"), body)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(llm.install_cli(uninstall=True))
+            self.assertFalse(os.path.exists(shim))
+            with open(shim, "w") as f:
+                f.write("#!/bin/sh\necho someone else\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(llm.install_cli())
+            with open(shim) as f:
+                self.assertIn("someone else", f.read())

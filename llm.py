@@ -2,14 +2,18 @@
 """
 llm — manager for local MLX models running on the bundled engine (engine/).
 
-  ./llm                      interactive menu
+  ./llm ["question"]         a new chat (starts the model when needed); a quoted question starts it
+  ./llm -c | -r [N]          continue the last chat | pick a saved one (or open number N)
+  ./llm -p "question"        one answer to stdout, for scripts (a piped stdin is added to the question)
+  ./llm chats [rm N]         saved chats: list them / delete one
+  ./llm menu                 the interactive menu
   ./llm help [<command>]     the full, current command list (this is a fixed, older summary)
 
  Run & chat
   ./llm run <model> [prompt] select (download if only an org/name), start, then chat — or answer one prompt
   ./llm open | up            new Terminal window with chat | start + chat + the menu, here
-  ./llm chat                 chat with the model that is loaded
-  ./llm agent [dir]          terminal coding agent (files, search, shell) in dir or the current folder
+  ./llm chat [options]       the same chat as ./llm (/help inside lists its commands)
+  ./llm agent [dir]          the chat with a project attached (files, search, edits, shell): --project dir
   ./llm conduct ["<task>"] [--file F …]   orchestrator: recognise attachments (OCR/Whisper/docs), route by role
   ./llm ui [dir]             native code editor with the assistant (a module of LLMBar.app: ./build-app.sh)
 
@@ -870,8 +874,7 @@ def run_cmd(cfg, args):
                   + (" · system" if system else "") + (f" · {len(params)} params" if params else "")))
     if prompt:
         return run_once(cfg, prompt, system=system, params=params)
-    chat(cfg, system=system, params=params)
-    return True
+    return __import__("agent").main([], system=system, params=profile_params(params))
 
 
 def run_once(cfg, prompt, system="", params=None):
@@ -2332,7 +2335,7 @@ def reply_note(stop_reason):
     return ""
 
 
-# Tools the plain chat offers the model itself, so "generate an image of a cat" or "read that back to me"
+# Tools the terminal chat (agent.py) offers the model itself, so "generate an image of a cat" or "read that back to me"
 # works without a /image-style tag — the same schema-validated tool calling the code editor's assistant uses
 # (ui/agentloop.py), pointed at the image and speech paths that are already installed. Nothing here adds a
 # model: generate_image is only sent when the running engine reports /health images=true (mflux, --images on),
@@ -2352,11 +2355,6 @@ SPEAK_TOOL = {"type": "function", "function": {
     "description": "Read text aloud on-device with the local text-to-speech voice and save it as a WAV. Use "
                    "when the user asks to hear something spoken — not for every ordinary reply.",
     "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}
-
-MAX_CHAT_TOOL_TURNS = 4
-
-TOOL_LABEL = {"generate_image": "Generating an image…", "speak": "Speaking…"}
-
 
 def _tool_generate_image(cfg, args):
     """Run a `generate_image` tool call: POST the already-running engine's own images route (it sleeps the
@@ -2425,266 +2423,6 @@ def _tool_speak(args):
     if shutil.which("afplay"):
         subprocess.run(["afplay", dest])
     return "The text was read aloud to the user."
-
-
-def chat(cfg, system="", params=None):
-    m = current_model(cfg)
-    hc = health(cfg)
-    if not m or not hc:
-        print(R(T("The model is not running."))); return
-    mc = mcfg(cfg)
-    url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
-    think, effort, show = think_enabled(mc, m), mc["effort"], True
-    params = profile_params(params)                 # a named profile may pre-set the system prompt + sampling
-    msgs = []
-    # Always describe the local image tool. If a request actually needs it, its handler offers the optional
-    # installation and enables the endpoint; ordinary chats do not download or restart anything.
-    tools = [IMAGE_TOOL]
-    from engine import audio as _audio
-    if _audio.kokoro_available():
-        tools.append(SPEAK_TOOL)
-    # the history is the code editor's: the same file per project, so a chat continues in either place
-    from harness import chats as store
-    root = os.getcwd()
-    sessions, session = store.load(root), store.new_session()
-
-    def remember(question, attached, reply, reasoning):
-        store.add_turn(session, "user", question, attached=attached)
-        store.add_turn(session, "assistant", reply, reasoning)
-        if session not in sessions: sessions.insert(0, session)
-        try: store.save(root, sessions)
-        except OSError as e: print(R(T("Error:") + f" {e}"))
-
-    print(B(T("Chat with {name}.").format(name=m["name"])) +
-          DIM(" /think on|off  /effort <lvl>  /show  /system <text>  /image <path> <question>"))
-    print(DIM("  /draw <prompt>  /speak <text>   " + T("(or just ask — the model calls them on its own)")))
-    print(DIM("  /clear  /save  /retry  /exit   " + T("multi-line input:") + ' """ … """'))
-    print(DIM("  /history  /open <N>  /rename <N> <title>  /delete <N>  /new   " +
-              T("(shared with the code editor)")))
-    while True:
-        tag = (f"think:{effort}" if think else "no-think") if m["thinking"] else "chat"
-        try:
-            line = input(CY(f"\n[{tag}] › "))
-        except (EOFError, KeyboardInterrupt):
-            print(); return
-        if line.strip() == '"""':
-            buf = []
-            while True:
-                try: l = input()
-                except EOFError: break
-                if l.strip() == '"""': break
-                buf.append(l)
-            line = "\n".join(buf)
-        s = line.strip()
-        if not s: continue
-        if s in ("/exit", "/q"): return
-        if s in ("/clear", "/new"):
-            msgs, session = [], store.new_session()
-            print(DIM(T("History cleared.") if s == "/clear" else T("New chat."))); continue
-        if s.split()[0] in ("/skills", "/skill"):
-            # saved skills (harness/skills.py): the folder the chat was started from is the project
-            from harness import skills
-            try:
-                reply, follow = skills.command(s, os.environ.get("LLM_CWD") or None)
-            except skills.SkillError as e:
-                print(R(str(e))); continue
-            if follow:      # writing a skill from the conversation needs the agent's save_skill tool
-                print(Y(T("Saving a skill from the conversation needs the agent: ./llm agent or the code editor.")))
-            else:
-                print(DIM(reply))
-            continue
-        if s == "/history":
-            lines = store.listing(sessions, session["id"])
-            print("\n".join(DIM(l) for l in lines) if lines else DIM(T("No saved chats yet."))); continue
-        if s.split()[0] in ("/open", "/rename", "/delete"):
-            cmd, _, rest = s.partition(" ")
-            ref, _, title = rest.strip().partition(" ")
-            target = store.find(sessions, ref) if ref else None
-            if cmd == "/rename" and not title and ref and target is None:
-                target, title = (session if session in sessions else None), rest      # rename the open chat
-            if target is None:
-                print(R(T("No such chat. /history lists them."))); continue
-            if cmd == "/open":
-                session, msgs = target, store.messages(target)
-                print(DIM(T("Opened:") + f" {target['title']} ({len(msgs)})"))
-                if msgs: print(DIM("› ") + str(msgs[-1]["content"])[-400:])
-            elif cmd == "/rename":
-                if not store.rename(target, title): print(R(T("Give the chat a name."))); continue
-                store.save(root, sessions); print(DIM(T("Renamed:") + f" {target['title']}"))
-            else:
-                if input(Y(T("Delete “{title}”? [y/N] ").format(title=target["title"]))).strip().lower() not in ("y", "yes", "д", "да"):
-                    continue
-                store.delete(sessions, target); store.save(root, sessions)
-                if target["id"] == session["id"]: msgs, session = [], store.new_session()
-                print(DIM(T("Deleted.")))
-            continue
-        if s.startswith("/think"): think = not s.endswith("off"); continue
-        if s.startswith("/effort"):
-            v = s.split()[-1]
-            if v in m["efforts"]: effort = v
-            else: print(R(" | ".join(m["efforts"]) or T("not supported")))
-            continue
-        if s == "/show": show = not show; continue
-        if s.startswith("/system"): system = s[7:].strip(); continue
-        if s == "/save":
-            fn = os.path.join(DATA, f"chat-{time.strftime('%Y%m%d-%H%M%S')}.md")
-            with open(fn, "w") as f:
-                for x in msgs: f.write(f"## {x['role']}\n\n{x['content'] if isinstance(x['content'], str) else '[image]'}\n\n")
-            print(DIM(T("Saved:") + f" {fn}")); continue
-        # manual modality tags: the same generate_image/speak paths the model can call on its own, forced
-        # by hand instead of inferred from the words — offering to install the (small, local) tool first
-        # when it is missing, never a model download without saying so
-        if s.startswith("/draw") or s.startswith("/speak"):
-            tag, _, rest = s.partition(" ")
-            text = rest.strip()
-            if not text:
-                print(R(T("Usage:") + f" {tag} <" + (T("prompt") if tag == "/draw" else T("text")) + ">")); continue
-            if tag == "/draw":
-                from engine import images as _images
-                if not _images.tool_path(DATA):
-                    if input(Y(T("Image generation is not installed (mflux). Install it now? [y/N] "))
-                             ).strip().lower() not in ("y", "yes", "д", "да"):
-                        continue
-                    if not setup_images():
-                        continue
-                    hc2 = health(cfg)
-                    if hc2 and hc2.get("images") and IMAGE_TOOL not in tools:
-                        tools.append(IMAGE_TOOL)
-                print(DIM(T("Generating an image…")))
-                print(DIM(_tool_generate_image(cfg, {"prompt": text})))
-            else:
-                from engine import audio as _audio2
-                if not _audio2.kokoro_available():
-                    if input(Y(T("Text-to-speech is not installed (Kokoro). Install it now? [y/N] "))
-                             ).strip().lower() not in ("y", "yes", "д", "да"):
-                        continue
-                    if not setup_audio():
-                        continue
-                    if SPEAK_TOOL not in tools:
-                        tools.append(SPEAK_TOOL)
-                print(DIM(T("Speaking…")))
-                print(DIM(_tool_speak({"text": text})))
-            continue
-        if s.startswith("/video") or s.startswith("/music"):
-            # honest, not a stub pretending to work: no video or music backend is wired into this engine yet
-            print(Y(T("Video and music generation are not implemented in this engine yet.")))
-            continue
-        resend = s == "/retry"
-        turn_content = None                          # what this turn sends in place of the stored user message
-        if resend:                                   # re-send the last question (after an interrupted/looping answer)
-            if msgs and msgs[-1]["role"] == "assistant":
-                msgs.pop()
-            if not (msgs and msgs[-1]["role"] == "user"):
-                print(DIM(T("Nothing to retry."))); continue
-            last = msgs[-1]["content"]
-            question, attached = (last if isinstance(last, str) else T("the attached files")), []
-        else:
-            content, question, attached = s, s, []
-            from harness import skills
-            content, used = skills.expand(s, os.environ.get("LLM_CWD") or None)     # "$name" brings a skill in
-            if used:
-                print(DIM(T("Skill: {name}").format(name=", ".join(used))))
-            if s.startswith("/image "):
-                _, path, *q = s.split(" ", 2)
-                path = os.path.expanduser(path)
-                if not os.path.exists(path): print(R(T("File not found"))); continue
-                question, attached = (q[0] if q else T("Describe the image.")), [os.path.abspath(path)]
-                content = [{"type": "image_url", "image_url": {"url": attached[0]}},
-                           {"type": "text", "text": question}]
-            if used and isinstance(content, str):
-                # the skill is for this turn only: history keeps the request, the request carries the skill
-                turn_content, content = content, f"{s}\n(used skill: {', '.join(used)})"
-            msgs.append({"role": "user", "content": content})
-        ok = True
-        turn_start = len(msgs) - 1          # this turn's user message; a failed turn discards from here on,
-                                            # not just the one message a bare .pop() would — earlier tool
-                                            # rounds in the same turn may already have appended assistant/tool
-                                            # messages, and leaving an assistant tool_calls message with no
-                                            # matching tool reply corrupts every later request in this chat
-        for tool_turn in range(MAX_CHAT_TOOL_TURNS + 1):
-            payload = {"model": served_name(m), "stream": True, "stream_options": {"include_usage": True},
-                       "messages": ([{"role": "system", "content": system}] if system else []) +
-                                   [dict(x, content=turn_content) if turn_content is not None and i == turn_start else x
-                                    for i, x in enumerate(msgs)],
-                       "chat_template_kwargs": {"enable_thinking": think,
-                                                **({"reasoning_effort": effort} if effort else {})},
-                       **params}
-            if tools:
-                payload["tools"] = tools
-            req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                         headers={"Content-Type": "application/json"})
-            answer, reasoning, in_think, t0, first, usage = [], [], False, time.time(), None, None
-            stop_reason, calls = None, []
-            try:
-                with urllib.request.urlopen(req, timeout=3600) as r:
-                    for raw in r:
-                        raw = raw.strip()
-                        if not raw.startswith(b"data:") or raw == b"data: [DONE]": continue
-                        ev = json.loads(raw[5:])
-                        usage = ev.get("usage") or usage
-                        if ev.get("error"): print(R(ev["error"].get("message"))); break
-                        for ch in ev.get("choices", []):
-                            stop_reason = ch.get("stop_reason") or stop_reason
-                            d = ch.get("delta", {})
-                            if d.get("reasoning_content"):
-                                first = first or time.time()
-                                reasoning.append(d["reasoning_content"])
-                                if show:
-                                    if not in_think: print(DIM("💭 "), end=""); in_think = True
-                                    print(DIM(d["reasoning_content"]), end="", flush=True)
-                            if d.get("content"):
-                                first = first or time.time()
-                                if in_think: print("\n"); in_think = False
-                                if not answer: print(G("› "), end="")
-                                answer.append(d["content"]); print(d["content"], end="", flush=True)
-                            calls += d.get("tool_calls") or []
-            except KeyboardInterrupt:
-                print(Y("\n[" + T("interrupted") + "]"))
-                break
-            except Exception as e:
-                print(R("\n" + T("Error:") + f" {e}")); del msgs[turn_start:]; ok = False
-                break
-            if not calls:
-                break
-            if tool_turn >= MAX_CHAT_TOOL_TURNS:
-                print(Y("\n[" + T("too many tool calls in a row") + "]")); del msgs[turn_start:]; ok = False
-                break
-            # the model asked for a tool: run it here (image/speech, already installed and gated by `tools`
-            # above) and hand the result back so it can continue, instead of printing it as prose
-            print()
-            tool_calls = [{"id": c.get("id") or f"call_{tool_turn}_{i}", "type": "function", "function": c["function"]}
-                          for i, c in enumerate(calls)]
-            msgs.append({"role": "assistant", "content": "".join(answer), "tool_calls": tool_calls})
-            for c in tool_calls:
-                name = c["function"]["name"]
-                try:
-                    targs = json.loads(c["function"].get("arguments") or "{}")
-                except ValueError:
-                    targs = {}
-                if not isinstance(targs, dict):
-                    targs = {}
-                print(DIM(T(TOOL_LABEL.get(name, name))))
-                if name == "generate_image":
-                    result = _tool_generate_image(cfg, targs)
-                elif name == "speak":
-                    result = _tool_speak(targs)
-                else:
-                    result = f"error: unknown tool {name}"
-                msgs.append({"role": "tool", "tool_call_id": c["id"], "content": result})
-        if not ok:
-            continue
-        print()
-        note = reply_note(stop_reason)
-        if note:
-            print(Y("[" + note + "]  " + T("Type /retry to try again.")))
-        if usage:
-            dt = time.time() - (first or t0)
-            ct = usage.get("completion_tokens", 0)
-            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-            print(DIM(T("— {inp} in ({cached} cached) / {out} out · {tps:.1f} tok/s · first token {ttft:.1f} s").format(
-                inp=usage.get("prompt_tokens"), cached=cached, out=ct, tps=ct / dt if dt > 0 else 0, ttft=(first or t0) - t0)))
-        msgs.append({"role": "assistant", "content": "".join(answer), "reasoning_content": "".join(reasoning)})
-        if answer and not resend: remember(question, attached, "".join(answer), "".join(reasoning))
 
 
 def bench(cfg):
@@ -4096,48 +3834,162 @@ def logs():
     except KeyboardInterrupt: pass
 
 
+def new_window(args, cwd=None, close=False, env=None):
+    """Run `./llm <args>` in a new Terminal window (the menu stays in its own). A throwaway .command file opened by
+    Terminal: no Apple Events permission is needed, unlike scripting Terminal. `close`: the window closes itself
+    once the command has ended (Terminal asked by the window's own shell — a sub-agent's window when it is done)."""
+    import shlex
+    import tempfile
+    here = cwd or os.environ.get("LLM_CWD") or os.getcwd()
+    fd, path = tempfile.mkstemp(prefix="llm-", suffix=".command")
+    run = f"{shlex.quote(os.path.join(BASE, 'llm'))} {' '.join(shlex.quote(a) for a in args)}"
+    extra = "".join(f" {k}={shlex.quote(v)}" for k, v in (env or {}).items())
+    with os.fdopen(fd, "w") as f:
+        f.write("#!/bin/sh\n"
+                f"rm -f {shlex.quote(path)}\n"
+                f"cd {shlex.quote(here)}\n"
+                f"export LLM_HOME={shlex.quote(DATA)} LLM_CWD={shlex.quote(here)}{extra}\n"
+                + (f"{run}\n"
+                   "me=$(tty)\n"
+                   "(sleep 1; osascript -e \"tell application \\\"Terminal\\\" to close (every window whose tty is "
+                   "\\\"$me\\\") saving no\" >/dev/null 2>&1) </dev/null >/dev/null 2>&1 &\n"
+                   "exit 0\n" if close else f"exec {run}\n"))
+    os.chmod(path, 0o755)
+    return subprocess.run(["open", "-a", "Terminal", path]).returncode == 0
+
+
+CLI_SHIM = os.path.expanduser("~/.local/bin/llm")
+CLI_MARK = "# AI-llm-Engine: llm command"
+
+
+def cli_installed():
+    """True when `llm` on PATH is this project's command (its shim), so the menu stops offering to install it."""
+    found = shutil.which("llm")
+    if not found:
+        return False
+    try:
+        with open(found) as f:
+            return CLI_MARK in f.read(400)
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def install_cli(uninstall=False):
+    """`./llm install-cli [--uninstall]`: an `llm` command for any folder — a two-line shim in ~/.local/bin that runs
+    this ./llm (a symlink would not do: ./llm finds its files next to itself). Another program's `llm` is never
+    overwritten."""
+    if os.path.exists(CLI_SHIM):
+        try:
+            ours = CLI_MARK in open(CLI_SHIM).read(400)
+        except (OSError, UnicodeDecodeError):
+            ours = False
+        if not ours:
+            print(R(T("{path} belongs to another program: left as it is.").format(path=CLI_SHIM)))
+            return False
+    if uninstall:
+        if os.path.exists(CLI_SHIM):
+            os.remove(CLI_SHIM)
+        print(G(T("The llm command was removed.")))
+        return True
+    os.makedirs(os.path.dirname(CLI_SHIM), exist_ok=True)
+    with open(CLI_SHIM, "w") as f:
+        f.write(f"#!/bin/sh\n{CLI_MARK}\nexec {json.dumps(os.path.join(BASE, 'llm'))} \"$@\"\n")
+    os.chmod(CLI_SHIM, 0o755)
+    print(G(T("Installed: {path}").format(path=CLI_SHIM)))
+    if os.path.dirname(CLI_SHIM) not in os.environ.get("PATH", "").split(os.pathsep):
+        print(Y(T("~/.local/bin is not on your PATH yet. Add this line to ~/.zshrc and open a new terminal:")))
+        print('  export PATH="$HOME/.local/bin:$PATH"')
+    else:
+        print(T("Now `llm` works in any folder: `llm` chats, `llm -c` continues, `llm menu` shows the menu."))
+    return True
+
+
 def menu():
+    """`llm menu` (and LLM.command after its first chat): what you can do now, grouped, the most useful first.
+    Enter takes the main action, a new chat; chats open in their own windows, so the menu stays."""
     cfg = load_cfg()
     print_banner()
-    actions = [
-        ("Start", lambda: start(cfg)), ("Stop", lambda: stop(cfg)),
-        ("Restart", lambda: restart(cfg)), ("Select model", lambda: choose_model(cfg)),
-        ("Search & download models", lambda: search_cmd("")),
-        ("Status", lambda: status(cfg)), ("Chat in terminal", lambda: chat(cfg)),
-        ("Coding agent", lambda: __import__("agent").main([])),
-        ("Speed test", lambda: bench(cfg)), ("Settings", lambda: settings(cfg)),
-        ("Connect an editor (Continue / Kilo / opencode)", lambda: connect_client(cfg)), ("Logs", logs),
-        ("Free memory (vMLX, oMLX, Ollama)", lambda: free_memory()),
-        ("Engine tests", run_tests),
-    ]
+    here = os.environ.get("LLM_CWD") or os.getcwd()
+
+    def chat_window(extra=()):
+        if not health(cfg) and not start(cfg, sys.stdin.isatty()):
+            return
+        new_window(["chat", *extra], cwd=here)
+        print(DIM(T("The chat opened in a new window.")))
+
+    def continue_window():
+        from harness import sessions
+        chats = sessions.all_chats()
+        if not chats:
+            print(DIM(T("No saved chats yet."))); return
+        print("\n".join(sessions.listing(chats[:20])))
+        try:
+            ref = input(T("Which chat? (number, Enter = cancel) › ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(); return
+        chat = sessions.find(chats, ref) if ref else None
+        if chat:
+            chat_window(["-r", chat.id])
+
     while True:
         h, m = health(cfg, 1), current_model(cfg)
-        st = G("● " + T("running")) if h else (Y("● " + T("loading")) if read_pid(ENGINE_PID) else R("● " + T("stopped")))
+        loading = not h and read_pid(ENGINE_PID)
+        st = G("● " + T("running")) if h else (Y("● " + T("loading")) if loading else R("● " + T("stopped")))
         avail, swap = mem_info()
-        print(B("\n╭─ " + T("Status") + " ─╮"))
-        print(f"  {B(m['name']) if m else Y(T('no model selected'))}  {st}")
-        print(DIM("  " + T("RAM free {avail:.1f} GB · swap {swap:.1f} GB").format(avail=avail, swap=swap)
-                  + (f" · http://localhost:{cfg['port']}/v1" if h else "")))
-        for i, (name, _) in enumerate(actions, 1):
-            print(f"  {i:>2}) {T(name)}")
-        print("   0) " + T("Exit") + DIM(" (" + T("the model keeps running") + ")"))
+        print("\n" + B(m["name"] if m else T("no model selected")) + "  " + st + DIM(
+            "  · " + T("RAM free {avail:.1f} GB · swap {swap:.1f} GB").format(avail=avail, swap=swap)
+            + (f" · http://localhost:{cfg['port']}/v1" if h else "")))
+        groups = [
+            (T("Work"), [(T("New chat (new window)") if h else T("Start and chat (new window)"), chat_window),
+                         (T("Continue a chat…"), continue_window),
+                         (T("Stop the model") if h or loading else T("Start the model"),
+                          (lambda: stop(cfg)) if h or loading else (lambda: start(cfg)))]
+             + ([(T("Restart"), lambda: restart(cfg))] if h else [])),
+            (T("Models"), [(T("Select model"), lambda: choose_model(cfg)),
+                           (T("Search & download models"), lambda: search_cmd(""))]),
+            (T("Tools"), [(T("Connect an editor (Continue / Kilo / opencode)"), lambda: connect_client(cfg)),
+                          (T("Settings"), lambda: settings(cfg))]
+             + ([(T("Install the llm command (any folder)"), install_cli)] if not cli_installed() else [])),
+            (T("Diagnostics"), [(T("Status"), lambda: status(cfg)), (T("Logs"), logs),
+                                (T("Speed test"), lambda: bench(cfg)),
+                                (T("Free memory (vMLX, oMLX, Ollama)"), lambda: free_memory()),
+                                (T("Engine tests"), run_tests)]),
+        ]
+        actions, n = [], 0
+        for title, items in groups:
+            print(DIM("  " + title))
+            for name, fn in items:
+                n += 1
+                actions.append(fn)
+                print(f"  {n:>2}) {name}" + (DIM("   ↵") if n == 1 else ""))
+        print("   0) " + T("Exit") + (DIM(" (" + T("the model keeps running") + ")") if h else ""))
         try:
             ch = input("› ").strip()
         except (EOFError, KeyboardInterrupt):
             print(); return
-        if ch == "0": return
+        if ch == "0" or ch.lower() in ("q", "exit", "quit"):
+            return
+        if ch == "":
+            ch = "1"                                      # Enter: the main action
         if ch.isdigit() and 1 <= int(ch) <= len(actions):
-            try: actions[int(ch) - 1][1]()
-            except KeyboardInterrupt: print()
+            try:
+                actions[int(ch) - 1]()
+            except KeyboardInterrupt:
+                print()
 
 
 def up(cfg):
-    """One-step launch: model (if not running) → chat → menu."""
+    """One-step launch (LLM.command): model (if not running) → a new chat → menu."""
     if not health(cfg) and not start(cfg, sys.stdin.isatty()):
         input(T("Enter to open the menu…"))
     else:
-        chat(cfg)
+        chat_cli([])
     menu()
+
+
+def chat_cli(args):
+    """The terminal chat (agent.py): `llm`, `llm chat …`, `llm -c`, `llm -r`, `llm -p "…"`, `llm "question"`."""
+    return __import__("agent").main(args)
 
 
 def open_window():
@@ -4740,15 +4592,24 @@ COMMANDS = [
             "chat — or answer one prompt and exit.", "./llm run <model|org/name|profile> [prompt]", ()),
     Command("open", "Run & chat", "New Terminal window: start the engine and open a chat.", "./llm open", ()),
     Command("up", "Run & chat", "Start the engine, chat and the menu, in this terminal.", "./llm up", ()),
-    Command("chat", "Run & chat", "Chat with the model that is already running.", "./llm chat", ()),
-    Command("agent", "Run & chat", "Terminal coding agent (files, search, edits, shell) in a folder.",
-            "./llm agent [dir]", ()),
+    Command("chat", "Run & chat", "The chat (also ./llm with no command): saved chats, a project on request, "
+            "/help inside.", './llm chat ["question"] [-c | -r [N]] [-p "question"] [--project dir] [--auto]',
+            ("-c", "--continue", "-r", "--resume", "--fork-session", "-n", "--name", "-p", "--print",
+             "--output-format", "--max-turns", "--no-session-persistence", "--project", "--auto", "-m", "--model",
+             "--append-system-prompt", "--no-think")),
+    Command("chats", "Run & chat", "Saved chats: list them, or delete one.", "./llm chats [rm <N> [--yes]]",
+            ("rm", "--yes")),
+    Command("agent", "Run & chat", "The chat with a project attached (files, search, edits, shell).",
+            "./llm agent [dir] [chat options]", ("--auto", "-c", "-r")),
     Command("conduct", "Run & chat", "Orchestrator: recognise attached files (OCR/Whisper/docs) and route "
             "the task by role.", './llm conduct ["<task>"|board|set|unset] [--file F …]',
             ("--file", "--json")),
     Command("ui", "Run & chat", "Native code editor with the assistant (a module of LLMBar.app).",
             "./llm ui [dir]", ("--choose",)),
-    Command("menu", "Run & chat", "Interactive menu (also: ./llm with no arguments).", "./llm menu", ()),
+    Command("menu", "Run & chat", "Interactive menu: new chat, continue a chat, models, settings.", "./llm menu", ()),
+    Command("version", "Setup & maintenance", "Print the version (also --version, -v).", "./llm version", ()),
+    Command("install-cli", "Setup & maintenance", "An `llm` command for any folder (a shim in ~/.local/bin).",
+            "./llm install-cli [--uninstall]", ("--uninstall",)),
 
     Command("lab", "Model Lab", "Per-tensor inspection, activation capture, and one-tensor reversible "
             "weight patches — see docs/model-lab/compatibility.md.",
@@ -5003,7 +4864,8 @@ def main():
         "ps": lambda: ps_cmd(cfg, sys.argv[2:]),
         "create": lambda: create_cmd(cfg, sys.argv[2:]),
         "fav": lambda: fav_cmd(cfg, sys.argv[2:]),
-        "chat": lambda: chat(cfg), "bench": lambda: bench(cfg), "logs": logs,
+        "chat": lambda: chat_cli(sys.argv[2:]), "bench": lambda: bench(cfg), "logs": logs,
+        "chats": lambda: __import__("agent").chats_cmd(sys.argv[2:]),
         "free": lambda: free_memory(tty), "connect": lambda: connect_client(cfg, arg or None), "kilo": lambda: connect_client(cfg, "kilo"), "test": run_tests,
         "rm": lambda: remove_cmd(cfg, sys.argv[2:]),
         "vision": lambda: set_vision(cfg, arg or "on"),
@@ -5011,7 +4873,9 @@ def main():
         "perf": lambda: run_perf(sys.argv[2:]),
         "eval": lambda: run_eval(sys.argv[2:]),
         "calibrate": lambda: run_calibrate(sys.argv[2:]),
-        "agent": lambda: __import__("agent").main(sys.argv[2:]),
+        # the coding agent is the chat with a project attached: `llm agent [dir] …` = `llm --project dir …`
+        "agent": lambda: chat_cli(["--project", sys.argv[2]] + sys.argv[3:] if sys.argv[2:3] and not sys.argv[2].startswith("-")
+                                  else ["--project", "."] + sys.argv[2:]),
         "conduct": lambda: conduct_cmd(cfg, sys.argv[2:]),
         "lab": lambda: lab_cmd(cfg, sys.argv[2:]),
         "convert": lambda: convert_cmd(cfg, sys.argv[2:]),
@@ -5025,7 +4889,10 @@ def main():
         "search": lambda: search_cmd(" ".join(a for a in sys.argv[2:] if not a.startswith("--") and a != "modelscope"),
                                      "--json" in sys.argv, "modelscope" if "--source" in sys.argv and "modelscope" in sys.argv else "hf"),
         "pull": lambda: hf_pull(arg, "--progress" in sys.argv) if arg else print(__doc__),
-        "fetch": lambda: fetch_cmd(cfg, sys.argv[2:]), "": menu, "menu": menu,
+        "fetch": lambda: fetch_cmd(cfg, sys.argv[2:]), "": lambda: chat_cli([]), "menu": menu,
+        "version": lambda: print(f"llm {VERSION}"), "--version": lambda: print(f"llm {VERSION}"),
+        "-v": lambda: print(f"llm {VERSION}"),
+        "install-cli": lambda: install_cli("--uninstall" in sys.argv),
         "help": lambda: help_cmd(sys.argv[2:]), "--help": lambda: help_cmd(sys.argv[2:]),
         "-h": lambda: help_cmd(sys.argv[2:]), "completion": lambda: completion_cmd(sys.argv[2:]),
     }
@@ -5033,6 +4900,9 @@ def main():
     # normal dispatch so the real handler (which may start the engine, delete a model…) never runs.
     if cmd in actions and cmd not in ("help", "--help", "-h") and any(a in ("--help", "-h") for a in sys.argv[2:]):
         sys.exit(1 if help_cmd([cmd]) is False else 0)
+    # like claude / codex / gemini: options or a quoted question go straight to the chat
+    if cmd not in actions and (cmd.startswith("-") or any(c.isspace() for c in cmd)):
+        sys.exit(0 if chat_cli(sys.argv[1:]) is not False else 1)
     if cmd not in actions:
         if cmd:
             print(R(T("Unknown command: '{cmd}'.").format(cmd=cmd)))

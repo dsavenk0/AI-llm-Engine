@@ -15,6 +15,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from harness import fixtests  # noqa: E402
+os.environ.setdefault("LLM_SESSIONS_DIR", __import__("tempfile").mkdtemp(prefix="llm-test-chats-"))  # never the real chats
 
 PYTEST_OUT = """\
 ============================= test session starts ==============================

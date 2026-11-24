@@ -15,6 +15,7 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+os.environ.setdefault("LLM_SESSIONS_DIR", __import__("tempfile").mkdtemp(prefix="llm-test-chats-"))  # never the real chats
 import agent  # noqa: E402
 import llm  # noqa: E402
 
@@ -255,12 +256,76 @@ class TestModelLoop(unittest.TestCase):
 
     def test_a_model_that_never_stops_calling_tools_is_cut_off(self):
         a = make_agent({"f.txt": "x"}, port=self.port)
-        Scripted.script = [[call(i, "list_dir", {"path": "."})] for i in range(agent.MAX_STEPS + 5)]
+        # alternating calls, so the same-call guard does not fire first; without a terminal nobody is asked to go on
+        Scripted.script = [[call(i, "list_dir", {"path": "." if i % 2 else "f.txt"})] for i in range(agent.MAX_STEPS + 5)]
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out), mock.patch.object(sys.stdin, "isatty", return_value=False):
             a.turn("loop forever")
         self.assertEqual(len(Scripted.requests), agent.MAX_STEPS)
-        self.assertIn("Stopped after", out.getvalue())
+        self.assertIn(f"{agent.MAX_STEPS} steps so far", out.getvalue())
+
+    def test_at_the_step_limit_the_user_can_let_it_go_on(self):
+        a = make_agent({"f.txt": "x"}, port=self.port)
+        Scripted.script = [[call(i, "list_dir", {"path": "." if i % 2 else "f.txt"})] for i in range(agent.MAX_STEPS + 2)]
+        Scripted.script.append([text("finished")])
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(llm, "ask_yn", return_value=True) as asked:
+            quiet(a.turn, "long job")
+        asked.assert_called_once()
+        self.assertEqual(a.messages[-1]["content"], "finished")
+
+    def test_the_same_tool_call_three_times_in_a_row_stops_the_turn(self):
+        a = make_agent({"f.txt": "x"}, port=self.port)
+        Scripted.script = [[call(i, "read_file", {"path": "f.txt"})] for i in range(10)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            a.turn("read it")
+        self.assertEqual(len(Scripted.requests), 3)
+        self.assertIn("three times", out.getvalue())
+        self.assertEqual(a.messages[-1]["role"], "tool")              # the call still got an answer
+        self.assertIn("three times", a.messages[-1]["content"])
+
+    def test_a_reply_that_repeats_itself_is_cut_and_kept(self):
+        a = make_agent(port=self.port)
+        line = "I will now check the configuration file again.\n"
+        Scripted.script = [[text(line) for _ in range(400)]]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            msg = a.complete()
+        self.assertEqual(a.stop_reason, "looping")
+        self.assertLess(msg["content"].count(line), 60)
+        self.assertIn("repeating itself", out.getvalue())
+
+    def test_ctrl_c_during_a_reply_keeps_the_partial_text(self):
+        a = make_agent(port=self.port)
+        Scripted.script = [[text("Part one. "), text("Part two. ")]]
+        real = a._stream
+
+        def stream_then_ctrl_c(r, content, reasoning, calls):
+            real(r, content, reasoning, calls)
+            raise KeyboardInterrupt
+        with mock.patch.object(a, "_stream", side_effect=stream_then_ctrl_c):
+            msg = quiet(a.complete)
+        self.assertEqual(a.stop_reason, "interrupted")
+        self.assertEqual(msg["content"], "Part one. Part two. ")
+
+    def test_ctrl_c_in_a_tool_answers_every_pending_call(self):
+        a = make_agent({"f.txt": "x"}, port=self.port)
+        two = {"choices": [{"delta": {"tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "f.txt"}'}},
+            {"id": "c2", "type": "function", "function": {"name": "list_dir", "arguments": '{"path": "."}'}}]}}]}
+        Scripted.script = [[two]]
+        with mock.patch.object(a, "call_tool", side_effect=KeyboardInterrupt):
+            quiet(a.turn, "go")
+        tools = [m for m in a.messages if m["role"] == "tool"]
+        self.assertEqual([m["tool_call_id"] for m in tools], ["c1", "c2"])
+        self.assertTrue(all("cancelled" in m["content"] for m in tools))
+
+    def test_each_step_has_a_token_limit(self):
+        a = make_agent(port=self.port)
+        Scripted.script = [[text("ok")]]
+        quiet(a.complete)
+        self.assertEqual(Scripted.requests[0]["max_tokens"], agent.STEP_MAX_TOKENS)
 
     def test_think_toggle_reaches_the_request(self):
         a = make_agent(port=self.port)

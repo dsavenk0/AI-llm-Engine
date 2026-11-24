@@ -1915,11 +1915,12 @@ struct ToolsTab: View {
         VStack(spacing: 10) {
             Card {
                 Caption(text: L("Interface", "Интерфейс"))
-                tool("bubble.left.and.bubble.right", L("Chat", "Чат"), L("Streaming chat in Terminal · /image /think /effort", "Чат в Терминале · /image /think /effort")) {
-                    CLI.terminal(e.running ? "./llm chat && ./llm" : "./llm up")
+                // one chat: it talks, and works on a project when /project attaches one (files, search, edits, commands)
+                tool("bubble.left.and.bubble.right", L("New chat", "Новый чат"), L("In Terminal · saved · /project attaches a folder · /help", "В Терминале · сохраняется · /project подключит папку · /help")) {
+                    CLI.terminal(e.running ? "./llm chat && ./llm menu" : "./llm up")
                 }
-                tool("cpu", L("Coding agent", "Агент для кода"), L("Reads, searches, edits files and runs commands — asks first", "Читает, ищет, правит файлы и запускает команды — с подтверждением")) {
-                    CLI.terminal("LLM_CWD=$HOME ./llm agent")
+                tool("clock.arrow.circlepath", L("Continue a chat", "Продолжить чат"), L("Pick one of the saved chats", "Выбрать один из сохранённых чатов")) {
+                    CLI.terminal("./llm chat -r")
                 }
                 tool("photo", L("Images (mflux)", "Изображения (mflux)"),
                      L("Generate an image from text with FLUX on MLX — installs on first use", "Картинка по тексту: FLUX на MLX — ставится при первом запуске")) {
@@ -2026,10 +2027,10 @@ struct ToolsTab: View {
             }
             Card(glow: HUD.phosphor) {
                 Caption(text: L("Diagnostics", "Диагностика"), color: HUD.phosphor)
+                tool("terminal", L("Terminal menu", "Меню в Терминале"), "./llm menu") { CLI.terminal("./llm menu") }
                 tool("text.alignleft", L("Logs", "Логи"), L("Engine log, live", "Лог движка в реальном времени")) { CLI.terminal("./llm logs") }
                 tool("checkmark.seal", L("Tests", "Тесты"), L("Unit tests (+ integration when stopped)", "Юнит-тесты (+ интеграционные при остановке)")) { CLI.terminal("./llm test") }
                 tool("speedometer", L("Benchmarks", "Бенчмарки"), L("Compare with the baseline · stop the engine first", "Сравнение с базой · сначала остановите движок")) { CLI.terminal("./llm perf") }
-                tool("terminal", L("Terminal menu", "Меню в Терминале"), "./llm") { CLI.terminal("./llm") }
                 tool("flask", L("Model Lab", "Лаборатория модели"),
                      L("Inspect tensors, capture activations, weight patches",
                        "Инспекция тензоров, захват активаций, патчи весов")) {

@@ -1,19 +1,15 @@
-"""Chat history shared by `llm chat` and the code editor: the editor's file format, and the chat commands.
+"""The code editor's chat history file (harness/chats.py): its format, as the Swift decoder needs it.
 
     .venv/bin/python -m unittest tests.test_chats -v
 """
-import contextlib
-import io
 import json
 import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import llm  # noqa: E402
 from harness import chats  # noqa: E402
 
 ITEM_KEYS = {"id", "kind", "text", "reasoning", "attached", "steps", "counts"}
@@ -121,171 +117,6 @@ class TestStore(unittest.TestCase):
         self.assertEqual([s["title"] for s in ss], ["q1", "q0"])
         self.assertEqual(len(chats.listing(ss, ss[0]["id"])), 2)
         self.assertTrue(chats.listing(ss, ss[0]["id"])[0].startswith("▸"))
-
-
-class FakeStream:
-    def __init__(self, text):
-        ev = {"choices": [{"delta": {"content": text}}], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}
-        self.lines = [b"data: " + json.dumps(ev).encode(), b"data: [DONE]"]
-
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-    def __iter__(self): return iter(self.lines)
-
-
-class FakeToolCallStream:
-    """Always answers with a tool call, never a final text — used to drive chat()'s tool loop past
-    MAX_CHAT_TOOL_TURNS so the "too many tool calls" failure path actually runs."""
-
-    def __init__(self, call_id):
-        ev = {"choices": [{"delta": {"tool_calls": [
-            {"id": call_id, "type": "function",
-             "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "x"})}}]}}]}
-        self.lines = [b"data: " + json.dumps(ev).encode(), b"data: [DONE]"]
-
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-    def __iter__(self): return iter(self.lines)
-
-
-class TestChatToolLoop(unittest.TestCase):
-    """A regression test for a real bug a code review found: before the fix, a turn that failed (too many
-    tool calls, or an exception) after *earlier successful* tool rounds in the very same turn only popped
-    the single most recent message — leaving a dangling assistant `tool_calls` message with no matching
-    tool reply in `msgs`, which corrupts every later request in the chat until `/clear`."""
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.cwd = "/work/proj"
-
-    def test_a_failed_turn_discards_itself_entirely_not_one_message(self):
-        from harness import chats
-        sent = []
-
-        def fake_input(prompt="", _n=iter(["draw something", "hello again"])):
-            try:
-                return next(_n)
-            except StopIteration:
-                raise EOFError
-
-        def fake_urlopen(req, timeout=None):
-            body = json.loads(req.data)
-            sent.append([dict(msg) for msg in body["messages"]])   # a snapshot: msgs is mutated afterward
-            # MAX_CHAT_TOOL_TURNS + 1 tool-call replies exhaust the first turn's budget and fail it; the
-            # second turn (after the first is fully discarded) gets an ordinary text answer
-            return (FakeToolCallStream(f"c{len(sent)}") if len(sent) <= llm.MAX_CHAT_TOOL_TURNS + 1
-                    else FakeStream("ok"))
-
-        m = {"name": "m", "thinking": False, "efforts": []}
-        buf = io.StringIO()
-        from engine import audio
-        with mock.patch.object(llm, "current_model", return_value=m), \
-                mock.patch.object(llm, "health", return_value={"images": True}), \
-                mock.patch.object(audio, "kokoro_available", return_value=False), \
-                mock.patch.object(llm, "_tool_generate_image", return_value="saved: x.png"), \
-                mock.patch.object(llm, "mcfg", return_value={"effort": None}), \
-                mock.patch.object(llm, "think_enabled", return_value=False), \
-                mock.patch.object(llm, "served_name", return_value="m"), \
-                mock.patch.object(chats, "default_dir", return_value=self.dir), \
-                mock.patch("builtins.input", fake_input), mock.patch("urllib.request.urlopen", fake_urlopen), \
-                mock.patch("os.getcwd", return_value=self.cwd), contextlib.redirect_stdout(buf):
-            llm.chat({"port": 1, "api_key": ""})
-
-        # the first turn made MAX_CHAT_TOOL_TURNS + 1 requests (it never got a final answer); the second
-        # turn's one request must show no trace of it — no dangling tool_calls message anywhere, and the
-        # conversation must still open with the second turn's own question, not an empty/corrupted history
-        self.assertEqual(len(sent), llm.MAX_CHAT_TOOL_TURNS + 2)
-        last = sent[-1]
-        self.assertFalse(any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in last))
-        self.assertEqual([msg["role"] for msg in last], ["user"])
-        self.assertEqual(last[0]["content"], "hello again")
-
-
-class TestChatCommands(unittest.TestCase):
-    """`llm chat` driven by scripted input against a fake streaming reply."""
-
-    def run_chat(self, lines, cwd, directory, sent):
-        inputs = iter(lines)
-
-        def fake_input(prompt=""):
-            try:
-                return next(inputs)
-            except StopIteration:
-                raise EOFError
-
-        def fake_urlopen(req, timeout=None):
-            body = json.loads(req.data)
-            sent.append(body["messages"])
-            return FakeStream(f"answer {len(sent)}")
-
-        m = {"name": "m", "thinking": False, "efforts": []}
-        buf = io.StringIO()
-        from engine import audio
-        # health() always returns a dict (or None) in real use — chat() reads hc.get("images") from it, so a
-        # bare `True` here (the old mock) doesn't match the real contract and crashes with AttributeError
-        with mock.patch.object(llm, "current_model", return_value=m), \
-                mock.patch.object(llm, "health", return_value={"images": False}), \
-                mock.patch.object(audio, "kokoro_available", return_value=False), \
-                mock.patch.object(llm, "mcfg", return_value={"effort": None}), \
-                mock.patch.object(llm, "think_enabled", return_value=False), \
-                mock.patch.object(llm, "served_name", return_value="m"), \
-                mock.patch.object(chats, "default_dir", return_value=directory), \
-                mock.patch("builtins.input", fake_input), mock.patch("urllib.request.urlopen", fake_urlopen), \
-                mock.patch("os.getcwd", return_value=cwd), contextlib.redirect_stdout(buf):
-            llm.chat({"port": 1, "api_key": ""})
-        return buf.getvalue()
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.cwd = "/work/proj"
-
-    def test_a_chat_is_saved_listed_reopened_renamed_and_deleted(self):
-        sent = []
-        self.run_chat(["first question", "second one"], self.cwd, self.dir, sent)
-        saved = chats.load(self.cwd, self.dir)
-        self.assertEqual(len(saved), 1)
-        self.assertEqual([i["kind"] for i in saved[0]["items"]], ["user", "assistant", "user", "assistant"])
-        self.assertEqual(saved[0]["title"], "first question")
-
-        # a later session: the history is listed, the old chat opens and continues with its context
-        sent.clear()
-        out = self.run_chat(["/history", "/open 1", "third", "/rename 1 Renamed chat"], self.cwd, self.dir, sent)
-        self.assertIn("first question", out)
-        self.assertEqual([m["content"] for m in sent[0]], ["first question", "answer 1", "second one", "answer 2", "third"])
-        saved = chats.load(self.cwd, self.dir)
-        self.assertEqual((len(saved), saved[0]["title"], len(saved[0]["items"])), (1, "Renamed chat", 6))
-
-        # a new chat is separate; deleting asks first
-        sent.clear()
-        self.run_chat(["fresh start"], self.cwd, self.dir, sent)
-        self.assertEqual([m["content"] for m in sent[0]], ["fresh start"])
-        self.assertEqual(len(chats.load(self.cwd, self.dir)), 2)
-        self.run_chat(["/delete 1", "n"], self.cwd, self.dir, [])
-        self.assertEqual(len(chats.load(self.cwd, self.dir)), 2)
-        out = self.run_chat(["/delete 1", "y"], self.cwd, self.dir, [])
-        self.assertEqual([s["title"] for s in chats.load(self.cwd, self.dir)], ["Renamed chat"])
-
-    def test_wrong_references_do_not_touch_anything(self):
-        self.run_chat(["q"], self.cwd, self.dir, [])
-        path = chats.chats_file(self.cwd, self.dir)
-        with open(path) as f:
-            before = f.read()
-        out = self.run_chat(["/open 9", "/delete x", "/rename", "/open"], self.cwd, self.dir, [])
-        self.assertEqual(out.count(llm.T("No such chat. /history lists them.")), 4)
-        with open(path) as f:
-            self.assertEqual(f.read(), before)
-
-    def test_projects_have_separate_histories(self):
-        self.run_chat(["a"], "/work/one", self.dir, [])
-        self.run_chat(["b"], "/work/two", self.dir, [])
-        self.assertEqual([s["title"] for s in chats.load("/work/one", self.dir)], ["a"])
-        self.assertEqual([s["title"] for s in chats.load("/work/two", self.dir)], ["b"])
-
-    def test_clear_starts_a_new_chat_and_keeps_the_old_one(self):
-        sent = []
-        self.run_chat(["old", "/clear", "new"], self.cwd, self.dir, sent)
-        self.assertEqual([m["content"] for m in sent[1]], ["new"])
-        self.assertEqual(sorted(s["title"] for s in chats.load(self.cwd, self.dir)), ["new", "old"])
 
 
 if __name__ == "__main__":

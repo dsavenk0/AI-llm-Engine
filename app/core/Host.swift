@@ -74,7 +74,7 @@ enum AppHost {
         else { NSApp.mainMenu = baseMenu }
     }
 
-    static func openTerminal(_ command: String = "./llm") { CLI.terminal(command) }
+    static func openTerminal(_ command: String = "./llm menu") { CLI.terminal(command) }
 
     /// The engine panel (the menu-bar window), brought forward.
     static func openPanel() { bar?.reveal() }
@@ -124,7 +124,7 @@ enum AppHost {
             openEditor(project: q("root"))
             preloadModel()
         case "cli":
-            openTerminal("./llm")
+            openTerminal("./llm menu")
             preloadModel()
         case "voice":
             openVoice()                                            // listening starts the model itself
