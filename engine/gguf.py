@@ -56,6 +56,8 @@ def _value(f, t, keep):
         return _string(f, keep)
     if t == 9:                                   # array: element type, count, elements
         et, n = _read(f, "<I"), _read(f, "<Q")
+        if et in _FIXED and n <= 64:             # small numeric arrays (rope sections, image mean/std) are kept
+            return [_read(f, _FIXED[et]) for _ in range(n)]
         if et in _FIXED:
             f.seek(n * struct.calcsize(_FIXED[et]), 1)
         elif et == 8:
@@ -343,6 +345,80 @@ def server_path(data_dir=None):
         if os.access(p, os.X_OK):
             return p
     return shutil.which("llama-server")
+
+
+# image projectors (mmproj) the built-in decoder runs itself: the Qwen3-VL tower of Qwen3.5 / 3.6 (engine/vision.py)
+NATIVE_PROJECTORS = ("qwen3vl_merger",)
+NATIVE_VISION_ARCHS = ("qwen35", "qwen35moe")
+
+
+def projector_type(path):
+    """The projector an mmproj GGUF declares ("qwen3vl_merger" …), or None (stdlib, header only)."""
+    try:
+        return read_header_full(path).get("clip.projector_type")
+    except (OSError, GGUFError, struct.error, KeyError):
+        return None
+
+
+_PROJ_CACHE = {}
+
+
+def native_vision(model_path):
+    """True when the projector next to this GGUF is one the built-in decoder runs (images without llama.cpp).
+    Cached per projector file (path, mtime, size): model lists ask for every model on every refresh."""
+    proj = projector_for(model_path)
+    if not proj:
+        return False
+    try:
+        st = os.stat(proj)
+    except OSError:
+        return False
+    key = (proj, st.st_mtime_ns, st.st_size)
+    if key not in _PROJ_CACHE:
+        _PROJ_CACHE[key] = projector_type(proj) in NATIVE_PROJECTORS
+    return _PROJ_CACHE[key]
+
+
+# draft models for speculative decoding: llama.cpp loads them, but only next to the model they draft for
+DRAFT_ARCHS = frozenset({"dflash", "eagle", "eagle3", "medusa"})
+_LIB_ARCHS = {}
+
+
+def llamacpp_knows(arch, data_dir=None):
+    """Whether llama.cpp runs GGUF architecture `arch`: True/False from the installed library's own names (each is
+    stored there null-terminated), None when llama.cpp is not installed — it is fetched fresh on first use, so a
+    name this engine has never heard of is not assumed to be missing from it."""
+    import glob
+    libs = sorted(glob.glob(os.path.join(data_dir, "llama.cpp", "libllama*.dylib")), key=len) if data_dir else []
+    if not libs:
+        return None
+    try:
+        st = os.stat(libs[0])
+        key = (libs[0], st.st_mtime_ns)
+        if key not in _LIB_ARCHS:
+            with open(libs[0], "rb") as f:
+                _LIB_ARCHS.clear()
+                _LIB_ARCHS[key] = f.read(64 * 2**20)
+        return (b"\0" + arch.encode() + b"\0") in _LIB_ARCHS[key]
+    except OSError:
+        return None
+
+
+def hub_gguf_route(arch, tags=(), projector=False, data_dir=None):
+    """(route, why) for a GGUF repo on the hub, from the architecture it declares: "native" when this engine's
+    decoder reads it — with its image projector too when that is one the decoder runs (Qwen3.5 / 3.6); "gguf" when
+    llama.cpp runs it (another projector goes to llama.cpp at once); "none" for a draft model or an architecture
+    nothing here runs (the installed llama.cpp lacks it, or only InferSSD knows it)."""
+    if not arch:
+        return "gguf", ""                                  # the hub did not say: llama.cpp is the general route
+    if arch in DRAFT_ARCHS or "draft-model" in set(tags or ()):
+        return "none", "draft model for speculative decoding"
+    if arch in NATIVE_ARCHS and (not projector or arch in NATIVE_VISION_ARCHS):
+        return "native", ""
+    known = llamacpp_knows(arch, data_dir)
+    if known is False or (known is None and arch in INFERSSD_PROFILES):
+        return "none", f"architecture {arch} is not supported"
+    return "gguf", ""
 
 
 # Profiles declared by InferSSD's typed launcher at the reviewed 0.1.4/e91c7d7 revision. Keep this exact: a

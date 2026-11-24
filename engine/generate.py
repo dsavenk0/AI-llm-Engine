@@ -284,16 +284,9 @@ class Engine(DecodeLoop):
             p, g = preprocess(load_image(ref), self.pp_cfg, self.max_pixels)
             pix.append(p)
             grids.append(g)
+        from .vision import expand_image_tokens
         merge = self.config["vision_config"]["spatial_merge_size"]
-        parts = text.split("<|image_pad|>")
-        if len(parts) - 1 != len(grids):
-            raise ValueError("image placeholders do not match images")
-        ids = []
-        for i, part in enumerate(parts):
-            ids += self.tok.encode(part)
-            if i < len(grids):
-                t, h, w = grids[i]
-                ids += [self.image_token] * (t * h * w // merge ** 2)
+        ids = expand_image_tokens(self.tok.encode, text, grids, self.image_token, merge)
         return ids, (mx.concatenate(pix), grids)
 
     def memory_breakdown(self):
@@ -332,10 +325,6 @@ class Engine(DecodeLoop):
         return br
 
     # ───────────────────────── memory ─────────────────────────
-    def _drop_prefix_cache(self):
-        self.cache, self.cache_tokens, self.snapshots = None, [], []
-        mx.clear_cache()
-
     def _reserve(self, new_tokens):
         """Make sure prefill of `new_tokens` fits under the system RAM limit; sets the chunk size."""
         memory.reserve(self, new_tokens, mx.clear_cache)

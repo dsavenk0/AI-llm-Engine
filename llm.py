@@ -553,7 +553,8 @@ def route_features(cfg, m):
     else:
         which = {"native": "engine", "ptq1": "engine-ptq1", "mlxlm": "mlx-lm"}.get(route, route)
     f = []
-    if m.get("vision") and which in ("engine", "engine-ptq1", "llama.cpp"):
+    if m.get("vision") and (which in ("engine", "engine-ptq1", "llama.cpp") or
+                            (which == "engine-gguf" and gguf.native_vision(m["path"]))):
         f.append("vision")
     if m.get("thinking"):
         f.append("thinking")
@@ -617,10 +618,15 @@ _NATIVE_CACHE = {}
 
 
 def gguf_native(cfg, m):
-    """True when this GGUF runs on the engine's own MLX decoder: allowed by the setting, a single file without
-    an image projector, and an architecture / quantization / tokenizer that decoder implements."""
-    if m.get("route") != "gguf" or not cfg.get("gguf_native", True) or m.get("vision"):
+    """True when this GGUF runs on the engine's own MLX decoder: allowed by the setting, a single file, and an
+    architecture / quantization / tokenizer that decoder implements. A file with an image projector runs here too,
+    with its images when the projector next to it is one the decoder runs (Qwen3.5 / 3.6). Another projector goes
+    to llama.cpp at once (the fallback), unless images are switched off for that model: then it runs here as text."""
+    if m.get("route") != "gguf" or not cfg.get("gguf_native", True):
         return False
+    if m.get("vision") and not gguf.native_vision(m["path"]) and \
+            (cfg.get("models") or {}).get(m.get("path"), {}).get("vision") is not False:
+        return False                      # a projector this decoder cannot run: llama.cpp reads it
     if os.environ.get("LLM_GGUF_RUNTIME", "auto").lower() in ("inferssd", "llama"):
         return False                      # the diagnostic override names another runtime: honour it before ours
     path = m["path"]
@@ -3151,12 +3157,12 @@ def hf_search(query, limit=20, source="hf", fmt="all"):
         found.sort(key=lambda km: hub_route(km[1].get("tags")) == "gguf")
 
     def probe(repo):
-        """(size in GB, storage format the engine can't read yet?, install state) for one repo.
-        A GGUF repo's size is the one quantization a pull takes, not every file in it."""
+        """(size in GB, storage format the engine can't read yet?, install state, (route, why) of a GGUF repo or
+        None). A GGUF repo's size is the one quantization a pull takes, not every file in it."""
         try:
             info = _hf(f"/api/models/{repo}?blobs=true", timeout=15)
         except Exception:
-            return None, False, install_state(repo)
+            return None, False, install_state(repo), None
         sib = info.get("siblings", [])
         names = {f["rfilename"] for f in sib}
         if any(n.lower().endswith(".gguf") for n in names) and not any(n.lower().endswith(".safetensors") for n in names):
@@ -3164,8 +3170,11 @@ def hf_search(query, limit=20, source="hf", fmt="all"):
                 picked = gguf.pick_files([f for f in sib if f["rfilename"].lower().endswith(".gguf")])[0]
                 size = sum(f.get("size") or 0 for f in picked) / 2**30 or None
             except gguf.GGUFError:
-                size = None
-            return size, False, install_state(repo, sib)
+                picked, size = [], None
+            # the architecture the hub read from the file decides who runs it — before anything is downloaded
+            arch = (info.get("gguf") or {}).get("architecture")
+            projector = any(gguf.is_projector(f["rfilename"]) for f in picked)
+            return size, False, install_state(repo, sib), gguf.hub_gguf_route(arch, info.get("tags"), projector, DATA)
         size = sum(f.get("size") or 0 for f in sib if not f["rfilename"].lower().endswith(PULL_SKIP)) / 2**30
         unsupported = False
         if "jang_config.json" in names:  # JANG bundles may use packed storage that needs expansion
@@ -3174,14 +3183,18 @@ def hf_search(query, limit=20, source="hf", fmt="all"):
                 unsupported = bool(rt.get("requires_jang_affine1_expansion"))  # packed ternary runs (ptq1)
             except Exception:
                 pass
-        return size, unsupported, install_state(repo, sib)
+        return size, unsupported, install_state(repo, sib), None
     with ThreadPoolExecutor(8) as ex:
         probes = list(ex.map(probe, [m["id"] for _, m in found]))
     out = []
-    for (_, m), (sz, unsupported, state) in zip(found, probes):
+    for (_, m), (sz, unsupported, state, gg) in zip(found, probes):
         route = "none" if unsupported else hub_route(m.get("tags"))   # a repo with MLX weights is pulled as MLX
+        fmt = "gguf" if route == "gguf" else "mlx"
+        why = ""
+        if fmt == "gguf" and gg:
+            route, why = gg
         out.append({"id": m["id"], "downloads": m.get("downloads", 0), "likes": m.get("likes", 0), "size": sz,
-                    "format": "gguf" if route == "gguf" else "mlx", "route": route, "compatible": route != "none",
+                    "format": fmt, "route": route, "why": why, "compatible": route != "none",
                     "local": state == "complete", "partial": state == "partial",
                     "fits": sz is not None and sz + 2.0 <= RAM_GB * 0.75})
     return out

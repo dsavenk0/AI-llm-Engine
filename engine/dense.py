@@ -606,6 +606,11 @@ class DenseModel:
         self.act = mx.float32 if mode == "f32" else mx.float16      # dtype fed to the matmuls
         self.wide = mode in ("f32", "mixed")                          # residual stream + swiglu in float32
         self.args = type("Args", (), {"vocab_size": cfg.vocab})()
+        self.mrope = None
+        if cfg.extra.get("mrope_section"):       # an image prompt's 3-D positions (engine/model.py's M-RoPE)
+            from .model import MRoPE
+            self.mrope = MRoPE(cfg.rope_dims, cfg.rope_base, cfg.extra["mrope_section"])
+        self.vision = None                       # the image projector, attached on the first image
         self._freqs = None
         if cfg.rope_freqs is not None:
             d = cfg.rope_dims
@@ -791,7 +796,13 @@ class DenseModel:
         return mx.fast.rope(x, c.rope_dims, traditional=c.rope_traditional, base=c.rope_base,
                             scale=c.rope_scale, offset=offset)
 
-    def __call__(self, ids, cache=None):
+    def embed_tokens(self, ids):
+        """Token embeddings in the residual stream's type — what an image's features are put in place of."""
+        R = mx.float32 if self.wide else mx.float16
+        x = self.embed(ids).astype(R)
+        return x * self.cfg.embed_scale if self.cfg.embed_scale != 1.0 else x
+
+    def __call__(self, ids=None, cache=None, embeds=None, cos=None, sin=None, delta=0):
         """The residual stream and the SwiGLU product are float32 (as in ggml: Llama 3.2 and others carry a few
         huge activations that float16 rounds away, and greedy text drifted from llama.cpp's after a handful of
         tokens); the matmuls take float16 inputs — the weights are quantized anyway — and keys/values are
@@ -799,12 +810,16 @@ class DenseModel:
         c = self.cfg
         M, F16, F32 = self.act, mx.float16, mx.float32
         R = F32 if self.wide else F16                    # dtype of the residual stream
-        B, L = ids.shape
+        # `embeds` [B, L, D] replace the token lookup (an image prompt); `cos`/`sin` are its 3-D rotary positions;
+        # `delta` shifts the text positions after an image (its patches advance the position less than its tokens)
+        if embeds is not None:
+            x = embeds.astype(R)
+            B, L = x.shape[:2]
+        else:
+            B, L = ids.shape
+            x = self.embed_tokens(ids)
         if cache is None:
             cache = self.make_cache()
-        x = self.embed(ids).astype(R)
-        if c.embed_scale != 1.0:
-            x = x * c.embed_scale
         st = self.steer or (lambda y: y)
         x = st(x)
         off = cache[0].offset
@@ -842,7 +857,10 @@ class DenseModel:
                 q = _rms(q, layer.q_norm, c.eps)
                 k = _rms(k, layer.k_norm, c.eps)
             q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
-            q, k = self._rope(q, off, local), self._rope(k, off, local)
+            if cos is not None and self.mrope is not None:
+                q, k = self.mrope.apply(q, cos, sin), self.mrope.apply(k, cos, sin)
+            else:
+                q, k = self._rope(q, off + delta, local), self._rope(k, off + delta, local)
             k, v = kv.update_and_fetch(k.astype(F16), v.astype(F16))
             m = mask
             if local:
@@ -1026,6 +1044,9 @@ def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_
             raise Unsupported("linear-attention head sizes this decoder does not lay out")
         if cfg.n_layer % cfg.full_attn_interval == 0 and cfg.is_recurrent(cfg.n_layer - 1):
             raise Unsupported("a hybrid layout without a final attention layer")
+        sections = g("rope.dimension_sections")
+        if isinstance(sections, list) and len(sections) >= 3:
+            cfg.extra["mrope_section"] = [int(x) for x in sections[:3]]     # 3-D positions of image prompts
     cfg.n_expert, cfg.n_expert_used = n_expert, int(g("expert_used_count", 0) or 0)
     if n_expert:
         if not 0 < cfg.n_expert_used <= n_expert:

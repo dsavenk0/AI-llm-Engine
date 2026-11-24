@@ -10,8 +10,55 @@ import shutil
 import time
 
 from . import gguf
-from .compat import CompatEngine, _Decoder
+from .compat import CompatEngine, MlxLmRuntime, _Decoder
 from .generate import DRAFT_LEVELS, GiB, MemoryLimitError
+
+IMAGE_PAD = "<|image_pad|>"
+IMAGE_SLOT = "<|vision_start|>" + IMAGE_PAD + "<|vision_end|>"
+
+
+class GGUFRuntime(MlxLmRuntime):
+    """MlxLmRuntime plus what an image prompt needs on the built-in decoder: embeddings with the image features in
+    place, 3-D rotary positions for the prompt and the shifted text positions after it."""
+
+    accepts_embeds = True
+
+    def __init__(self, model, cache_api, engine):
+        super().__init__(model, cache_api)
+        self.engine = engine
+
+    def prefill(self, cache, ids, embeds, pos3, delta, s, e, hidden=False):
+        import mlx.core as mx
+        if embeds is None:
+            extra = {"delta": delta} if delta else {}       # text after an image sits at shifted positions
+            logits = self.model(mx.array([ids[s:e]]), cache=cache, **extra)
+        else:
+            cos, sin = self.model.mrope.cos_sin(mx.array(pos3[:, s:e]))
+            logits = self.model(cache=cache, embeds=embeds[:, s:e], cos=cos, sin=sin)
+        mx.eval([c.state for c in cache])
+        return logits
+
+    def step(self, token, cache, delta):
+        import mlx.core as mx
+        ids = mx.array([[token]]) if isinstance(token, int) else token.reshape(1, 1)
+        return self.model(ids, cache=cache, **({"delta": delta} if delta else {}))
+
+    def verify(self, token, draft, cache, delta):
+        import mlx.core as mx
+        self._width = 1 + len(draft)
+        return self.model(mx.array([[token] + draft]), cache=cache, **({"delta": delta} if delta else {}))
+
+    def embed_media(self, ids, media):
+        import mlx.core as mx
+        from .runtime import mrope_positions
+        pixels, grids = media
+        eng = self.engine
+        feats = self.model.vision(pixels, grids)
+        emb = self.model.embed_tokens(mx.array([ids]))
+        idx = mx.array([i for i, t in enumerate(ids) if t == eng.image_token])
+        emb[0, idx] = feats.astype(emb.dtype)
+        pos3, delta = mrope_positions(ids, grids, eng.image_token, eng.image_merge)
+        return emb, pos3, delta
 
 
 def _trim(cache, n):
@@ -22,10 +69,21 @@ class GGUFEngine(CompatEngine):
     backend = "gguf-mlx"
     REQUIRES_MLX_LM = False
 
-    def __init__(self, path, steer=None, weight_patch=None, speculative=True, draft_max=15, ngram_min=2, **kw):
+    def __init__(self, path, steer=None, weight_patch=None, speculative=True, draft_max=15, ngram_min=2,
+                 vision=True, max_pixels=1024 * 1024, **kw):
         self.steer = steer              # (direction file or folder, alpha or None), see engine/steering.py
         self.weight_patch = weight_patch  # (candidate.patch folder, alpha or None), see engine/weightpatch.py
+        self.max_pixels = max_pixels
         super().__init__(path, **kw)
+        # images: the projector next to the file, when it is the Qwen3-VL tower this decoder runs (loaded on the
+        # first image, ~0.2 GB, while the language model stays as it is — nothing restarts)
+        from .vision import GGUF_PROJECTORS, gguf_projector_type
+        self.projector = gguf.projector_for(path)
+        self.vision_capable = bool(self.projector and gguf_projector_type(self.projector) in GGUF_PROJECTORS
+                                   and getattr(self.model, "mrope", None) is not None)
+        self.vision_allowed = self.vision_capable and bool(vision)
+        self.image_token = None
+        self.image_pp, self.image_merge = None, 2
         # prompt-lookup speculation: the key/value cache can be trimmed, so rejected drafts are simply forgotten
         # a hybrid model's recurrent state cannot be rewound past a rejected draft: no speculation there
         self.speculative = bool(speculative) and not getattr(self.model, "hybrid", False)
@@ -44,6 +102,54 @@ class GGUFEngine(CompatEngine):
                   "head_dim": int(g("attention.key_length", int(g("embedding_length", 4096)) // heads)),
                   "max_position_embeddings": int(g("context_length", 4096)), "vocab_size": 0}
         return config, {}               # a GGUF carries no generation_config: generic sampling presets
+
+    def _attach_runtime(self):
+        self.rt = GGUFRuntime(self.model, self._cache_api(), self)
+
+    def build_prompt(self, messages, tools=None, thinking=None, effort=None, extra_kwargs=None):
+        """The compat prompt, with each image of a message written as the model's own image slot (in its place
+        among the text) so the template keeps it — the images themselves come back in order for encode()."""
+        if not self.vision_allowed:
+            return super().build_prompt(messages, tools, thinking, effort, extra_kwargs)
+        images, flat = [], []
+        for m in messages:
+            if isinstance(m.get("content"), list):
+                parts = []
+                for it in m["content"]:
+                    if isinstance(it, dict) and it.get("type") == "text":
+                        parts.append(it.get("text", ""))
+                    elif isinstance(it, dict):
+                        images.append(it)
+                        parts.append(IMAGE_SLOT)
+                m = {**m, "content": "".join(parts)}
+            flat.append(m)
+        text, _, opens = super().build_prompt(flat, tools, thinking, effort, extra_kwargs)
+        return text, images, opens
+
+    def encode(self, text, images):
+        if not images:
+            return super().encode(text, images)
+        if not self.vision_allowed:
+            raise ValueError("this model/server has no vision support")
+        self.ensure_awake()
+        if self.model.vision is None:
+            from .vision import load_gguf_projector
+            self._reserve(4096)                       # the tower and an image's activations
+            self.model.vision, self.image_pp, self.image_merge = load_gguf_projector(self.projector, log=self.log)
+            ids = self.tok.encode(IMAGE_PAD, add_special_tokens=False)
+            if len(ids) != 1:
+                raise ValueError(f"the tokenizer has no single {IMAGE_PAD} token")
+            self.image_token = ids[0]
+        import mlx.core as mx
+        from .vision import expand_image_tokens, load_image, preprocess
+        pix, grids = [], []
+        for ref in images:
+            p, g = preprocess(load_image(ref), self.image_pp, self.max_pixels)
+            pix.append(p)
+            grids.append(g)
+        ids = expand_image_tokens(lambda t: self.tok.encode(t, add_special_tokens=False), text, grids,
+                                  self.image_token, self.image_merge, IMAGE_PAD)
+        return ids, (mx.concatenate(pix), grids)
 
     def _cache_api(self):
         make = lambda model: model.make_cache()

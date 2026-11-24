@@ -88,6 +88,21 @@ class TestHeader(unittest.TestCase):
         self.assertEqual(gguf.guess_quant("Qwen3.6-35B-A3B-MXFP4_MOE.gguf"), "MXFP4_MOE")
         self.assertEqual(gguf.guess_quant("BF16/Qwen3.6-35B-A3B-BF16-00002-of-00002.gguf"), "BF16")
 
+    def test_a_hub_gguf_is_labeled_by_who_can_run_it(self):
+        self.assertEqual(gguf.hub_gguf_route("qwen35", (), False), ("native", ""))
+        self.assertEqual(gguf.hub_gguf_route("qwen35", (), True)[0], "native")      # its projector: ours too
+        self.assertEqual(gguf.hub_gguf_route("gemma3", (), True)[0], "gguf")        # another projector: llama.cpp
+        self.assertEqual(gguf.hub_gguf_route("dflash", ("draft-model",), False)[0], "none")
+        self.assertEqual(gguf.hub_gguf_route("muse-spark", (), False)[0], "none")   # only InferSSD knows it
+        self.assertEqual(gguf.hub_gguf_route("brand-new-arch", (), False)[0], "gguf")   # no llama.cpp here to ask
+        self.assertEqual(gguf.hub_gguf_route(None, (), False)[0], "gguf")
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "llama.cpp"))
+        with open(os.path.join(d, "llama.cpp", "libllama.dylib"), "wb") as f:
+            f.write(b"\0llama\0spark2_5\0")
+        self.assertEqual(gguf.hub_gguf_route("spark2_5", (), False, d)[0], "gguf")
+        self.assertEqual(gguf.hub_gguf_route("brand-new-arch", (), False, d)[0], "none")   # the library says no
+
     def test_a_dynamic_quant_is_offered_and_chosen_by_its_own_name(self):
         sib = [{"rfilename": f"m-{q}.gguf", "size": 1} for q in ("UD-IQ1_M", "UD-Q2_K_XL", "UD-Q4_K_M", "MXFP4_MOE")]
         _, chosen, offered = gguf.pick_files(sib)

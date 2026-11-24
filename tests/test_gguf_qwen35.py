@@ -259,5 +259,63 @@ class TestQwen35Dense(_Base):
             self.assertClose(got, want, f"step {i}")
 
 
+def write_projector(path, kind):
+    """A header-only mmproj GGUF that declares its projector type."""
+    meta = {"general.architecture": "clip", "clip.projector_type": kind}
+    head = b"GGUF" + struct.pack("<IQQ", 3, 0, len(meta)) + b"".join(S._kv(k, v) for k, v in meta.items())
+    with open(path, "wb") as f:
+        f.write(head)
+
+
+class TestProjectorRoute(unittest.TestCase):
+    def test_the_qwen3vl_projector_is_ours_another_goes_to_llama_cpp(self):
+        from engine import gguf
+        d = tempfile.mkdtemp()
+        model = os.path.join(d, "m.gguf")
+        open(model, "wb").close()
+        self.assertFalse(gguf.native_vision(model))                      # no projector at all
+        write_projector(os.path.join(d, "mmproj-F16.gguf"), "qwen3vl_merger")
+        self.assertTrue(gguf.native_vision(model))
+        write_projector(os.path.join(d, "mmproj-F16.gguf"), "gemma3")
+        self.assertFalse(gguf.native_vision(model))
+
+
+REAL = os.path.expanduser("~/.cache/huggingface/hub/unsloth/Qwen3.5-0.8B-GGUF")
+
+
+@unittest.skipUnless(mx is not None and os.path.isfile(os.path.join(REAL, "Qwen3.5-0.8B-Q8_0.gguf"))
+                     and os.path.isfile(os.path.join(REAL, "mmproj-F16.gguf")),
+                     "Qwen3.5-0.8B Q8_0 GGUF + mmproj-F16 not downloaded: native GGUF vision was not covered")
+class TestRealVision(unittest.TestCase):
+    """The real file and its projector: the answer llama.cpp's mtmd gives too ("A red square and a blue circle.")."""
+
+    def test_an_image_is_read_without_restarting_and_text_works_after(self):
+        from PIL import Image, ImageDraw
+        from engine.gguf_engine import GGUFEngine
+        d = tempfile.mkdtemp()
+        img = Image.new("RGB", (448, 320), "white")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([40, 60, 180, 200], fill=(220, 20, 20))
+        draw.ellipse([250, 80, 400, 230], fill=(20, 60, 220))
+        img.save(os.path.join(d, "shapes.png"))
+        e = GGUFEngine(os.path.join(REAL, "Qwen3.5-0.8B-Q8_0.gguf"), max_context=4096, max_tokens=60, mem_limit=0.95,
+                       disk_cache_dir=d, log=lambda *a: None)
+        self.assertTrue(e.vision_allowed)
+        q = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": os.path.join(d, "shapes.png")}},
+                                          {"type": "text", "text": "What shapes and colors are in this image? "
+                                                                   "Answer in one sentence."}]}]
+        text, images, _ = e.build_prompt(q, thinking=False)
+        ids, media = e.encode(text, images)
+        *pieces, _ = list(e.generate(ids, media=media, sampling={"temperature": 0}, max_tokens=40))
+        answer = "".join(p for _, p in pieces).lower()
+        self.assertIn("red", answer)
+        self.assertIn("blue", answer)
+        text, images, _ = e.build_prompt([{"role": "user", "content": "Say hello in one word."}], thinking=False)
+        ids, media = e.encode(text, images)
+        *pieces, _ = list(e.generate(ids, media=media, sampling={"temperature": 0}, max_tokens=8))
+        self.assertIn("hello", "".join(p for _, p in pieces).lower())
+        e.sleep()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -163,6 +163,21 @@ class VisionModel(nn.Module):
 
 
 # ───────────────────────────── preprocessing ─────────────────────────────
+def expand_image_tokens(encode, text, grids, image_token, merge, pad="<|image_pad|>"):
+    """Token ids of a prompt whose `pad` placeholders (one per image, in order) become runs of `image_token`, one
+    per merged patch — what both the MLX checkpoint engine and the GGUF engine feed the model."""
+    parts = text.split(pad)
+    if len(parts) - 1 != len(grids):
+        raise ValueError("image placeholders do not match images")
+    ids = []
+    for i, part in enumerate(parts):
+        ids += list(encode(part))
+        if i < len(grids):
+            t, h, w = grids[i]
+            ids += [image_token] * (t * h * w // merge ** 2)
+    return ids
+
+
 def load_image(src):
     from PIL import Image
     if isinstance(src, dict):
@@ -210,3 +225,56 @@ def preprocess(img, pp, max_pixels):
     x = x.reshape(1, tp, c, gh // m, m, p, gw // m, m, p)
     x = x.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8).reshape(gh * gw, c * tp * p * p)
     return mx.array(x, dtype=F16), (1, gh, gw)
+
+
+# ───────────────────────────── the same tower from a llama.cpp projector (mmproj GGUF) ─────────────────────────────
+from .gguf import NATIVE_PROJECTORS as GGUF_PROJECTORS, projector_type as gguf_projector_type  # noqa: E402
+
+
+def load_gguf_projector(path, log=print):
+    """(VisionModel, preprocessor config, merge size) from a llama.cpp `mmproj-*.gguf` of the Qwen3-VL family —
+    the tower this module already runs for MLX checkpoints, with its tensors renamed and laid out for MLX. The
+    two temporal halves of the patch convolution (llama.cpp sums two 2-D convolutions of the frame) become the
+    two time steps of the Conv3d. Loaded when the first image arrives, next to a model that is already running."""
+    import time
+    from . import gguf_tensors as T
+    t0 = time.time()
+    gf = T.GGUFFile(path)
+    m = gf.meta
+    kind = m.get("clip.projector_type")
+    if kind not in GGUF_PROJECTORS:
+        raise ValueError(f"image projector {kind!r} is not supported by the built-in decoder")
+    g = lambda k, d=None: m.get(f"clip.vision.{k}", d)
+    hid = int(g("embedding_length"))
+    pos_rows = gf.tensors["v.position_embd.weight"].shape[0]
+    merge = int(g("spatial_merge_size", 2))
+    c = {"hidden_size": hid, "num_heads": int(g("attention.head_count")), "depth": int(g("block_count")),
+         "intermediate_size": int(g("feed_forward_length")), "patch_size": int(g("patch_size")),
+         "temporal_patch_size": 2, "in_channels": 3, "spatial_merge_size": merge,
+         "out_hidden_size": int(g("projection_dim")), "num_position_embeddings": pos_rows}
+    if any(k.startswith("v.deepstack") or ".deepstack" in k for k in gf.tensors):
+        raise ValueError("deepstack vision features are not supported")
+    t = lambda name: mx.array(T.load_dense(gf, gf.tensors[name])).astype(F16)
+    w = {"patch_embed.proj.weight": mx.stack([t("v.patch_embd.weight").transpose(0, 2, 3, 1),
+                                              t("v.patch_embd.weight.1").transpose(0, 2, 3, 1)], axis=1),
+         "patch_embed.proj.bias": t("v.patch_embd.bias"), "pos_embed.weight": t("v.position_embd.weight"),
+         "merger.norm.weight": t("v.post_ln.weight"), "merger.norm.bias": t("v.post_ln.bias"),
+         "merger.linear_fc1.weight": t("mm.0.weight"), "merger.linear_fc1.bias": t("mm.0.bias"),
+         "merger.linear_fc2.weight": t("mm.2.weight"), "merger.linear_fc2.bias": t("mm.2.bias")}
+    names = {"attn_qkv": "attn.qkv", "attn_out": "attn.proj", "ln1": "norm1", "ln2": "norm2",
+             "ffn_up": "mlp.linear_fc1", "ffn_down": "mlp.linear_fc2"}
+    for i in range(c["depth"]):
+        for src, dst in names.items():
+            for part in ("weight", "bias"):
+                w[f"blocks.{i}.{dst}.{part}"] = t(f"v.blk.{i}.{src}.{part}")
+    vis = VisionModel(c, (), None)
+    vis.load_weights(list(w.items()), strict=True)
+    mx.eval(vis.parameters())
+    vis.eval()
+    pp = {"patch_size": c["patch_size"], "temporal_patch_size": 2, "merge_size": merge,
+          "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+          "image_mean": list(m.get("clip.vision.image_mean") or [0.5] * 3),
+          "image_std": list(m.get("clip.vision.image_std") or [0.5] * 3)}
+    log(f"image projector loaded on demand: {sum(v.nbytes for v in w.values()) / 2**30:.2f} GiB, "
+        f"{time.time() - t0:.1f}s")
+    return vis, pp, merge

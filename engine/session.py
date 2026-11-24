@@ -122,6 +122,11 @@ def is_looping(tail, min_n=6, max_n=400, window=3000):
 class DecodeLoop:
     """`generate()` and what it needs, over `self.rt`."""
 
+    def _drop_prefix_cache(self):
+        """An image prompt starts from an empty cache (its positions are not a token prefix of anything kept)."""
+        self.cache, self.cache_tokens, self.snapshots = None, [], []
+        self.rt.release()
+
     # ───────────────────────── what the engine's tokenizer says ─────────────────────────
     def _detokenizer(self):
         """What turns ids back into text, special tokens kept (the output parser reads the markers)."""

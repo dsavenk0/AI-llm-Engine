@@ -1222,6 +1222,17 @@ private struct MarqueeAvail: PreferenceKey {
 
 /// One line of text. When it does not fit it is faded at the edge, and while `active` (the row is under the
 /// pointer) it glides to its end and back, so the whole name can be read without widening the panel.
+func copyToPasteboard(_ s: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(s, forType: .string)
+}
+
+/// The page of a hub repository: Hugging Face, or ModelScope for an "ms:" id.
+func hubPage(_ id: String) -> URL? {
+    id.hasPrefix("ms:") ? URL(string: "https://modelscope.cn/models/" + id.dropFirst(3))
+                        : URL(string: "https://huggingface.co/" + id)
+}
+
 struct MarqueeText: View {
     let text: String
     let font: Font
@@ -1254,6 +1265,8 @@ struct MarqueeText: View {
                              startPoint: .leading, endPoint: .trailing))
         .onPreferenceChange(MarqueeWidth.self) { natural = $0 }
         .onPreferenceChange(MarqueeAvail.self) { avail = $0 }
+        // a scrolling label cannot be selected with the mouse: right-click copies it whole
+        .contextMenu { Button(L("Copy", "Скопировать")) { copyToPasteboard(text) } }
         .onChange(of: active) { on in
             if on, overflow > 1 {
                 withAnimation(.linear(duration: Double(overflow) / 32 + 0.4).delay(0.2).repeatForever(autoreverses: true)) {
@@ -1277,6 +1290,7 @@ struct HubModel: Identifiable {
     var route = "native"
     var partial = false               // a download was started and not finished: resume, don't start over
     var format = "mlx"                // mlx | gguf — shown as a label on the row
+    var why = ""                      // why no engine here runs it (a draft model, an unknown architecture)
 }
 
 enum JobState { case queued, downloading, paused, failed }
@@ -1634,7 +1648,7 @@ struct ModelsTab: View {
                                     e.setG("model", m.path)
                                     if e.running { e.command(["restart"], label: "restart") }
                                 }) {
-                                    Text(L("Use", "Включить")).font(HUD.mono(10, .semibold)).lineLimit(1)
+                                    Text(L("Select", "Выбрать")).font(HUD.mono(10, .semibold)).lineLimit(1)
                                         .padding(.horizontal, 12).padding(.vertical, 5)
                                 }.buttonStyle(NeonButton(color: HUD.cyan)).fixedSize().disabled(e.busy != nil)
                                     .help(L("Make this the active model (restarts the engine if it runs)", "Сделать активной (движок перезапустится, если работает)"))
@@ -1706,10 +1720,6 @@ struct ModelsTab: View {
                     Button(action: search) { Image(systemName: searching ? "hourglass" : "magnifyingglass").frame(width: 24, height: 20) }
                         .buttonStyle(NeonButton(color: HUD.phosphor)).disabled(searching)
                 }
-                Hint(text: hubSource == "hf"
-                     ? L("MLX repos first, then GGUF (llama.cpp); most downloaded first. Mirrors: set HF_ENDPOINT; private repos: HF_TOKEN.",
-                         "Сначала MLX, затем GGUF (llama.cpp); популярные сверху. Зеркало: HF_ENDPOINT; закрытые модели: HF_TOKEN.")
-                     : L("MLX repos on ModelScope, most downloaded first.", "MLX-репозитории на ModelScope, популярные сверху."))
                 if let err = searchError { Text(err).font(HUD.mono(10)).foregroundColor(HUD.magenta) }
                 ForEach(results) { r in
                     HStack(spacing: 8) {
@@ -1717,7 +1727,7 @@ struct ModelsTab: View {
                             MarqueeText(text: r.id, font: .system(size: 11, weight: .medium), color: HUD.text,
                                         active: hoverRow == r.id)
                             HStack(spacing: 6) {
-                                badge(r.format == "gguf" ? "GGUF" : "MLX", r.format == "gguf" ? HUD.magenta : HUD.cyan)
+                                badge(r.format == "gguf" ? "GGUF" : "MLX", r.format == "gguf" ? HUD.yellow : HUD.cyan)
                                 badge(r.size.map { String(format: "%.1f GB", $0) } ?? "? GB", HUD.dim)
                                 badge("⬇ \(r.downloads >= 1000 ? "\(r.downloads / 1000)K" : "\(r.downloads)")", HUD.dim)
                                 switch r.route {
@@ -1725,7 +1735,7 @@ struct ModelsTab: View {
                                 case "ptq1": badge(L("1.75-bit · experimental", "1.75 бит · эксперим."), HUD.cyan)
                                 case "mlxlm": badge(L("via mlx-lm", "через mlx-lm"), HUD.cyan)
                                 case "gguf": badge("llama.cpp", HUD.phosphor)
-                                default: badge(L("not supported", "не поддерживается"), HUD.dim)
+                                default: badge(L("not supported", "не поддерживается"), HUD.dim).help(r.why)
                                 }
                                 if r.size != nil { badge(r.fits ? L("fits RAM", "влезет") : L("too big", "не влезет"), r.fits ? HUD.cyan : HUD.magenta) }
                                 if r.partial { badge(L("partial", "не докачана"), HUD.amber) }
@@ -1754,6 +1764,15 @@ struct ModelsTab: View {
                     }.padding(.vertical, 2)
                     .contentShape(Rectangle())
                     .onHover { inside in hoverRow = inside ? r.id : (hoverRow == r.id ? nil : hoverRow) }
+                    .contextMenu {
+                        Button(L("Copy name", "Скопировать название")) { copyToPasteboard(r.id) }
+                        if let url = hubPage(r.id) {
+                            Button(r.id.hasPrefix("ms:") ? L("Open on ModelScope", "Открыть на ModelScope")
+                                                         : L("Open on Hugging Face", "Открыть на Hugging Face")) {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
                 }
             }
         }.onAppear { if results.isEmpty { search() }; refreshPartials() }
@@ -1780,7 +1799,7 @@ struct ModelsTab: View {
                 HubModel(id: $0["id"] as? String ?? "?", downloads: $0["downloads"] as? Int ?? 0, size: $0["size"] as? Double,
                          compatible: $0["compatible"] as? Bool ?? false, local: $0["local"] as? Bool ?? false, fits: $0["fits"] as? Bool ?? false,
                          route: $0["route"] as? String ?? "native", partial: $0["partial"] as? Bool ?? false,
-                         format: $0["format"] as? String ?? "mlx")
+                         format: $0["format"] as? String ?? "mlx", why: $0["why"] as? String ?? "")
             }
         }
     }

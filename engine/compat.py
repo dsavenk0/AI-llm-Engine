@@ -416,20 +416,20 @@ class CompatEngine(DecodeLoop):
     def _prefill(self, cache, ids, embeds=None, pos3=None, delta=0, start=0, hidden=False):
         """All but the last token in fixed chunks, each evaluated with the cache it leaves behind; then the
         last token alone, whose logits begin the decode."""
-        if embeds is not None or hidden:
+        if hidden or (embeds is not None and not getattr(self.rt, "accepts_embeds", False)):
             raise ValueError("this model/server has no vision or embedding support")
         n, s, step = len(ids), start, max(64, self.prefill_step)
         try:
             while n - s > 1:
                 self.progress = {"phase": "prefill", "done": s, "total": n}
                 e = min(n - 1, s + step)
-                self.rt.prefill(cache, ids, None, None, 0, s, e)
+                self.rt.prefill(cache, ids, embeds, pos3, delta, s, e)
                 s = e
                 self.cache_tokens = list(ids[:s])
                 self._check_memory("prefill")
         finally:
             self.progress = None
-        return self.rt.prefill(cache, ids, None, None, 0, s, n)
+        return self.rt.prefill(cache, ids, embeds, pos3, delta, s, n)
 
 
 class MlxLmRuntime(MlxHybridRuntime):
