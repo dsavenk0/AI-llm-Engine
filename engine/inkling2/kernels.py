@@ -331,3 +331,145 @@ def relative_attention(
         output_shapes=[(B, L, Hq, D)],
         output_dtypes=[q.dtype],
     )[0]
+
+
+# ───────────────── one-token steps (this project's, not the PR's) ─────────────────
+# A decode step of Inkling 2 Mini runs 48 layer visits; each was a chain of small ops (a short convolution alone
+# is six or seven kernels), so the step was bound by kernel launches, not by reading the weights. These do one
+# kernel each where the plain path took a chain, with the same arithmetic in the same order.
+
+_SHORT_CONV_STEP_SOURCE = """
+    uint c = thread_position_in_grid.x;
+    uint b = thread_position_in_grid.y;
+    if (c >= C) {
+        return;
+    }
+    const size_t st = size_t(b) * (K - 1) * C + c;
+    float acc = 0.0f;
+    for (int k = 0; k < K - 1; ++k) {
+        T s = state[st + size_t(k) * C];
+        acc += float(W(s)) * float(w[c * K + k]);
+        if (k > 0) {
+            new_state[st + size_t(k - 1) * C] = s;
+        }
+    }
+    T xv = x[size_t(b) * C + c];
+    acc += float(W(xv)) * float(w[c * K + K - 1]);
+    new_state[st + size_t(K - 2) * C] = xv;
+    // the convolution's result is in the weight dtype, then the residual in float32 as the plain path
+    y[size_t(b) * C + c] = T((float(W(acc)) + float(xv)) / scale);
+"""
+
+_short_conv_step_kernel = mx.fast.metal_kernel(
+    name="short_conv_step",
+    input_names=["x", "state", "w", "scale"],
+    output_names=["y", "new_state"],
+    source=_SHORT_CONV_STEP_SOURCE,
+)
+
+
+def short_conv_step(x: mx.array, state: mx.array, weight: mx.array, *, scale: float):
+    """One token through a depthwise causal convolution of K taps with its residual: x (B, 1, C), state
+    (B, K-1, C) — the K-1 inputs before it — and weight (C, K, 1) as nn.Conv1d's. Returns ((conv(x) + x) /
+    scale as (B, 1, C), the state after x)."""
+    B, _, C = x.shape
+    K = weight.shape[1]
+    return _short_conv_step_kernel(
+        inputs=[x, state, weight.reshape(C, K), scalar(scale)],
+        template=[("T", x.dtype), ("W", weight.dtype), ("C", C), ("K", K)],
+        grid=(C, B, 1),
+        threadgroup=(min(256, C), 1, 1),
+        output_shapes=[x.shape, state.shape],
+        output_dtypes=[x.dtype, state.dtype],
+    )
+
+
+_DYNAMIC_CONV_STEP_SOURCE = """
+    uint c = thread_position_in_grid.x;
+    uint b = thread_position_in_grid.y;
+    if (c >= C) {
+        return;
+    }
+    const int h = c / (C / H);
+    const size_t st = size_t(b) * (K - 1) * C + c;
+    T xv = x[size_t(b) * C + c];
+    // lag 0 is this token, lag j the j-th before it; each tap is its static weight plus this token's own
+    float out = float(xv) * (float(stat[c]) + dyn[(size_t(b) * H + h) * K]);
+    for (int lag = 1; lag < K; ++lag) {
+        T s = state[st + size_t(K - 1 - lag) * C];
+        out += float(s) * (float(stat[size_t(lag) * C + c]) + dyn[(size_t(b) * H + h) * K + lag]);
+    }
+    for (int k = 1; k < K - 1; ++k) {
+        new_state[st + size_t(k - 1) * C] = state[st + size_t(k) * C];
+    }
+    new_state[st + size_t(K - 2) * C] = xv;
+    y[size_t(b) * C + c] = T((out + float(xv)) / scale);
+"""
+
+_dynamic_conv_step_kernel = mx.fast.metal_kernel(
+    name="dynamic_conv_step",
+    input_names=["x", "state", "stat", "dyn", "scale"],
+    output_names=["y", "new_state"],
+    source=_DYNAMIC_CONV_STEP_SOURCE,
+)
+
+
+def dynamic_conv_step(x, state, static_weight, dynamic, *, heads: int, scale: float):
+    """One token through the full layers' convolution, whose taps are a static (K, C) weight plus K per head
+    made from the token: x (B, 1, C), state (B, K-1, C), dynamic float32 (B, 1, heads * K). Returns
+    ((conv(x) + x) / scale, the state after x)."""
+    B, _, C = x.shape
+    K = static_weight.shape[0]
+    return _dynamic_conv_step_kernel(
+        inputs=[x, state, static_weight, dynamic.astype(mx.float32), scalar(scale)],
+        template=[("T", x.dtype), ("C", C), ("K", K), ("H", heads)],
+        grid=(C, B, 1),
+        threadgroup=(min(256, C), 1, 1),
+        output_shapes=[x.shape, state.shape],
+        output_dtypes=[x.dtype, state.dtype],
+    )
+
+
+_DECODE_MASK_SOURCE = """
+    uint key = thread_position_in_grid.x;
+    uint head = thread_position_in_grid.y;
+    const int S = pos[2];
+    if (int(key) >= S) {
+        return;
+    }
+    const int end = pos[0];
+    const int rot = pos[1];
+    // a rotating cache wrote this step in place at rot - 1: its keys are in ring order from rot
+    const int k = rot >= 0 ? (int(key) - rot + S) % S : int(key);
+    const int kp = end - S + k;
+    const int d = end - 1 - kp;
+    const bool visible = d >= 0 && kp >= 0 && (WINDOW == 0 || d < WINDOW);
+    T m = T(-INFINITY);
+    if (visible) {
+        m = d < R ? T(rel[head * R + d]) : T(0.0f);
+    }
+    new_mask[head * S + key] = m;
+"""
+
+_decode_mask_kernel = mx.fast.metal_kernel(
+    name="decode_bias_mask",
+    input_names=["rel", "pos"],
+    output_names=["new_mask"],
+    source=_DECODE_MASK_SOURCE,
+)
+
+
+def decode_bias_mask(rel: mx.array, num_keys: int, end: int, rotation: int, *, window: int, dtype):
+    """The additive mask of one query over num_keys cached keys: the relative bias (Hq, R) at distances below R,
+    0 beyond, -inf where a key is not visible (in the future, before the cache, or outside the window).
+    `end` is the number of tokens so far (the query is the last); `rotation` the write index of a rotating
+    cache whose keys are not in order, or -1. Returns (1, Hq, 1, num_keys)."""
+    Hq, R = rel.shape
+    return _decode_mask_kernel(
+        inputs=[rel, mx.array([end, rotation, num_keys], dtype=mx.int32)],
+        template=[("T", dtype), ("R", R), ("WINDOW", window)],
+        grid=(num_keys, Hq, 1),
+        threadgroup=(min(256, num_keys), 1, 1),
+        output_shapes=[(1, Hq, 1, num_keys)],
+        output_dtypes=[dtype],
+    )[0]

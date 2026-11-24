@@ -181,6 +181,66 @@ class TestKernels(unittest.TestCase):
                 plain = model(tokens)
             self.assertLess(float(mx.max(mx.abs(fused - plain))), tol, dtype)
 
+    def test_one_token_convolutions_match_the_plain_ops(self):
+        """The decode-step kernels against the chain of ops they replace: the same numbers, bit for bit."""
+        mx.random.seed(4)
+        for dt in (mx.bfloat16, mx.float32):
+            x, st = mx.random.normal((2, 1, 64)).astype(dt), mx.random.normal((2, 3, 64)).astype(dt)
+            sc = layers.ShortConvolution(64, 4)
+            sc.conv1d.weight = mx.random.normal(sc.conv1d.weight.shape).astype(dt)
+            dc = layers.DynamicShortConvolution(64, 32, 4, 4)
+            dc.static_weight = mx.random.normal((4, 64)).astype(dt)
+            dc.weight_proj.weight = dc.weight_proj.weight.astype(dt)
+            h = mx.random.normal((2, 1, 32)).astype(dt)
+            for conv, args in ((sc, (x, st, None)), (dc, (x, h, st, None))):
+                y, state = conv(*args)
+                with unittest.mock.patch.object(layers, "_use_kernels", return_value=False):
+                    y0, window = conv(*args)
+                self.assertLess(float(mx.max(mx.abs(y.astype(mx.float32) - y0.astype(mx.float32)))), 1e-6)
+                self.assertTrue(mx.array_equal(state, layers._conv_state(window, None, 3)))
+
+    def test_decode_mask_matches_the_plain_ops(self):
+        """One query over a growing cache and over a sliding one that wraps around."""
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+        mx.random.seed(5)
+        for window, cache in ((0, KVCache()), (8, RotatingKVCache(max_size=8))):
+            k = mx.random.normal((1, 2, 5, 16))
+            cache.update_and_fetch(k, k)
+            for step in range(15):
+                k = mx.random.normal((1, 2, 1, 16))
+                keys, _ = cache.update_and_fetch(k, k)
+                S, end = keys.shape[2], cache.offset
+                rel = mx.random.normal((4, 8)).astype(mx.bfloat16)
+                rot = cache._idx if isinstance(cache, RotatingKVCache) else -1
+                got = kernels.decode_bias_mask(rel, S, end, rot, window=window, dtype=mx.bfloat16)
+                d = layers._positions(end - 1, 1).reshape(1) - layers._key_positions(cache, S, 1, end).reshape(S)
+                bias = mx.where(d < 8, mx.take(rel, mx.clip(d, 0, 7), axis=-1), 0)
+                visible = (d >= 0) & (end - 1 - d >= 0) & ((d < window) if window else True)
+                want = mx.where(visible, bias, -mx.inf).astype(mx.bfloat16)[None, :, None, :]
+                self.assertTrue(mx.array_equal(got, want), (window, step))
+
+    def test_compiled_step_is_the_same_step(self):
+        """One-token steps run each layer's compiled pieces; in bfloat16 they give what the uncompiled path does."""
+        model = create_model(config=LOOP_CONFIG)
+        model.update(tree_unflatten([(k, v.astype(mx.bfloat16)) for k, v in tree_flatten(model.parameters())]))
+        tokens = mx.random.randint(0, UNPADDED_VOCAB, (1, 24))
+        taken = []
+        step = layers.DecoderLayer._step
+
+        def run():
+            cache = model.make_cache()
+            out = [model(tokens[:, :5], cache=cache)]
+            out += [model(tokens[:, i:i + 1], cache=cache) for i in range(5, 24)]
+            return mx.concatenate(out, axis=1)
+
+        with unittest.mock.patch.object(layers.DecoderLayer, "_step",
+                                        lambda self, key: taken.append(key) or step(self, key)):
+            compiled = run()
+        with unittest.mock.patch.object(layers.DecoderLayer, "_step", lambda self, key: None):
+            plain = run()
+        self.assertEqual(len(taken), 19 * len(model.make_cache()))
+        self.assertTrue(mx.array_equal(compiled, plain))
+
     def test_nvfp4_experts_with_their_own_scales(self):
         mx.random.seed(3)
         lin = switch.SwitchLinear(64, 32, 4)
