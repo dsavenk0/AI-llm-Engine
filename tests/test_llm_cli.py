@@ -742,6 +742,18 @@ class TestHub(State):
             ok, out = quiet(llm.hf_pull, "org/native-4bit", True)
         self.assertTrue(ok, out)
 
+    def test_a_second_pull_of_the_same_repo_refuses_instead_of_sharing_the_part_file(self):
+        import fcntl
+        dest = llm._pull_dest("org/native-4bit")
+        os.makedirs(dest, exist_ok=True)
+        with open(os.path.join(dest, ".llm-pull.lock"), "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)                                   # another process is pulling it
+            ok, out = quiet(llm.hf_pull, "org/native-4bit")
+        self.assertFalse(ok)
+        self.assertIn("another process", out)
+        ok, _ = quiet(llm.hf_pull, "org/native-4bit")                          # once it is gone, it pulls
+        self.assertTrue(ok)
+
     def test_a_same_size_file_with_other_content_is_fetched_again(self):
         # a shard replaced in place by a revision of the same size, or a damaged file: size alone proves nothing
         ok, _ = quiet(llm.hf_pull, "org/native-4bit")

@@ -480,5 +480,14 @@
   "Skill: {name}": "Скил: {name}",
   "Save skill {name}?": "Сохранить скил {name}?",
   "Delete skill {name} ({path})?": "Удалить скил {name} ({path})?",
-  "Saving a skill from the conversation needs the agent: ./llm agent or the code editor.": "Сохранить скил из разговора может агент: ./llm agent или редактор кода."
+  "Saving a skill from the conversation needs the agent: ./llm agent or the code editor.": "Сохранить скил из разговора может агент: ./llm agent или редактор кода.",
+  "Already being downloaded by another process: {repo}": "Уже скачивается другим процессом: {repo}",
+  "chat": "чат",
+  "ask": "спрашивать",
+  "automatic": "автоматически",
+  "failed": "ошибка",
+  "starting": "запускается",
+  "done": "готово",
+  "project": "проект",
+  "personal": "личный"
 }

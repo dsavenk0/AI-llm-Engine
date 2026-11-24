@@ -3315,6 +3315,16 @@ def hf_pull(repo, progress=False, revision=None):
     if total > free - 2 * 2**30:
         print(R(T("Not enough disk space: need {need:.1f} GB, free {free:.1f} GB").format(need=total / 2**30, free=free / 2**30)))
         return False
+    # one pull per repository at a time: two processes appending to the same .part file (the app and a terminal,
+    # or two clicks) corrupt it and look like a stuck download. The lock goes with the process, even a killed one.
+    import fcntl
+    lock = open(os.path.join(dest, ".llm-pull.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        print(R(T("Already being downloaded by another process: {repo}").format(repo=repo)), flush=True)
+        return False
     print(T("Downloading {repo} ({size:.1f} GB) → {dest}").format(repo=repo, size=total / 2**30, dest=dest), flush=True)
     with open(os.path.join(dest, PULL_MARKER), "w") as fm:
         json.dump({"repo": repo, "bytes": total}, fm)
