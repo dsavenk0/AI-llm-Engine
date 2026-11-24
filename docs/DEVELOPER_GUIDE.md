@@ -404,7 +404,10 @@ separate "agent mode". The command line uses Claude Code's names where Claude Co
 `--name`, `-p` / `--print` (piped stdin is added) with `--output-format text|json` and `--max-turns N`,
 `--no-session-persistence`, `-m` / `--model`, `--append-system-prompt`, `-v` / `--version`; plus `--project <dir>`
 (`-C`) and `--auto`. Inside: `/help`, `/new` (`/clear`), `/chats` (`/resume`), `/fork`, `/status`, `/model`,
-`/compact`, `/diff`, `/exit`, and `@path` adds a file's text to the message.
+`/compact`, `/diff`, `/exit`, and `@path` adds a file's text to the message. A file or folder dragged into the
+window arrives as its escaped path (Terminal, iTerm and the editor's terminal type it so); a line that starts with
+such paths is a drop (`agent.dropped`): files and pictures go with the text typed after them, or with the next
+message, and a folder opens as the project after a yes.
 
 - **Many chats, saved as they go.** Each chat is a JSON-lines file in
   `~/Library/Application Support/LLMBar/sessions/`; every message is written the moment it exists, so Ctrl+C, a

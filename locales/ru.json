@@ -599,5 +599,11 @@
   "a running agent: stop · message · its window · log · report": "работающий агент: стоп · сообщение · его окно · журнал · отчёт",
   "create one (the model writes it, you approve) · its definition · delete": "создать (пишет модель, вы подтверждаете) · описание · удалить",
   "/agents <name> <task> — in its own window · /agents stop|say|show|log|result N · /agents new <name> <what it does> · /agents show|rm <name>": "/agents <имя> <задача> — в своём окне · /agents stop|say|show|log|result N · /agents new <имя> <что делает> · /agents show|rm <имя>",
-  "The project of this chat is not there now: {p}": "Проекта этого чата сейчас нет на месте: {p}"
+  "The project of this chat is not there now: {p}": "Проекта этого чата сейчас нет на месте: {p}",
+  "a file or picture goes with the message; a folder opens as the project": "файл или картинка уходят с сообщением; папка открывается как проект",
+  "drag a file or folder in": "перетащите файл или папку",
+  "Open {p} as the project?": "Открыть {p} как проект?",
+  "A folder opens as the project on its own: drag it in by itself.": "Папка открывается как проект только одна: перетащите её отдельно.",
+  "Not attached: {n} is not a text file under 250 KB.": "Не прикреплено: {n} — не текстовый файл до 250 КБ.",
+  "Attached to your next message: {names}": "Прикреплено к следующему сообщению: {names}"
 }

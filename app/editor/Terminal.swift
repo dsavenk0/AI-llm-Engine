@@ -178,6 +178,29 @@ final class TerminalTextView: NSTextView {
         onInput?(bracketedPaste ? "\u{1B}[200~" + text + "\u{1B}[201~" : text)
     }
     override func insertText(_ string: Any, replacementRange: NSRange) {}      // typing goes through keyDown only
+
+    // A file or folder dragged in is typed as its path, as Terminal.app does: backslash-escaped, separated by
+    // spaces, with one after. The terminal chat (`llm`) reads a line that starts with such paths as a drop: files
+    // and pictures go with the message, a folder opens as the project.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { fileURLs(sender).isEmpty ? [] : .copy }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { fileURLs(sender).isEmpty ? [] : .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = fileURLs(sender)
+        guard !urls.isEmpty else { return false }
+        onInput?(urls.map { Self.escaped($0.path) }.joined(separator: " ") + " ")
+        window?.makeFirstResponder(self)
+        return true
+    }
+
+    private func fileURLs(_ info: NSDraggingInfo) -> [URL] {
+        (info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+    }
+
+    /// A path as a shell reads it: every character that is not a letter, a digit or one of `/._-+,:@%=~` behind a backslash.
+    static func escaped(_ path: String) -> String {
+        let plain = Set("/._-+,:@%=~")
+        return path.map { $0.isLetter || $0.isNumber || plain.contains($0) ? String($0) : "\\" + String($0) }.joined()
+    }
 }
 
 struct TerminalView: NSViewRepresentable {
@@ -195,6 +218,7 @@ struct TerminalView: NSViewRepresentable {
         tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
         tv.onInput = { [weak session] s in session?.send(s) }
+        tv.registerForDraggedTypes([.fileURL])
         scroll.documentView = tv
         scroll.drawsBackground = false
         context.coordinator.tv = tv

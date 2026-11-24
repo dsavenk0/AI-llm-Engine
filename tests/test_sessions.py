@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -393,6 +394,55 @@ class TestChatExtras(ChatCase):
         self.assertIn("heron", content)
         self.run_chat(["mail me @someone"], ["ok"])                   # not a file: left as typed
         self.assertEqual(self.sent[-1]["messages"][-1]["content"], "mail me @someone")
+
+    def _drop_tree(self):
+        """A folder and files with the names a drag-and-drop has to escape: spaces, a quote, Cyrillic."""
+        folder = os.path.join(self.here, "My Project")
+        os.makedirs(folder)
+        text = os.path.join(self.here, "кот's notes.txt")
+        with open(text, "w") as f:
+            f.write("the cat is called Ash\n")
+        picture = os.path.join(self.here, "shot 1.png")
+        with open(picture, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+        binary = os.path.join(self.here, "data.bin")
+        with open(binary, "wb") as f:
+            f.write(b"\xff\xfe\x00\x81" * 10)
+        esc = lambda p: re.sub(r"([^\w/.\-+,:@%=~])", r"\\\1", p)       # as Terminal.app and the editor type it
+        return folder, text, picture, binary, esc
+
+    def test_dragged_paths_are_read_as_a_terminal_types_them(self):
+        folder, text, picture, _, esc = self._drop_tree()
+        self.assertEqual(agent.dropped(esc(folder) + " "), ([folder], ""))
+        self.assertEqual(agent.dropped(f'"{text}" {esc(picture)} what are these?'),
+                         ([text, picture], "what are these?"))
+        self.assertEqual(agent.dropped(f"'{folder}'"), ([folder], ""))
+        for line in ("what is /tmp for?", "notes.txt please", "/nowhere/at/all x", "/help", "it's fine"):
+            self.assertEqual(agent.dropped(line), ([], line), line)
+
+    def test_a_dragged_folder_opens_as_the_project_when_the_user_says_yes(self):
+        folder, *_, esc = self._drop_tree()
+        self.run_chat([esc(folder) + " "], answers=[False])
+        self.assertIsNone(self.agent.root)
+        self.assertEqual(self.sent, [])                                 # nothing went to the model
+        self.run_chat([esc(folder) + " ", "hi"], ["hello"], answers=[True])
+        self.assertEqual(self.agent.root, folder)
+        self.assertEqual(sessions.latest().project, folder)
+
+    def test_dragged_files_go_with_the_text_or_with_the_next_message(self):
+        _, text, picture, binary, esc = self._drop_tree()
+        self.run_chat([f"{esc(text)} what is the cat called?"], ["Ash"])
+        content = self.sent[-1]["messages"][-1]["content"]
+        self.assertTrue(content.startswith("what is the cat called?"))
+        self.assertIn(f'<file path="{text}">', content)
+        self.assertIn("Ash", content)
+
+        out = self.run_chat([f"{esc(picture)} {esc(binary)} ", "and this?"], ["a screenshot"])
+        self.assertEqual(len(self.sent), 2)                             # the drop alone sent nothing
+        self.assertIn(llm.T("Not attached: {n} is not a text file under 250 KB.").format(n="data.bin"), out)
+        content = self.sent[-1]["messages"][-1]["content"]
+        self.assertEqual(content[0], {"type": "image_url", "image_url": {"url": picture}})
+        self.assertEqual(content[-1], {"type": "text", "text": "and this?"})
 
     def test_fork_and_status_inside_a_chat(self):
         out = self.run_chat(["topic", "/fork", "/status", "more"], ["a", "b"])

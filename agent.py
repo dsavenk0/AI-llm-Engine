@@ -136,6 +136,7 @@ HELP = [
     ("/status · /model [name]", "model, chat, project, context · switch the model"),
     ("/diff", "what changed in the project (git)"),
     ("@path", "add a file's text to the message"),
+    ("drag a file or folder in", "a file or picture goes with the message; a folder opens as the project"),
     ("/image <path> [question]", "ask about a picture"),
     ("/draw <prompt> · /speak <text>", "make an image · read text aloud"),
     ("/auto", "approve edits and commands without asking (dangerous ones still ask)"),
@@ -173,6 +174,40 @@ def run_agent_tool(root):
             "agent": {"type": "string"}, "task": {"type": "string"}}, "required": ["agent", "task"]}}}
 
 
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tif", ".tiff")
+ATTACH_MAX = 256_000
+# one path as a terminal types it on a drag-and-drop: quoted, or with its spaces and quotes backslash-escaped
+_DROP_TOKEN = re.compile(r"""\s*('[^']*'|"[^"]*"|(?:\\.|[^\s\\'"])+)""")
+
+
+def dropped(line):
+    """(paths, the text after them) for a line that starts with paths dragged into the terminal — absolute (or
+    ~), existing, escaped or quoted as Terminal and iTerm type them; ([], line) for any other line."""
+    paths, pos = [], 0
+    while True:
+        m = _DROP_TOKEN.match(line, pos)
+        if not m:
+            break
+        tok = m.group(1)
+        path = tok[1:-1] if tok[0] in "'\"" else re.sub(r"\\(.)", r"\1", tok)
+        if not path.startswith(("/", "~")) or not os.path.exists(os.path.expanduser(path)):
+            break
+        paths.append(os.path.realpath(os.path.expanduser(path)))
+        pos = m.end()
+    return (paths, line[pos:].strip()) if paths else ([], line)
+
+
+def read_text(path):
+    """A text file's contents to attach, or None (not a file, too large, not UTF-8 text)."""
+    if not os.path.isfile(path) or os.path.getsize(path) > ATTACH_MAX:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 class Agent:
     def __init__(self, cfg, root=None, chat=None):
         self.cfg = cfg
@@ -191,6 +226,7 @@ class Agent:
         self.priority = "normal"     # the engine's queue (engine/scheduler.py): background agents wait for the chat
         self.runs = []               # sub-agents started from this chat (Run), numbered from 1
         self.reports = []            # reports of background agents, for the next message to carry
+        self.pending = []            # dragged-in files waiting for the next message: (path, text or None: a picture)
         self._lock = threading.Lock()  # reports and the watcher are shared with the watcher thread
         self.notices = []            # what they said while the chat was busy, shown at the next prompt
         self.busy = False
@@ -911,6 +947,7 @@ class Agent:
         self.chat = sessions.new(self.root)
         self.messages = self.messages[:1]
         self.prompt_tokens = 0
+        self.pending = []
 
     def show_last(self, n=2):
         """The end of an opened chat, so it is clear where it stopped."""
@@ -1147,19 +1184,55 @@ class Agent:
         base = self.root or self.here
         found = []
         for ref in dict.fromkeys(r.rstrip(",.;:?!)'\"") for r in re.findall(r"(?<!\S)@([^\s@]+)", text)):
-            path = os.path.realpath(os.path.join(base, os.path.expanduser(ref)))
-            if not os.path.isfile(path) or os.path.getsize(path) > 256_000:
-                continue
-            try:
-                with open(path, encoding="utf-8") as f:
-                    body = f.read()
-            except (OSError, UnicodeDecodeError):
-                continue
-            found.append((ref, body))
+            body = read_text(os.path.realpath(os.path.join(base, os.path.expanduser(ref))))
+            if body is not None:
+                found.append((ref, body))
         if not found:
             return text
         self.say(DIM(T("Attached:") + " " + ", ".join(r for r, _ in found)))
         return text + "".join(f"\n\n<file path=\"{r}\">\n{b}\n</file>" for r, b in found)
+
+    def drop(self, line):
+        """A line that starts with paths dragged into the terminal. A folder opens as the project (asked first);
+        files and pictures go with the text typed after them, or with the next message when nothing was typed.
+        Returns the text to send, or None."""
+        paths, rest = dropped(line)
+        folders = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if not os.path.isdir(p)]
+        if len(folders) == 1 and not files:
+            if self.ask(T("Open {p} as the project?").format(p=folders[0]), True):
+                self.set_project(folders[0])
+                self.say(G(T("Project attached: {p}").format(p=self.root)))
+            return rest or None
+        if folders:
+            self.say(Y(T("A folder opens as the project on its own: drag it in by itself.")))
+        for path in files:
+            if path.lower().endswith(IMAGE_EXT):
+                self.pending.append((path, None))
+                continue
+            body = read_text(path)
+            if body is None:
+                self.say(Y(T("Not attached: {n} is not a text file under 250 KB.").format(n=os.path.basename(path))))
+            else:
+                self.pending.append((path, body))
+        if not rest:
+            if self.pending:
+                names = ", ".join(os.path.basename(p) for p, _ in self.pending)
+                self.say(DIM(T("Attached to your next message: {names}").format(names=names)))
+            return None
+        return rest
+
+    def take_pending(self, text):
+        """The message with the dragged-in files: texts appended as with @path, pictures before it."""
+        if not self.pending:
+            return text
+        pending, self.pending = self.pending, []
+        self.say(DIM(T("Attached:") + " " + ", ".join(os.path.basename(p) for p, _ in pending)))
+        text += "".join(f"\n\n<file path=\"{p}\">\n{b}\n</file>" for p, b in pending if b is not None)
+        images = [p for p, b in pending if b is None]
+        if not images:
+            return text
+        return [{"type": "image_url", "image_url": {"url": p}} for p in images] + [{"type": "text", "text": text}]
 
     def status(self):
         h = llm.health(self.cfg) or {}
@@ -1175,7 +1248,7 @@ class Agent:
 
     def run_turn(self, text, fresh=True):
         if fresh and isinstance(text, str):
-            text = self.take_reports(self.attach_files(text))
+            text = self.take_pending(self.take_reports(self.attach_files(text)))
         self.busy = True
         try:
             self.turn(text)
@@ -1215,6 +1288,11 @@ class Agent:
                 continue
             last_ctrl_c = 0.0                       # "twice" means twice in a row
             if not line:
+                continue
+            if dropped(line)[0]:                    # a file or folder dragged into the window
+                line = self.drop(line)
+                if line:
+                    self.run_turn(line)
                 continue
             word = line.split()[0]
             if line in ("/exit", "/q", "/quit"):
