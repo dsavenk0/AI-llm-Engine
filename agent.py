@@ -25,6 +25,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -66,6 +67,84 @@ def dangerous_reason(command):
         if re.search(pattern, command):
             return why
     return None
+
+
+# Commands that only read: they run without asking, as reading a file with read_file does. A pipe between them is
+# fine; a redirection, a chain (; && ||), a background job or a substitution makes any command ask again, and so do
+# the options with which these programs write a file or run another program.
+READ_ONLY = {"ls", "cat", "head", "tail", "wc", "pwd", "tree", "stat", "du", "which", "grep", "egrep",
+             "fgrep", "rg", "find", "sort", "cut", "nl", "basename", "dirname", "realpath", "echo"}
+GIT_READ = {"status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog"}
+WRITING_OPTIONS = {
+    "find": ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"),
+    "rg": ("--pre",),
+    "sort": ("-o", "--output"),
+    "tree": ("-o",),
+    "git": ("--output", "--ext-diff", "-c"),
+}
+SUBCOMMAND_TOOLS = {"git", "npm", "pnpm", "yarn", "bun", "npx", "cargo", "go", "uv", "pip", "pip3", "poetry",
+                    "docker", "swift", "brew", "make", "gh"}
+
+
+def _words(command):
+    """The command's words and shell operators (quotes respected), or None when it cannot be read."""
+    if "`" in command or "$(" in command or "<(" in command or "\n" in command:
+        return None
+    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def read_only(command):
+    """True for a command that only reads (see READ_ONLY): it runs without asking."""
+    words = _words(command)
+    if not words:
+        return False
+    parts, cur = [], []
+    for w in words:
+        if w == "|":
+            parts.append(cur)
+            cur = []
+        elif w and all(c in "();<>|&" for c in w):
+            return False                         # redirection, chain, background job, subshell
+        else:
+            cur.append(w)
+    parts.append(cur)
+    for part in parts:
+        if not part or "=" in part[0]:
+            return False                         # empty, or a variable set for the command
+        prog = os.path.basename(part[0])
+        for opt in WRITING_OPTIONS.get(prog, ()):
+            if any(w == opt or w.startswith(opt + "=") or (prog == "sort" and re.fullmatch(r"-[a-zA-Z]*o\S*", w))
+                   for w in part[1:]):
+                return False
+        if prog == "git":
+            sub = next((w for w in part[1:] if not w.startswith("-")), None)
+            if sub not in GIT_READ:
+                return False
+        elif prog not in READ_ONLY:
+            return False
+    return True
+
+
+def command_kind(command):
+    """What "a" (yes until the chat ends) covers: the program, with its subcommand for the tools that take one
+    (`npm test`, `git add`, `python -m pytest`, `python build.py`); a chained or piped command, only itself."""
+    words = _words(command)
+    if not words or any(w and all(c in "();<>|&" for c in w) for w in words) or "=" in words[0]:
+        return command.strip()
+    prog = os.path.basename(words[0])
+    rest = [w for w in words[1:] if not w.startswith("-")]
+    if prog in ("python", "python3") and words[1:2] == ["-m"] and len(words) > 2:
+        return f"{prog} -m {words[2]}"
+    if prog in ("python", "python3", "node", "bash", "sh", "zsh") and rest:
+        return f"{prog} {rest[0]}"
+    if prog in SUBCOMMAND_TOOLS and rest:
+        return f"{prog} {rest[0]}"
+    return prog
 
 TOOLS = [
     {"type": "function", "function": {
@@ -220,6 +299,8 @@ class Agent:
             self.chat.set_project(self.root)    # (a chat whose folder is gone keeps it: it may be a disk not mounted)
         self.url = f"http://127.0.0.1:{cfg['port']}/v1/chat/completions"
         self.auto = False
+        self.always = {}             # kinds of action said yes to until the chat ends ("a"): kind -> its label
+        self.hinted = False          # the first question of a chat names "a" and /auto
         self.batch = False           # `llm -p`: nobody to ask — what needs a yes is refused
         self.save = True             # False: `--no-session-persistence`, nothing is written
         self.max_steps = MAX_STEPS   # model replies per turn before asking (`--max-turns` in -p)
@@ -413,13 +494,32 @@ class Agent:
     def rel(self, full):
         return os.path.relpath(full, self.root)
 
-    def confirm(self, what, force=False):
+    def confirm(self, what, force=False, kind=None, label=None):
+        """Ask for a yes. `kind` (with its `label`): an action that "a" may allow until the chat ends — a file
+        edit, a command of one program. `force`: always ask, even under /auto (dangerous, outward-facing)."""
         if self.auto and not force:
+            return True
+        if kind is not None and not force and kind in self.always:
             return True
         if self.batch:
             self.say(Y(what) + " " + T("(refused: nobody to ask — run with --auto, or in a chat)"), file=sys.stderr)
             return False
-        return self.ask((R if force else Y)(what), not force)
+        if kind is None or force:
+            return self.ask((R if force else Y)(what), not force)
+        hint = T("a — yes to {what} until the chat ends").format(what=label)
+        if not self.hinted:
+            hint += " · " + T("/auto — yes to all edits and commands (dangerous ones still ask)")
+            self.hinted = True
+        answer = self.ask(Y(what) + " " + DIM(f"({hint})"), True)
+        if answer == "always":
+            self.always[kind] = label
+            self.say(DIM(T("Allowed until the chat ends: {what}").format(what=label)))
+        return bool(answer)
+
+    def forget_approvals(self):
+        """A new or another chat starts asking again."""
+        self.always = {}
+        self.hinted = False
 
     # ── the chat's own tools: a project on request, images, speech ──
     def t_attach_project(self, path=None):
@@ -609,7 +709,7 @@ class Agent:
         full = self.path(path)
         old = open(full, errors="replace").read() if os.path.exists(full) else ""
         self.show_diff(path, old, content)
-        if not self.confirm(T("Write {path}?").format(path=path)):
+        if not self.confirm(T("Write {path}?").format(path=path), kind="edit", label=T("file edits")):
             return "user declined the write"
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w") as f:
@@ -652,7 +752,7 @@ class Agent:
             return f"error: the snippet occurs {n} times in {path}; give a unique exact snippet"
         updated = text.replace(old, new, 1)
         self.show_diff(path, text, updated)
-        if not self.confirm(T("Apply this edit to {path}?").format(path=path)):
+        if not self.confirm(T("Apply this edit to {path}?").format(path=path), kind="edit", label=T("file edits")):
             return "user declined the edit"
         with open(full, "w") as f:
             f.write(updated)
@@ -663,8 +763,11 @@ class Agent:
         why = dangerous_reason(command)
         if why:
             ok = self.confirm(T("⚠ This {why} — run it anyway?").format(why=why), force=True)
+        elif read_only(command):
+            ok = True                                    # it only reads, as read_file does
         else:
-            ok = self.confirm(T("Run this command?"))
+            kind = command_kind(command)
+            ok = self.confirm(T("Run this command?"), kind=("run", kind), label=f"`{kind}`")
         if not ok:
             return "user declined to run the command"
         from harness import shell
@@ -805,7 +908,8 @@ class Agent:
         if not command:
             self.say(Y(T("No test command found — give one: /fix-tests <command>, or put it in .llm/test_cmd")))
             return False
-        if not self.confirm(T("Run tests with: {cmd}?").format(cmd=command)):
+        if not self.confirm(T("Run tests with: {cmd}?").format(cmd=command), kind=("run", command),
+                            label=f"`{command}`"):
             return False
         last, same = None, 0
         for n in range(1, max_rounds + 1):
@@ -899,7 +1003,8 @@ class Agent:
         where = (T("project {p}").format(p=self.root) if self.root
                  else T("no project — /project attaches {p}").format(p=self.here))
         title = f" · {self.chat.title}" if self.chat.title else ""
-        self.say(B(T("Chat")) + DIM(f"{title} · {where} · /help"))
+        approvals = T("edits and commands: automatic") if self.auto else T("edits and commands: ask · /auto")
+        self.say(B(T("Chat")) + DIM(f"{title} · {where} · {approvals} · /help"))
 
     def prompt_tag(self):
         bits = [os.path.basename(self.root) if self.root else T("chat")]
@@ -941,6 +1046,7 @@ class Agent:
             self.root = root
         self.messages = [{"role": "system", "content": self.system_prompt()}] + [dict(m) for m in chat.messages]
         self.prompt_tokens = 0
+        self.forget_approvals()
 
     def new_chat(self):
         self.persist()
@@ -948,6 +1054,7 @@ class Agent:
         self.messages = self.messages[:1]
         self.prompt_tokens = 0
         self.pending = []
+        self.forget_approvals()
 
     def show_last(self, n=2):
         """The end of an opened chat, so it is clear where it stopped."""
@@ -1240,7 +1347,9 @@ class Agent:
         rows = [(T("Model"), (m or {}).get("name") or "—"),
                 (T("Chat"), f"{self.chat.title or '…'} · {self.chat.id}" + ("" if self.save else " · " + T("not saved"))),
                 (T("Project"), self.root or "—"),
-                (T("Approvals"), T("automatic") if self.auto else T("ask")),
+                (T("Approvals"), T("automatic") + " · /auto" if self.auto else
+                 T("ask") + "".join(" · " + T("yes to {what}").format(what=w) for w in self.always.values())
+                 + " · /auto"),
                 (T("Context"), f"{self.prompt_tokens} / {self.context or h.get('context') or '?'}"),
                 (T("Messages"), str(len(self.messages) - 1))]
         width = max(len(k) for k, _ in rows)

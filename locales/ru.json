@@ -605,5 +605,12 @@
   "Open {p} as the project?": "Открыть {p} как проект?",
   "A folder opens as the project on its own: drag it in by itself.": "Папка открывается как проект только одна: перетащите её отдельно.",
   "Not attached: {n} is not a text file under 250 KB.": "Не прикреплено: {n} — не текстовый файл до 250 КБ.",
-  "Attached to your next message: {names}": "Прикреплено к следующему сообщению: {names}"
+  "Attached to your next message: {names}": "Прикреплено к следующему сообщению: {names}",
+  "a — yes to {what} until the chat ends": "a — да для {what} до конца чата",
+  "/auto — yes to all edits and commands (dangerous ones still ask)": "/auto — да для всех правок и команд (опасные всё равно спрашивают)",
+  "Allowed until the chat ends: {what}": "Разрешено до конца чата: {what}",
+  "file edits": "правок файлов",
+  "yes to {what}": "да для {what}",
+  "edits and commands: automatic": "правки и команды: автоматически",
+  "edits and commands: ask · /auto": "правки и команды: спрашивать · /auto"
 }

@@ -2,6 +2,15 @@
 
 All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
+## Unreleased
+
+### Changed
+- **The terminal chat asks less.** Commands that only read — `ls`, `cat`, `grep`, `find`, `git status`, `git diff`,
+  `git log` and the like, also piped into each other — run without asking. When it does ask, answer `a` to say yes
+  to that kind until the chat ends: file edits, or one program's commands such as `npm test` or `git add`.
+  Dangerous commands (`git push`, `rm -rf`, `sudo`) still ask every time. The first question and the chat's opening
+  line point to `/auto`, which approves all edits and commands; `/status` shows what is allowed.
+
 ## 1.5.0 — 25 November
 
 ### Added

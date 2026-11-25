@@ -147,6 +147,58 @@ class TestWritingAndRunning(unittest.TestCase):
         with mock.patch.object(llm, "ask_yn", side_effect=AssertionError("must not ask")):
             self.assertIn("exit code 0", quiet(a.t_run, "echo ok"))
 
+    def test_commands_that_only_read_run_without_asking(self):
+        for cmd in ("ls -la src", "cat a.txt | grep -n x | wc -l", "find . -name '*.py'", "git status",
+                    "git log --oneline -5", "grep -rn 'a|b' .", "rg TODO src", "tree -L 2", "sort names.txt",
+                    "head -n 5 'my file.txt'"):
+            self.assertTrue(agent.read_only(cmd), cmd)
+        for cmd in ("ls > out.txt", "cat a; rm a", "ls && touch x", "echo $(rm x)", "echo `id`", "ls &",
+                    "find . -delete", "find . -exec rm {} ;", "sort -o out.txt in.txt", "sort -uo out in",
+                    "rg --pre ./x TODO", "git diff --output=x", "git -c core.pager=sh log", "git add .",
+                    "git commit -m x", "tree -o out", "FOO=1 ls", "python x.py", "cat a | sh", "ls\nrm x",
+                    "cat <<EOF", "npm test", "'unclosed"):
+            self.assertFalse(agent.read_only(cmd), cmd)
+        a = make_agent({"a.txt": "alpha\n"}, auto=False)
+        with mock.patch.object(llm, "ask_yn", side_effect=AssertionError("must not ask")):
+            self.assertIn("alpha", quiet(a.t_run, "cat a.txt | grep al"))
+
+    def test_what_a_yes_until_the_chat_ends_covers(self):
+        for cmd, kind in (("npm test", "npm test"), ("npm test -- --watch", "npm test"), ("git add -A", "git add"),
+                          ("python -m pytest -q", "python -m pytest"), ("python build.py --fast", "python build.py"),
+                          ("pytest tests/x.py", "pytest"), ("make", "make"), ("touch a && touch b", "touch a && touch b")):
+            self.assertEqual(agent.command_kind(cmd), kind, cmd)
+
+    def test_a_yes_until_the_chat_ends_stops_asking_for_that_kind_only(self):
+        a = make_agent({"f.py": "a\n"}, auto=False)
+        asked = []
+
+        def answer(q, d=True):
+            asked.append(q)
+            return "always" if len(asked) == 1 else False
+
+        with mock.patch.object(llm, "ask_yn", answer):
+            out = quiet(a.t_run, "touch one.txt")                   # "a": touch is allowed from now on
+            self.assertIn("exit code 0", out)
+            self.assertIn("/auto", asked[0])                        # the first question names "a" and /auto
+            self.assertIn("exit code 0", quiet(a.t_run, "touch two.txt"))
+            self.assertEqual(len(asked), 1)
+            self.assertEqual(quiet(a.t_run, "mkdir d"), "user declined to run the command")   # another program
+            self.assertNotIn("/auto", asked[1])                     # the hint is said once
+            self.assertEqual(quiet(a.t_edit_file, "f.py", "a", "b"), "user declined the edit")  # edits: their own
+            self.assertEqual(quiet(a.t_run, "git push origin main"), "user declined to run the command")
+        self.assertEqual(len(asked), 4)                             # dangerous ones still ask
+        a.forget_approvals()                                        # a new chat asks again
+        with mock.patch.object(llm, "ask_yn", lambda q, d=True: False):
+            self.assertEqual(quiet(a.t_run, "touch three.txt"), "user declined to run the command")
+
+    def test_the_answer_a_means_always(self):
+        with mock.patch("builtins.input", lambda p="": "a"):
+            self.assertEqual(llm.ask_yn("go?"), "always")
+        with mock.patch("builtins.input", lambda p="": "в"):
+            self.assertEqual(llm.ask_yn("go?"), "always")
+        with mock.patch("builtins.input", lambda p="": "n"):
+            self.assertFalse(llm.ask_yn("go?"))
+
     def test_call_tool_errors_and_truncation(self):
         a = make_agent({"big.txt": "x" * 30000})
         self.assertIn("unknown tool", a.call_tool("fly", {}))

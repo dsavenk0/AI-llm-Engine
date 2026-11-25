@@ -3831,7 +3831,10 @@ def settings(cfg):
 
 # ─────────────────────────── menu ───────────────────────────
 def ask_yn(q, default=True):
+    """True / False — or "always" (truthy) for "a": the chat's questions that offer it say so in `q`."""
     a = input(f"{q} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    if a in ("a", "always", "в", "всегда"):
+        return "always"
     return default if not a else a in ("y", "yes", "д", "да")
 
 

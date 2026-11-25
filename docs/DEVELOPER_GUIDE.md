@@ -554,8 +554,11 @@ does>` has the model write one (you approve the file), `/agents show|rm <name>`.
 With a project attached (`/project`, `./llm --project <folder>` or `./llm agent [folder]`) the chat is a coding
 agent that needs only this engine, with no VS Code and no Kilo. It can list,
 read and search files, write files, make exact edits and run shell commands, all scoped to the folder. Writes, edits
-and commands show a diff or the command line and ask first; `/auto` approves them for the session. It speaks the
-user's language.
+and commands show a diff or the command line and ask first. A command that only reads (`ls`, `cat`, `grep`, `rg`,
+`find` without `-exec`/`-delete`, `git status|diff|log|show`, piped into each other; `agent.read_only`) runs without
+asking. Answering `a` says yes to that kind until the chat ends — file edits, or one program's commands
+(`npm test`, `git add`: `agent.command_kind`); `/auto` (or `--auto`) approves all edits and commands. Dangerous
+commands (`DANGEROUS_PATTERNS`: `git push`, `rm -rf`, `sudo`...) ask every time. It speaks the user's language.
 
 Optional extras, each off until you ask (nothing is contacted or added to the prompt by default):
 
