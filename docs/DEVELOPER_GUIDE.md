@@ -772,6 +772,11 @@ speculative greedy identical to plain greedy, the RAM guard refusing instead of 
 surviving a restart with identical output, sleep and wake, `max_tokens` clamping, and the think-budget guard forcing
 an answer instead of an endless `<think>`.
 
+The suite runs on a simulated quiet machine: `LLM_TEST_FREE_RAM=0.6` (set by `tests/__init__.py` and by
+`tests/test__quiet_machine.py`, which `discover` loads first) makes the RAM guard see 60% free and no memory
+pressure, in the test process and in the servers it starts, so a busy Mac does not fail or stall tests. Tests of the
+guard itself mock its numbers; `test_engine`'s readings test checks the real ones.
+
 ### Performance and accuracy suites
 
 ```sh

@@ -17,8 +17,22 @@ def _sysctl_int(name):
     return val.value
 
 
+def simulated_free():
+    """LLM_TEST_FREE_RAM=<fraction>: the test suite's stand-in for this Mac's memory — that fraction free and no
+    pressure — so the RAM guard behaves the same on a busy Mac as on an idle one (tests/__init__.py sets it; it is
+    inherited by the servers tests start). None when unset: the real readings. Not a setting for normal use."""
+    value = os.environ.get("LLM_TEST_FREE_RAM")
+    try:
+        return min(1.0, max(0.0, float(value))) if value else None
+    except ValueError:
+        return None
+
+
 def available_bytes():
     """Free + inactive + speculative + purgeable pages: what can be handed out without swapping."""
+    simulated = simulated_free()
+    if simulated is not None:
+        return int(TOTAL * simulated)
     free = _sysctl_int("vm.page_free_count") or 0
     spec = _sysctl_int("vm.page_speculative_count") or 0
     purg = _sysctl_int("vm.page_purgeable_count") or 0
@@ -34,6 +48,8 @@ def used_fraction():
 
 def pressure_level():
     """1 = normal, 2 = warning, 4 = critical (kern.memorystatus_vm_pressure_level)."""
+    if simulated_free() is not None:
+        return 1
     return _sysctl_int("kern.memorystatus_vm_pressure_level") or 1
 
 

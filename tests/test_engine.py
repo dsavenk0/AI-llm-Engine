@@ -284,12 +284,16 @@ class TestSSMRollback(unittest.TestCase):
 
 class TestMemoryWatchdog(unittest.TestCase):
     def test_readings_are_sane(self):
+        """The real readings (the rest of the suite sees a simulated quiet machine: LLM_TEST_FREE_RAM)."""
+        from unittest import mock
         from engine import memory
-        used = memory.used_fraction()
-        self.assertTrue(0.0 < used < 1.0)
-        self.assertGreater(memory.TOTAL, 1 << 30)
-        self.assertIn(memory.pressure_level(), (1, 2, 4))
-        self.assertGreater(memory.headroom_bytes(0.99), memory.headroom_bytes(0.5))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LLM_TEST_FREE_RAM", None)
+            used = memory.used_fraction()
+            self.assertTrue(0.0 < used < 1.0)
+            self.assertGreater(memory.TOTAL, 1 << 30)
+            self.assertIn(memory.pressure_level(), (1, 2, 4))
+            self.assertGreater(memory.headroom_bytes(0.99), memory.headroom_bytes(0.5))
 
     def _fake_engine(self, mem_limit=0.88):
         from types import SimpleNamespace
