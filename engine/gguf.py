@@ -168,7 +168,8 @@ def has_array(path, key):
 # ggml tensor types the own decoder reads (engine/gguf_tensors.py): F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0
 # Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_NL IQ4_XS and the codebook i-quants IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S
 NATIVE_TYPES = {0, 1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 30,
-                16, 17, 18, 19, 21, 22, 29}          # + IQ2_XXS IQ2_XS IQ3_XXS IQ1_S IQ3_S IQ2_S IQ1_M
+                16, 17, 18, 19, 21, 22, 29,          # + IQ2_XXS IQ2_XS IQ3_XXS IQ1_S IQ3_S IQ2_S IQ1_M
+                42, 142, 143}                        # + the ternary Q2_0 (ggml) and PQ2_0 / PTQ1_0 (Prism)
 NATIVE_ARCHS = ("llama", "qwen2", "qwen3", "gemma2", "gemma3", "granite", "granitemoe", "qwen3moe", "minicpm",
                 "qwen35", "qwen35moe")
 # pre-tokenizer rules verified against llama.cpp (engine/gguf_tokenizer.py keeps the expressions)
@@ -245,6 +246,11 @@ def native_support(path):
         bad = tensor_types(path) - NATIVE_TYPES
         if bad:
             return False, f"quantization type(s) {sorted(bad)}"
+        from . import rotation
+        try:                                           # a rotation it cannot reproduce exactly is refused
+            rotation.from_gguf(meta, lambda key: read_array(path, key))
+        except rotation.Unsupported as e:
+            return False, f"Hadamard rotation: {e}"
     except (OSError, GGUFError, struct.error, KeyError) as e:
         return False, str(e)
     return True, ""
@@ -254,13 +260,14 @@ GGML_TYPE_COUNT = 43    # upstream ggml types are [0, 43); anything at or above 
 
 
 def vendor_types(path):
-    """ggml tensor types outside upstream's range — a vendor extension (Prism's ternary PTQ1_0 is type 143).
-    Neither this engine's own decoder nor stock llama.cpp can read them: llama.cpp refuses with
-    "invalid ggml type N, should be in [0, 43)". Empty set when the file uses only standard types."""
+    """ggml tensor types outside upstream's range — a vendor extension (Prism's ternary PQ2_0 = 142, PTQ1_0 = 143).
+    Stock llama.cpp refuses them ("invalid ggml type N, should be in [0, 43)"); the engine's own decoder reads
+    those in NATIVE_TYPES, so such a file runs only where `native_support` says yes. Empty set when the file
+    uses only standard types."""
     return {t for t in tensor_types(path) if t >= GGML_TYPE_COUNT}
 
 
-_QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z]+|Q\d_K(?:_[A-Z]+)?|Q\d_\d|MXFP4(?:_MOE)?|BF16|F16|F32)(?:_XL|_L)?)"
+_QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z]+|Q\d_K(?:_[A-Z]+)?|P?T?Q\d_\d|MXFP4(?:_MOE)?|BF16|F16|F32)(?:_XL|_L)?)"
                        r"(?=[-_.]|$)", re.I)
 
 
@@ -535,7 +542,12 @@ def install(data_dir, log=print, opener=urllib.request.urlopen):
 
 # ───────────────────────────── choosing files of a hub repo ─────────────────────────────
 QUANT_PREFERENCE = ("Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q4_0", "Q6_K", "Q8_0", "IQ4_XS", "IQ4_NL", "Q4_1",
-                    "Q5_0", "Q5_1", "Q3_K_M", "Q3_K_L", "Q3_K_S", "IQ3_M", "IQ3_S", "Q2_K", "BF16", "F16")
+                    "Q5_0", "Q5_1", "Q3_K_M", "Q3_K_L", "Q3_K_S", "IQ3_M", "IQ3_S", "Q2_K",
+                    # ternary (Prism Bonsai): all load exactly as MLX 2-bit; PQ2_0 is the leanest in memory there
+                    # (group 128, read with no decoding), PTQ1_0 the smallest download, Q2_0 groups of 64
+                    "PQ2_0", "PTQ1_0", "Q2_0", "BF16", "F16")
+# a variant of a quantization that also carries a draft head (multi-token prediction): the plain file is preferred
+_DRAFT_RE = re.compile(r"[-_.](mtp|nextn|draft)$", re.I)
 _PART_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", re.I)
 
 
@@ -547,6 +559,12 @@ def split_repo_quant(repo):
         r, q = body.rsplit(":", 1)
         return prefix + r, q or None
     return repo, None
+
+
+def _base_name(name):
+    base = os.path.basename(name)
+    m = _PART_RE.match(base)
+    return m.group(1) if m else base[:-5]
 
 
 def pick_files(siblings, quant=None):
@@ -577,7 +595,8 @@ def pick_files(siblings, quant=None):
             raise GGUFError(f"quantization {quant!r} is not in this repo (on offer: {', '.join(offered)})")
     else:
         chosen = offered[0]
-    group = next(g for g in models.values() if g["quant"] == chosen)
+    group = min((g for k, g in models.items() if g["quant"] == chosen), key=lambda g: bool(_DRAFT_RE.search(
+        _base_name(g["files"][0]["rfilename"]))))
     files = sorted(group["files"], key=lambda f: f["rfilename"])
     proj = None
     for pref in ("F16", "BF16", "F32"):

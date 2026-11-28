@@ -139,6 +139,23 @@ On a 16 GB Apple M5, the native engine reaches about **115 tok/s on a compact mo
 on 4B**, while protecting memory for the rest of the system. Full methodology and reproducible tests live in the
 technical documentation rather than on this product page.
 
+## Supported models
+
+LLMBar picks the engine for each model by itself and says before the download whether a model will run on this
+Mac; `./llm models` shows the choice for every installed model.
+
+| Models | Formats | Runs on |
+|---|---|---|
+| Qwen3.5 / Qwen3.6 and their ternary Bonsai versions — Bonsai 2 27B (Prism, JANG), **Ternary Bonsai 2.5 27B** | any MLX quantization, Hadamard-rotated Prism / JANG packs | the built-in engine, with images |
+| 1.75-bit ternary packs *(experimental)* | PTQ1_0, TQ1_G128, JANG packed ternary | the built-in Metal kernels |
+| Inkling 2 Mini | MLX | the built-in engine, experts read from the SSD |
+| Llama, Qwen2 / 3 / 3.5 / 3.6, Gemma 2 / 3, Granite, MiniCPM, Mixtral and other MoE | GGUF `Q2_K`–`Q8_0`, `IQ1`–`IQ4`, F16; ternary `Q2_0`, `PQ2_0`, `PTQ1_0` | the built-in decoder — no llama.cpp; Qwen3.5 / 3.6 with images |
+| Other MLX models — GLM, Llama, Gemma, MoE… | MLX | mlx-lm, installed on demand |
+| GGUF of other architectures | any | llama.cpp, installed on demand |
+
+The full table, with what each engine supports, is in the
+[developer guide](docs/DEVELOPER_GUIDE.md#supported-models).
+
 ## Get started
 
 1. Download and move **LLMBar.app** to Applications.

@@ -19,6 +19,7 @@ Everything the architectures differ in is data in `Config`, so adding a family i
 verification against llama.cpp — not a new model class.
 """
 import os
+import re
 import time
 import hashlib
 import struct
@@ -232,6 +233,10 @@ class Config:
     ssm_dk: int = 0                      # key (= value) head size of the linear attention
     ssm_nk: int = 0                      # key heads
     ssm_nv: int = 0                      # value heads (a multiple of the key heads)
+    # the linear-attention output projection reads value heads grouped by key head (Prism `gdn_v_grouped`: its
+    # rotated columns could not be moved to ggml's tiled order), so the heads are regrouped before it
+    gdn_v_grouped: bool = False
+    rotated: bool = False                # Hadamard-rotated weights (engine/rotation.py)
     extra: dict = field(default_factory=dict)
 
     def is_local(self, i):
@@ -249,15 +254,49 @@ HYBRID = ("qwen35", "qwen35moe")
 SUPPORTED = tuple(ROPE_TRADITIONAL)
 
 
-class QLinear:
-    """y = x @ W.T for a weight kept in MLX's affine-quantized form (or dense)."""
+class Rotation:
+    """The activation side of a Hadamard-rotated checkpoint (engine/rotation.py): a matrix stored as W·D·H
+    multiplies H·(D·x) — `fwd`, blockwise normalized Walsh-Hadamard after the signs of x's width — and a rotated
+    embedding row comes back with `inv`. Computed in float32 like the reference runtimes, returned in x's type.
 
-    def __init__(self, w, scales=None, biases=None, bits=0, bias=None):
+    Projections that share an input (q/k/v, qkv/z, gate/up) are called one after another with the very same
+    array, so the last transform is kept and reused: each distinct input is rotated once."""
+
+    def __init__(self, block, signs):
+        self.block, self.scale = block, block ** -0.5
+        self.signs = {int(w): mx.array(v, dtype=mx.float32) for w, v in signs.items()}
+        self._memo = None                                  # (input, rotated) — one tuple, swapped atomically
+
+    def fwd(self, x):
+        memo = self._memo
+        if memo is not None and memo[0] is x:
+            return memo[1]
+        shape = x.shape
+        y = x.astype(mx.float32) * self.signs[shape[-1]]
+        y = mx.hadamard_transform(y.reshape(-1, self.block), scale=self.scale).reshape(shape).astype(x.dtype)
+        self._memo = (x, y)
+        return y
+
+    def inv(self, x):
+        shape = x.shape
+        y = mx.hadamard_transform(x.astype(mx.float32).reshape(-1, self.block), scale=self.scale).reshape(shape)
+        return (y * self.signs[shape[-1]]).astype(x.dtype)
+
+
+class QLinear:
+    """y = x @ W.T for a weight kept in MLX's affine-quantized form (or dense). `rot`: the weight is stored
+    rotated, so its input is rotated first."""
+
+    def __init__(self, w, scales=None, biases=None, bits=0, bias=None, gs=32, rot=None):
         self.w, self.scales, self.biases, self.bits, self.bias = w, scales, biases, bits, bias
+        self.gs, self.rot = gs, rot
 
     def __call__(self, x):
+        if self.rot is not None:
+            x = self.rot.fwd(x)
         if self.bits:
-            y = mx.quantized_matmul(x, self.w, self.scales, self.biases, transpose=True, group_size=32, bits=self.bits)
+            y = mx.quantized_matmul(x, self.w, self.scales, self.biases, transpose=True, group_size=self.gs,
+                                    bits=self.bits)
         else:
             y = x @ self.w.T
         return y + self.bias if self.bias is not None else y
@@ -269,16 +308,21 @@ class QLinear:
 
 
 class Embedding:
-    def __init__(self, w, scales=None, biases=None, bits=0):
-        self.w, self.scales, self.biases, self.bits = w, scales, biases, bits
+    """`rot`: the rows are stored rotated (W·D·H, like every rotated matrix) and come back with the inverse."""
+
+    def __init__(self, w, scales=None, biases=None, bits=0, gs=32, rot=None):
+        self.w, self.scales, self.biases, self.bits, self.gs, self.rot = w, scales, biases, bits, gs, rot
 
     def __call__(self, ids):
         if self.bits:
-            return mx.dequantize(self.w[ids], self.scales[ids], self.biases[ids], group_size=32, bits=self.bits)
-        return self.w[ids]
+            x = mx.dequantize(self.w[ids], self.scales[ids], self.biases[ids], group_size=self.gs, bits=self.bits)
+        else:
+            x = self.w[ids]
+        return self.rot.inv(x) if self.rot is not None else x
 
     def as_linear(self):
-        return QLinear(self.w, self.scales, self.biases, self.bits)
+        # a tied head over rotated rows: (W·D·H)·(H·D·x) = W·x, i.e. the head rotates its input
+        return QLinear(self.w, self.scales, self.biases, self.bits, gs=self.gs, rot=self.rot)
 
 
 class Experts:
@@ -710,6 +754,8 @@ class DenseModel:
         cache.offset += S
         zz = z.reshape(B, S, nv, dk).astype(F32)
         o = _rms(out.astype(F32), layer.ssm_norm, c.eps) * (zz * mx.sigmoid(zz))
+        if c.gdn_v_grouped and nv != nk:   # tiled [r][k] → grouped by key head [k][r], the order ssm_out reads
+            o = o.reshape(B, S, nv // nk, nk, dk).transpose(0, 1, 3, 2, 4)
         return layer.ssm_out(o.reshape(B, S, -1).astype(self.act))
 
     def _ffn(self, layer, h, R):
@@ -903,7 +949,7 @@ def _linear(gf, info, T, bias_info=None):
     if name in ("F32", "F16", "BF16"):
         return QLinear(mx.array(T.load_dense(gf, info)).astype(mx.float16), bias=bias)
     w, s, b, bits = T.load_matrix(gf, info)
-    return QLinear(mx.array(w), mx.array(s), mx.array(b), bits, bias)
+    return QLinear(mx.array(w), mx.array(s), mx.array(b), bits, bias, gs=T.group_size(info))
 
 
 def _experts(gf, info, T, stream=False, cache_size=64, packed_cache_dir="", packed_cache_bytes=0):
@@ -916,6 +962,8 @@ def _experts(gf, info, T, stream=False, cache_size=64, packed_cache_dir="", pack
     name = info.type_name
     if name in ("F32", "F16", "BF16"):
         return Experts(mx.array(T.load_dense(gf, info)).astype(mx.float16))
+    if T.group_size(info) != T.GROUP:      # the expert kernels and the packed cache are laid out for groups of 32
+        raise Unsupported(f"{info.name}: {name} experts")
     # the loader works row by row: the stack is E*rows rows of `cols` (the bytes are contiguous in that order)
     flat = T.TensorInfo(info.name, (cols, n_exp * rows), info.type, info.offset)
     if stream:
@@ -989,12 +1037,16 @@ def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_
         stream_experts = os.environ.get("LLM_GGUF_STREAM_EXPERTS", "1") != "0"
     if expert_cache is None:
         expert_cache = int(os.environ.get("LLM_GGUF_EXPERT_CACHE", "64"))
-    from . import gguf_tensors as T
+    from . import gguf as G, gguf_tensors as T, rotation
     gf = T.GGUFFile(path)
     m = gf.meta
     arch = m.get("general.architecture")
     if arch not in SUPPORTED:
         raise Unsupported(f"architecture {arch!r}")
+    try:
+        contract = rotation.from_gguf(m, lambda key: G.read_array(path, key))
+    except rotation.Unsupported as e:
+        raise Unsupported(str(e))
     g = lambda key, default=None: m.get(f"{arch}.{key}", default)
     n_head = int(g("attention.head_count"))
     n_embd = int(g("embedding_length"))
@@ -1093,7 +1145,7 @@ def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_
         tensors["token_embd.weight"] = Embedding(mx.array(T.load_dense(gf, emb)).astype(mx.float16))
     else:
         w, s, b, bits = T.load_matrix(gf, emb)
-        tensors["token_embd.weight"] = Embedding(mx.array(w), mx.array(s), mx.array(b), bits)
+        tensors["token_embd.weight"] = Embedding(mx.array(w), mx.array(s), mx.array(b), bits, gs=T.group_size(emb))
     tensors["output_norm.weight"] = mx.array(T.load_dense(gf, names["output_norm.weight"]))
     if "output.weight" in names:
         tensors["output.weight"] = _linear(gf, names["output.weight"], T)
@@ -1134,5 +1186,37 @@ def build(path, log=print, stream_experts=None, expert_cache=None, packed_cache_
         if (i + 1) % 8 == 0:
             mx.eval([a for v in tensors.values() for a in (v if isinstance(v, list) else [v])
                      if isinstance(a, mx.array)])
+    if contract is not None:
+        _rotate(contract, cfg, tensors, names)
     model = DenseModel(cfg, tensors)
     return model, cfg, gf
+
+
+def _rotate(contract, cfg, tensors, names):
+    """Attach the declared Hadamard rotations: each listed weight rotates its input, the embedding its rows back.
+    Only what the file lists is rotated — whatever set of matrices that is — and a listed weight this decoder
+    cannot rotate is an error: running it unrotated would give fluent nonsense."""
+    rot = Rotation(contract.block, contract.signs)
+    for name in sorted(contract.folded | contract.inverse):
+        info = names.get(name)
+        if info is None:
+            raise Unsupported(f"the Hadamard contract lists {name}, which the file does not have")
+        t = tensors.get(name)
+        if t is None:
+            m = re.match(r"blk\.(\d+)\.", name)
+            if m and int(m.group(1)) >= cfg.n_layer:      # a draft (MTP) layer the decoder does not load
+                continue
+            raise Unsupported(f"{name} is rotated, but this decoder does not use it as a matrix")
+        width = info.shape[-1]
+        if width not in rot.signs or width % contract.block:
+            raise Unsupported(f"{name}: no {width}-wide Hadamard signs")
+        if name in contract.inverse:
+            if not isinstance(t, Embedding):
+                raise Unsupported(f"inverse rotation on {name}")
+            t.rot = rot
+        elif isinstance(t, QLinear):
+            t.rot = rot
+        else:
+            raise Unsupported(f"{name} is rotated, but is not a plain matrix here")
+    cfg.rotated = True                                    # (a tied head, embed.as_linear(), carries the rotation)
+    cfg.gdn_v_grouped = bool(contract.gdn_v_grouped)

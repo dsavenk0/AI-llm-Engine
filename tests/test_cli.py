@@ -631,6 +631,35 @@ class TestBundleCompatibilityReporting(unittest.TestCase):
                          "text_config": {"model_type": "qwen3_5"}})
         self.assertFalse(llm.inspect_model(d)["supported"])
 
+    def schema2(self, drop=None):
+        """A Prism schema-2 pack (prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit) whose hadamard.json lists exactly the
+        weights the native engine rotates — or one fewer."""
+        from engine import rotation
+        tc = {"model_type": "qwen3_5_text", "num_hidden_layers": 4, "full_attention_interval": 4}
+        d = self.bundle({"model_type": "prism_hadamard_qwen35", "schema_version": 2, "base_model_type": "qwen3_5",
+                         "requires_runtime": "runtime/artifact.py", "hadamard_config": "hadamard.json",
+                         "gdn_activation_layout": "grouped", "text_config": tc})
+        folded, inverse = rotation.native_set(tc)
+        folded = sorted(folded - {drop})
+        with open(os.path.join(d, "hadamard.json"), "w") as f:
+            json.dump({"prism.hadamard.version": 1, "prism.hadamard.block_size": 1024,
+                       "prism.hadamard.transform": "normalized-sylvester-walsh-hadamard",
+                       "prism.hadamard.axis": "input-last-dimension", "prism.hadamard.sign_mode": "explicit",
+                       "prism.hadamard.weight_names": folded, "prism.hadamard.inverse_weight_names": sorted(inverse),
+                       "prism.hadamard.gdn_v_grouped": True}, f)
+        return d
+
+    def test_a_schema2_pack_whose_contract_the_engine_applies_is_supported(self):
+        info = llm.inspect_model(self.schema2())
+        self.assertTrue(info["supported"], info["problems"])
+        self.assertEqual(info["route"], "native")
+        self.assertTrue(info["hadamard"])
+
+    def test_a_schema2_pack_that_rotates_other_weights_is_unsupported_with_the_weight_named(self):
+        info = llm.inspect_model(self.schema2(drop="language_model.model.layers.3.self_attn.o_proj.weight"))
+        self.assertFalse(info["supported"])
+        self.assertIn("o_proj", " ".join(info["problems"]))
+
     def test_an_ordinary_bundle_stays_supported(self):
         d = self.bundle({"model_type": "qwen3_5", "text_config": {"model_type": "qwen3_5"}})
         self.assertTrue(llm.inspect_model(d)["supported"])

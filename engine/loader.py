@@ -15,7 +15,7 @@ import time
 import mlx.core as mx
 import mlx.nn as nn
 
-from . import family
+from . import family, rotation
 from .model import Hadamard, Model
 
 SHIFTED_NORMS = (".input_layernorm.weight", ".post_attention_layernorm.weight",
@@ -167,10 +167,18 @@ def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None,
     from mlx.utils import tree_flatten
     expected_shapes = {k: v.shape for k, v in tree_flatten(model.parameters())}
 
-    had_cfg = config.get("hadamard") or jang.get("hadamard")
+    contract = rotation.bundle(path, config, jang)       # raises rotation.Unsupported (a ValueError)
+    mismatch = rotation.native_mismatch(contract, tc)
+    if mismatch:
+        raise ValueError(f"unsupported Hadamard layout: {mismatch}")
+    had_cfg = {"block_size": contract.block} if contract else None
     layout = jang.get("layout", {})
     shift = layout.get("language_norms") == "zero-centered-runtime-plus-one" or config.get("jang_norms_pre_shifted") is False
     shift_decided = bool(layout.get("language_norms")) or "jang_norms_pre_shifted" in config
+    if contract is not None and contract.folded is not None and not is_ptq1:
+        # a pack that lists its rotated weights (Prism schema 2) is exported from a GGUF and loaded by its vendor
+        # into stock mlx-lm modules as is: its norms are in final form (means ~1, the final norm ~1.9)
+        shift, shift_decided = False, True
     if is_ptq1:
         # GGUF-derived: norm weights are already in final form (means 0.8-1.9 in the real file), and
         # the Hadamard block size is listed per module in config["modules"]. A TQ1_G128 bundle is a
@@ -288,6 +296,9 @@ def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None,
             raise ValueError(f"Hadamard bundle is missing sign vectors for widths {sorted(need - set(signs))}")
         if not all(mx.all(mx.abs(s) == 1).item() for s in signs.values()):
             raise ValueError("Hadamard sign vectors are not all +-1")
+        for w, declared in ((contract.signs if contract else None) or {}).items():   # the declaration and the tensors must agree
+            if w in signs and not mx.array_equal(signs[w], mx.array(declared, dtype=mx.float32)).item():
+                raise ValueError(f"the {w}-wide Hadamard signs in {contract.source} differ from the bundle's tensors")
         model.set_hadamard(Hadamard(block, signs))
     elif signs:
         raise ValueError("bundle ships .signs tensors but declares no Hadamard contract")
@@ -317,10 +328,19 @@ def load(path, vision=True, log=print, ptq1=False, steer=None, layer_range=None,
     return model, config, nbytes
 
 
+def _vision_files(path):
+    """The safetensors files holding the vision tower: from the index, or — a single-file checkpoint has none
+    (prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit) — from the files' headers, which costs no tensor read."""
+    index = _json(os.path.join(path, "model.safetensors.index.json")).get("weight_map") or {}
+    if index:
+        return sorted({f for k, f in index.items() if k.startswith("vision_tower.")})
+    return [os.path.basename(f) for f in sorted(glob.glob(os.path.join(path, "*.safetensors")))
+            if any(k.startswith("vision_tower.") for k in read_shapes([f]))]
+
+
 def has_vision(path):
     config = _json(os.path.join(path, "config.json"))
-    index = _json(os.path.join(path, "model.safetensors.index.json")).get("weight_map") or {}
-    return bool(config.get("vision_config")) and any(k.startswith("vision_tower.") for k in index)
+    return bool(config.get("vision_config")) and bool(_vision_files(path))
 
 
 def attach_vision(model, path, log=print):
@@ -329,12 +349,10 @@ def attach_vision(model, path, log=print):
     t0 = time.time()
     config = model.config
     qcfg = config.get("quantization") or config.get("quantization_config") or {}
-    index = _json(os.path.join(path, "model.safetensors.index.json")).get("weight_map") or {}
-    keys = {k for k in index if k.startswith("vision_tower.")}
     shapes = read_shapes(sorted(glob.glob(os.path.join(path, "*.safetensors"))))
     vis = VisionModel(config["vision_config"], shapes, qcfg)
     weights = {}
-    for f in sorted({index[k] for k in keys}):
+    for f in _vision_files(path):
         shard = mx.load(os.path.join(path, f))
         for k in [k for k in shard if k.startswith("vision_tower.")]:
             v = shard[k]

@@ -161,7 +161,10 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
     `language_model.` key prefix and model_type ternel_hadamard_qwen35.
     fmt="jang" writes JANG's packed ternary storage: the same payload bytes as uint8 `.weight`
     [rows, groups*26] with fp16 `.scales` [rows, groups], under an ordinary qwen3_5 config plus a
-    jang_config.json that declares requires_jang_ternary_packed_expansion."""
+    jang_config.json that declares requires_jang_ternary_packed_expansion.
+    fmt="prism2" writes a Prism MLX pack, schema 2 (prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit): the same trits as
+    MLX affine 2-bit (group 128, bias = -scale) under `language_model.` keys, and the Hadamard contract in
+    hadamard.json — every rotated weight by name and the signs — instead of the config."""
     from engine.ptq1 import dequantize_ref
     os.makedirs(path, exist_ok=True)
     vocab = build_tokenizer(path)
@@ -169,7 +172,7 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
         f.write(template)
     rng = np.random.default_rng(seed)
     qs_legal, qh_legal = _legal_bytes(5), _legal_bytes(4)
-    t, modules = {}, []
+    t, modules, rotated, inverse = {}, [], [], []
     signs_by_width = {w: rng.choice([-1.0, 1.0], size=w).astype(np.float32) for w in (HIDDEN, INTER, NH * HD)}
 
     def ptq(name, out, inp, embedding=False):
@@ -185,9 +188,18 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
         d = (rng.random((out, nb)) * 0.04 + 0.005).astype(np.float16)
         w[:, :, 26:28] = d.view(np.uint8).reshape(out, nb, 2)
         rows_blocks = w.reshape(out, nb * 28)
-        key = f"language_model.{name}" if fmt == "tq1" else name
+        key = f"language_model.{name}" if fmt in ("tq1", "prism2") else name
+        (inverse if embedding else rotated).append(f"language_model.{name}.weight")
         if twin:
-            t[f"{name}.weight"] = mx.array(dequantize_ref(rows_blocks, "ptq1" if fmt == "ptq1" else "tq1")).astype(mx.float16)
+            scheme = "tq1" if fmt in ("tq1", "jang") else "ptq1"
+            t[f"{name}.weight"] = mx.array(dequantize_ref(rows_blocks, scheme)).astype(mx.float16)
+        elif fmt == "prism2":
+            from engine.gguf_tensors import ternary_blocks
+            words, scale, bias = ternary_blocks("PTQ1_0", w.reshape(out * nb, 28))
+            t[f"{key}.weight"] = mx.array(np.ascontiguousarray(words.reshape(out, inp // 16)))
+            t[f"{key}.scales"] = mx.array(scale.reshape(out, nb))
+            t[f"{key}.biases"] = mx.array(bias.reshape(out, nb))
+            modules.append({"path": name, "block": block, "embedding": embedding, "dtype": "float16"})
         elif fmt == "jang":
             t[f"{name}.weight"] = mx.array(np.ascontiguousarray(w[:, :, :26].reshape(out, nb * 26)))
             t[f"{name}.scales"] = mx.array(d)
@@ -203,7 +215,7 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
         else:
             t[f"{name}.weight"] = mx.array(rows_blocks)
             modules.append({"path": name, "block": block, "embedding": embedding, "dtype": "float16"})
-        t[f"{key}.signs" if (fmt == "tq1" and not twin) else f"{name}.signs"] = mx.array(signs_by_width[inp])
+        t[f"{key}.signs" if (fmt in ("tq1", "prism2") and not twin) else f"{name}.signs"] = mx.array(signs_by_width[inp])
 
     def vec(name, n, value=1.0):
         t[name] = mx.full((n,), value, dtype=mx.float32)
@@ -260,6 +272,22 @@ def make_ptq1_bundle(path, seed=0, twin=False, block=128, template=CHATML, fmt="
             json.dump({"format": "jang", "profile": "JANG_AFFINE_TERNARY_PACKED",
                        "layout": {"language_norms": "final-form"},
                        "runtime": {"requires_jang_ternary_packed_expansion": True}}, f)
+    elif fmt == "prism2":
+        cfg = {"schema_version": 2, "model_type": "prism_hadamard_qwen35", "base_model_type": "qwen3_5",
+               "text_config": text_config, "eos_token_id": [1, 2], "modules": modules,
+               "quantization": {"bits": 2, "group_size": 128, "mode": "affine"},
+               "requires_runtime": "runtime/artifact.py", "hadamard_config": "hadamard.json",
+               "tensor_namespace": "mlx-vlm-qwen3_5", "gdn_activation_layout": "grouped",
+               "components": {"text": True, "vision": False, "mtp": False}}
+        widths = sorted(signs_by_width)
+        with open(os.path.join(path, "hadamard.json"), "w") as f:
+            json.dump({"prism.hadamard.version": 1, "prism.hadamard.block_size": block,
+                       "prism.hadamard.transform": "normalized-sylvester-walsh-hadamard",
+                       "prism.hadamard.axis": "input-last-dimension", "prism.hadamard.sign_mode": "explicit",
+                       "prism.hadamard.weight_names": sorted(rotated),
+                       "prism.hadamard.inverse_weight_names": inverse, "prism.hadamard.sign_widths": widths,
+                       "prism.hadamard.sign_values": [float(v) for w in widths for v in signs_by_width[w]],
+                       "prism.hadamard.gdn_v_grouped": True}, f)
     elif fmt == "tq1":
         cfg = {"model_type": "ternel_hadamard_qwen35", "base_model_type": "qwen3_5", "schema_version": 2,
                "text_config": text_config, "eos_token_id": [1, 2], "gdn_activation_layout": "grouped",

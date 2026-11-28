@@ -83,7 +83,10 @@ its Metal headroom estimate (~8.5K on 16 GB).
 
 - **Formats the others cannot open.** Prism/JANG Hadamard-rotated bundles and 1.75-bit ternary (TQ1_G128 / PTQ1_0)
   run on the engine's own Metal kernels — not only the generic GGUF quants the others load. Ordinary GGUF runs too,
-  on the engine's own MLX decoder, with no llama.cpp needed.
+  on the engine's own MLX decoder, with no llama.cpp needed — and so do Prism's ternary GGUF types (`PQ2_0`,
+  `PTQ1_0`), which stock llama.cpp refuses. Wherever a format declares its Hadamard rotation (the config, a
+  `hadamard.json`, GGUF metadata), `engine/rotation.py` reads it into one contract and checks it against what the
+  engine applies; a pack that rotates any other set of weights is refused by name, not run into nonsense.
 - **It tells you before the download whether a model will start.** `./llm search` reads a repo's headers and marks
   what will not run, with the reason — a vendor runtime it does not ship, or a ggml type outside upstream's range.
   Checked against `prism-ml/bonsai-2-small`, where llama.cpp only fails at load time.
@@ -197,7 +200,9 @@ model folders, in LM Studio's folder and in Ollama's store (read in place, never
   `Q2_K Q3_K IQ4_NL IQ4_XS`; vocabularies are byte-level BPE or SentencePiece (incl. the dummy space prefix). The
   weights are repacked into MLX's affine quantization when loaded (Q4/Q5/Q8 exactly; Q6_K into 8 bits; Q2_K, Q3_K and
   the IQ4 types are decoded exactly — checked tensor by tensor against llama.cpp's own dequantization — then
-  re-quantized per 32 weights to 4 / 5 / 6 bits, so they take more memory than in the file), the tokenizer and the
+  re-quantized per 32 weights to 4 / 5 / 6 bits, so they take more memory than in the file; the ternary `Q2_0`,
+  `PQ2_0` and `PTQ1_0` are exactly MLX 2-bit with the block as the group — 64, 128, 128 — so they load bit for bit),
+  the tokenizer and the
   chat template are built from the file's own metadata, and it shares the server, the prompt cache, the stop handling,
   the reasoning budget, the memory watchdog and prompt-lookup speculation with the other routes.
 - **llama.cpp for the rest.** Any other GGUF (other architectures, IQ1–IQ3 quantizations, MoE with per-expert tensors
@@ -819,10 +824,10 @@ downloads one and records it as the Conductor's `vision` role. Apple Vision OCR 
 
 | Route | What | State |
 |---|---|---|
-| native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles, vision | the engine's own code |
+| native | the Qwen3.5 hybrid (GatedDeltaNet + attention, dense) — recognised by the config's architecture fields, not by a list of names — any MLX quantization, JANG / Prism Hadamard bundles (schema 1 and 2), vision | the engine's own code |
 | 1.75-bit (experimental) | PTQ1_0, TQ1_G128 (inductiveML "ternel") and JANG packed ternary bundles, on one Metal lookup-table kernel | enabled by choosing such a model |
 | mlx-lm | everything else MLX (Qwen2/3, GLM, Llama, Gemma, MoE…), text only; Inkling 2 with images | optional: `./llm setup --compat` |
-| GGUF, own decoder | llama / Qwen2 / Qwen3 / Qwen3.5 hybrid (`qwen35`, `qwen35moe`) / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
+| GGUF, own decoder | llama / Qwen2 / Qwen3 / Qwen3.5 hybrid (`qwen35`, `qwen35moe`) / Gemma 2 / Gemma 3 / Granite / MiniCPM and MoE files, `Q2_K…Q8_0`, `IQ4_NL/IQ4_XS`, ternary `Q2_0` / `PQ2_0` / `PTQ1_0` with a Prism Hadamard rotation, F16, BPE or SentencePiece | the engine's own code, no llama.cpp |
 | GGUF, InferSSD | its explicitly profiled oversized DeepSeek 4.1 / Muse / Qwen 3.6 / Qwen 3.8 MoE architectures | optional, installed separately; never fetched by this project |
 | GGUF, llama.cpp | every other GGUF (other architectures, IQ1–IQ3, per-expert MoE, image projectors) | downloaded on demand: `./llm setup --gguf` |
 

@@ -68,7 +68,7 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import family, gguf  # noqa: E402  (stdlib only: no MLX needed to route a model)
+from engine import family, gguf, rotation  # noqa: E402  (stdlib only: no MLX needed to route a model)
 
 # launched from a GUI app the PATH can be minimal; sysctl / vm_stat / ipconfig live in the system dirs
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/sbin:/sbin"
@@ -492,12 +492,18 @@ def inspect_model(path):
     rt = jang.get("runtime", {})
     if rt.get("requires_jang_affine1_expansion"):
         problems.append(T("packed JANG storage"))  # 1-bit affine: no kernel for it
-    # Newer Prism packs (schema 2) ship their own runtime and a different Hadamard contract
-    # (config "hadamard_config" -> hadamard.json with prism.hadamard.* keys). The loader refuses
-    # them ("ships .signs tensors but declares no Hadamard contract"), so say so here instead of
-    # reporting the model as supported and failing only at load time.
-    if cfgj.get("requires_runtime") or (cfgj.get("hadamard_config") and
-                                        not (cfgj.get("hadamard") or jang.get("hadamard"))):
+    # The Hadamard contract, wherever the format declares it (engine/rotation.py), checked against what the
+    # native engine applies: a pack that rotates other weights would load and answer nonsense, so it is
+    # reported here, not at load time. A pack that names its own runtime runs only when that contract is
+    # all it needs.
+    try:
+        contract = rotation.bundle(path, cfgj, jang)
+        mismatch = rotation.native_mismatch(contract, text) if route in ("native", "ptq1") else ""
+    except rotation.Unsupported as e:
+        contract, mismatch = None, str(e)
+    if mismatch:
+        problems.append(T("unsupported Hadamard layout: {why}").format(why=mismatch))
+    elif cfgj.get("requires_runtime") and (contract is None or route not in ("native", "ptq1")):
         problems.append(T("needs the vendor runtime (newer pack schema)"))
 
     tpl = ""
@@ -522,7 +528,7 @@ def inspect_model(path):
             "vision": bool(cfgj.get("vision_config")), "thinking": "enable_thinking" in tpl or inkling,
             "thinking_default": inkling or ("enable_thinking" in tpl and template_thinks_by_default(tpl)),
             "mlxlm_vision": inkling,
-            "efforts": efforts, "hadamard": bool(cfgj.get("hadamard") or jang.get("hadamard")),
+            "efforts": efforts, "hadamard": contract is not None,
             "tool_calls": "<tool_call>" in tpl or "tools" in tpl,
             "supported": not problems, "problems": problems,
             "streamable": streamable_gb(path, weights, cfgj) if route == "mlxlm" else 0.0}
@@ -612,7 +618,7 @@ def inspect_gguf(path, name=None):
         vendor = gguf.vendor_types(path)
     except (OSError, gguf.GGUFError, struct.error):
         vendor = set()
-    if vendor:
+    if vendor and not gguf.native_support(path)[0]:   # vendor types the own decoder reads (Prism ternary) run there
         problems.append(T("vendor quantization (ggml type {t}); needs that vendor's runtime").format(
             t=", ".join(str(t) for t in sorted(vendor))))
     return {"path": path, "name": base, "size": size / 2**30, "format": f"GGUF {h['quant']}", "type": h["architecture"],
@@ -830,17 +836,36 @@ def fav_cmd(cfg, args):
     return True
 
 
+_REPO_ID = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+
+def installed_from(models, repo):
+    """The scanned models downloaded from hub repo `org/name`: our flat folder (…/hub/org/name — an MLX folder,
+    or GGUF files inside it) or the Hugging Face cache layout (…/hub/models--org--name/snapshots/<rev>)."""
+    if not _REPO_ID.match(repo or ""):
+        return []
+    org, name = repo.split("/", 1)
+    flat, layered = os.sep + os.path.join(org, name), f"models--{org}--{name}"
+    out = []
+    for m in models:
+        path = os.path.realpath(m["path"])
+        folder = os.path.dirname(path) if os.path.isfile(path) else path
+        if folder.lower().endswith(flat.lower()) or layered in path.split(os.sep):
+            out.append(m)
+    return out
+
+
 def resolve_model(models, arg):
-    """Find the one model `arg` names — by exact path, 1-based list number, or a unique name substring.
-    Returns (pick, matches): pick is None when nothing or several things match (matches lists them, for a
-    "be more specific" message)."""
+    """Find the one model `arg` names — by exact path, 1-based list number, a unique name substring, or the
+    `org/name` it was downloaded from (what `./llm pull` took). Returns (pick, matches): pick is None when nothing
+    or several things match (matches lists them, for a "be more specific" message)."""
     arg = str(arg)
     exact = next((m for m in models if m["path"] == arg), None)
     if exact:
         return exact, [exact]
     if arg.isdigit() and 1 <= int(arg) <= len(models):
         return models[int(arg) - 1], [models[int(arg) - 1]]
-    hits = [m for m in models if arg.lower() in m["name"].lower()]
+    hits = [m for m in models if arg.lower() in m["name"].lower()] or installed_from(models, arg)
     return (hits[0] if len(hits) == 1 else None), hits
 
 
@@ -1138,14 +1163,8 @@ def steer_base(path):
 def find_installed(cfg, repo):
     """The scanned model that is hub repo `org/name`, wherever it was downloaded: our own flat folder
     (…/hub/org/name) or the Hugging Face cache layout (…/hub/models--org--name/snapshots/<rev>). None if absent."""
-    org, name = repo.split("/", 1)
-    flat = os.sep + os.path.join(org, name)
-    layered = f"models--{org}--{name}"
-    for m in scan_models(cfg):
-        path = os.path.realpath(m["path"])
-        if path.endswith(flat) or (layered in path.split(os.sep)):
-            return m
-    return None
+    hits = installed_from(scan_models(cfg), repo)
+    return hits[0] if hits else None
 
 
 def steer_cmd(cfg, args):
@@ -1294,7 +1313,8 @@ def remove_cmd(cfg, args):
     if arg.isdigit() and 1 <= int(arg) <= len(models):
         hits = [models[int(arg) - 1]]
     else:
-        hits = [m for m in models if arg == m["path"] or arg.lower() in m["name"].lower()]
+        hits = [m for m in models if arg == m["path"] or arg.lower() in m["name"].lower()] \
+            or installed_from(models, arg)            # the org/name it was pulled as
     if len(hits) != 1:
         print(R(T("Model not found.")) if not hits else Y(T("Several matches:") + " " + ", ".join(h["name"] for h in hits)))
         return False
@@ -4630,7 +4650,7 @@ COMMANDS = [
 
     Command("models", "Models", "List models found locally.", "./llm models", ("--json", "--names")),
     Command("use", "Models", "Select the active model by list number or name (restarts a running engine).",
-            "./llm use <#|name>", ()),
+            "./llm use <#|name|org/name>", ()),
     Command("search", "Models", "Search models on Hugging Face (or ModelScope): MLX first, then GGUF.",
             "./llm search <query> [--json] [--source modelscope]", ("--json", "--source")),
     Command("pull", "Models", "Download a model (resumable) into the Hugging Face cache.",
@@ -4638,12 +4658,12 @@ COMMANDS = [
     Command("fetch", "Models", "Add a model from a source you provide: a .gguf/archive URL, or a magnet "
             "(needs aria2c).", "./llm fetch <url|magnet> [name]", ("--progress",)),
     Command("show", "Models", "A model's card: format, route, size, context, capabilities.",
-            "./llm show [<#|name>]", ("--json",)),
+            "./llm show [<#|name|org/name>]", ("--json",)),
     Command("ps", "Models", "The model loaded right now.", "./llm ps", ("--json",)),
     Command("create", "Models", "A named profile: a base model with its own system prompt and sampling.",
             './llm create <name> --from <model> [--system "…"] [--param k=v]',
             ("--from", "--system", "--param", "--rm")),
-    Command("rm", "Models", "Delete a downloaded model from disk.", "./llm rm <#|name> [--yes]", ("--yes", "-y")),
+    Command("rm", "Models", "Delete a downloaded model from disk.", "./llm rm <#|name|org/name> [--yes]", ("--yes", "-y")),
     Command("convert", "Models", "Export a GGUF as an MLX folder (config + f16 safetensors + tokenizer).",
             "./llm convert <model.gguf> [out_dir]", ()),
     Command("inspect", "Models", "What is inside a model, from its headers: layers, storage types, bits per "

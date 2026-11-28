@@ -503,6 +503,21 @@ class TestSettingsAndSelection(State):
         self.assertTrue(ok)
         self.assertFalse(os.path.exists(a))
 
+    def test_the_org_name_it_was_pulled_as_names_it_too(self):
+        # `./llm pull org/name` stores …/org/name, but the list names the folder only: rm and use took only that
+        root = self.cfg["dirs"][0]
+        a = write_model(os.path.join(root, "prism-ml", "Ternary-Bonsai-2.5-27B-mlx-2bit"))
+        write_model(os.path.join(root, "other", "Ternary-Bonsai-2.5-27B-mlx-2bit"))
+        models = llm.scan_models(self.cfg)
+        pick, hits = llm.resolve_model(models, "prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit")
+        self.assertEqual(pick["path"], a)
+        self.assertEqual(llm.resolve_model(models, "prism-ml/absent"), (None, []))
+        self.assertEqual(llm.installed_from(models, "../etc"), [])
+        ok, out = quiet(llm.remove_cmd, self.cfg, ["prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit", "--yes"])
+        self.assertTrue(ok, out)
+        self.assertFalse(os.path.exists(a))
+        self.assertEqual(len(llm.scan_models(self.cfg)), 1)       # the other org's copy is untouched
+
 
 # ───────────────────────────── hub ─────────────────────────────
 WEIGHTS = os.urandom(200_000)

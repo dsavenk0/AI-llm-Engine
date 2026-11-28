@@ -4,12 +4,27 @@ All notable changes to AI-llm-Engine. Dates are 2026. Russian version: [CHANGELO
 
 ## Unreleased
 
+### Added
+- **Ternary Bonsai 2.5 27B** (Prism ML) runs in both of its versions. The MLX one
+  (`prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit`), which used to be refused as needing its vendor's runtime, now runs
+  on the built-in engine with no setting to turn on. The GGUF one (`prism-ml/Ternary-Bonsai-2.5-27B-GGUF`) runs on
+  the built-in decoder in all three of its formats — `PQ2_0`, `PTQ1_0` and `Q2_0` — with images, and no llama.cpp
+  fork. `./llm pull` takes `PQ2_0` and leaves out the variants with a draft head.
+- A model whose weights are stored rotated is checked before it starts: if it rotates different weights than the
+  engine would, the model list says which one, instead of the model answering nonsense.
+
 ### Changed
 - **The terminal chat asks less.** Commands that only read — `ls`, `cat`, `grep`, `find`, `git status`, `git diff`,
   `git log` and the like, also piped into each other — run without asking. When it does ask, answer `a` to say yes
   to that kind until the chat ends: file edits, or one program's commands such as `npm test` or `git add`.
   Dangerous commands (`git push`, `rm -rf`, `sudo`) still ask every time. The first question and the chat's opening
   line point to `/auto`, which approves all edits and commands; `/status` shows what is allowed.
+- `./llm rm`, `use`, `show` and `run` also take the `org/name` a model was downloaded as
+  (`./llm rm prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit`), not only its folder name or list number.
+
+### Fixed
+- **Images on MLX models stored in a single file.** A model without a `model.safetensors.index.json` (one
+  `model.safetensors`) had its vision tower overlooked, so it answered as text-only; it now reads images.
 
 ## 1.5.0 — 25 November
 

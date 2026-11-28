@@ -35,15 +35,24 @@ TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 2: ("Q4_0", 32, 18), 3: ("Q4_1", 32
          14: ("Q6_K", 256, 210), 30: ("BF16", 1, 2), 10: ("Q2_K", 256, 84), 11: ("Q3_K", 256, 110),
          20: ("IQ4_NL", 32, 18), 23: ("IQ4_XS", 256, 136),
          16: ("IQ2_XXS", 256, 66), 17: ("IQ2_XS", 256, 74), 22: ("IQ2_S", 256, 82), 18: ("IQ3_XXS", 256, 98),
-         21: ("IQ3_S", 256, 110), 19: ("IQ1_S", 256, 50), 29: ("IQ1_M", 256, 56)}
+         21: ("IQ3_S", 256, 110), 19: ("IQ1_S", 256, 50), 29: ("IQ1_M", 256, 56),
+         42: ("Q2_0", 64, 18), 142: ("PQ2_0", 128, 34), 143: ("PTQ1_0", 128, 28)}
 OTHER = {15: "Q8_K"}
+# Ternary formats (Prism Bonsai): every weight is (code - 1) * d with code 0..2 (Q2_0 also allows 3), one fp16 d per
+# block. That is MLX's affine 2-bit form with scale d and bias -d over the block, so they load exactly, with MLX's
+# group set to the block — no re-quantization, the file's own bits.
+#   Q2_0    upstream ggml (42): [fp16 d][16 B: 64 codes, 2 bits each, little end first]
+#   PQ2_0   Prism (142):        [fp16 d][32 B: 128 codes, same packing]
+#   PTQ1_0  Prism (143):        [24 B qs][2 B qh][fp16 d]: 128 trits, five per qs byte and four per qh byte
+#                               (the trit order is documented in engine/ptq1.py)
+TERNARY = {"Q2_0": 64, "PQ2_0": 128, "PTQ1_0": 128}
 # bits the exactly decoded values are re-quantized to (per group of 32)
 REQUANT_BITS = {"Q6_K": 8, "Q2_K": 4, "Q3_K": 5, "IQ4_NL": 6, "IQ4_XS": 6,
                 "IQ2_XXS": 4, "IQ2_XS": 4, "IQ2_S": 4, "IQ1_S": 4, "IQ1_M": 4, "IQ3_XXS": 5, "IQ3_S": 5}
 # The representation produced for MLX. Kept in one place so the memory planner and persistent expert cache do
 # not guess a layout independently from `load_matrix`.
 MLX_BITS = {"Q4_0": 4, "Q4_1": 4, "Q5_0": 5, "Q5_1": 5, "Q8_0": 8,
-            "Q4_K": 4, "Q5_K": 5, **REQUANT_BITS}
+            "Q4_K": 4, "Q5_K": 5, **REQUANT_BITS, **{t: 2 for t in TERNARY}}
 # ggml's kvalues_iq4nl: the 16 levels of IQ4_NL / IQ4_XS
 KVALUES_IQ4NL = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113], np.float32)
 
@@ -443,10 +452,83 @@ def pack_codes(codes, bits):
     return np.packbits(bitmat, axis=1, bitorder="little").view("<u4").reshape(rows, cols * bits // 32)
 
 
-def load_matrix(gf, info, chunk_rows=2048):
-    """A 2-D tensor as (w uint32, scales f16, biases f16, bits) numpy arrays ready for mx.quantized_matmul."""
+def group_size(info):
+    """MLX's group for this tensor once loaded: the block of a ternary format, else 32."""
+    return TERNARY.get(info.type_name, GROUP)
+
+
+_POW3 = np.array([1, 3, 9, 27, 81], dtype=np.uint16)
+
+
+def _trits(b, n):
+    """Trits 0..n-1 of each byte [..., m] → [..., n, m]: trit k of b is ((b * 3^k) mod 256) * 3 >> 8."""
+    x = b.astype(np.uint16)[..., None, :] * _POW3[:n, None]
+    return (((x & 255) * 3) >> 8).astype(np.uint8)
+
+
+def ptq1_codes(blk):
+    """PTQ1_0 blocks [n, 28] → codes [n, 128] (0..2): elements 0-79 are trits of qs[0:16], 80-119 of qs[16:24],
+    120-127 of qh[0:2], each trit-major."""
+    n = blk.shape[0]
+    return np.concatenate([_trits(blk[:, 0:16], 5).reshape(n, 80), _trits(blk[:, 16:24], 5).reshape(n, 40),
+                           _trits(blk[:, 24:26], 4).reshape(n, 8)], axis=1)
+
+
+def _ptq1_words_mlx(blk):
+    """ptq1_codes packed into MLX's 2-bit words, on the GPU: the same arithmetic, ~7x faster than NumPy's gathers
+    (a 27B model's PTQ1_0 file: ~12 s instead of ~90 s at load)."""
+    import mlx.core as mx
+    n = blk.shape[0]
+    t = mx.array(blk[:, :26]).astype(mx.uint16)[:, :, None] * mx.array(_POW3)
+    t = (((t & 255) * 3) >> 8).astype(mx.uint8)                                  # [n, 26 bytes, 5 trits]
+    c = mx.concatenate([t[:, 0:16].transpose(0, 2, 1).reshape(n, 80), t[:, 16:24].transpose(0, 2, 1).reshape(n, 40),
+                        t[:, 24:26, :4].transpose(0, 2, 1).reshape(n, 8)], axis=1).reshape(n, 32, 4)
+    packed = c[..., 0] | (c[..., 1] << 2) | (c[..., 2] << 4) | (c[..., 3] << 6)  # 4 codes per byte, low first
+    return np.array(packed).view("<u4")
+
+
+def ternary_blocks(name, blk):
+    """Blocks [n, bytes] of a ternary format → (words uint32 [n, block/16], scale f16 [n], bias f16 [n])."""
+    if name == "PTQ1_0":
+        d = np.ascontiguousarray(blk[:, 26:28]).view("<f2")[:, 0]
+        try:
+            words = _ptq1_words_mlx(blk)
+        except ImportError:
+            codes = ptq1_codes(blk).astype(np.uint32).reshape(-1, 8, 16)
+            words = np.bitwise_or.reduce(codes << (2 * np.arange(16, dtype=np.uint32)), axis=-1).astype("<u4")
+    else:                                   # Q2_0 / PQ2_0: the codes are already MLX's 2-bit little-endian stream
+        d = np.ascontiguousarray(blk[:, 0:2]).view("<f2")[:, 0]
+        words = np.ascontiguousarray(blk[:, 2:]).view("<u4")
+    if not np.isfinite(d).all():
+        raise UnsupportedQuant(f"{name}: a block scale is not finite")
+    return words, d, -d
+
+
+def _load_ternary(gf, info, chunk_rows):
     name = info.type_name
     rows, cols = info.shape
+    _, block, size = TYPES[info.type]
+    if cols % block:
+        raise UnsupportedQuant(f"{info.name}: {cols} columns are not a multiple of the {name} block ({block})")
+    raw = gf.raw(info).reshape(rows, cols // block, size)
+    ws, ss, bs = [], [], []
+    for r0 in range(0, rows, chunk_rows):
+        blk = np.ascontiguousarray(raw[r0:r0 + chunk_rows]).reshape(-1, size)
+        words, d, bias = ternary_blocks(name, blk)
+        n = min(chunk_rows, rows - r0)
+        ws.append(words.reshape(n, cols // 16))
+        ss.append(d.reshape(n, cols // block))
+        bs.append(bias.reshape(n, cols // block))
+    return np.concatenate(ws), np.concatenate(ss), np.concatenate(bs), 2
+
+
+def load_matrix(gf, info, chunk_rows=2048):
+    """A 2-D tensor as (w uint32, scales f16, biases f16, bits) numpy arrays ready for mx.quantized_matmul, with
+    the group `group_size(info)`."""
+    name = info.type_name
+    rows, cols = info.shape
+    if name in TERNARY:
+        return _load_ternary(gf, info, chunk_rows)
     if name not in ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q4_K", "Q5_K", "Q6_K") and name not in EXACT:
         raise UnsupportedQuant(f"{info.name}: {name}")
     _, block, size = TYPES[info.type]
@@ -470,11 +552,11 @@ def load_matrix(gf, info, chunk_rows=2048):
 def matrix_layout(info):
     """The exact NumPy shapes/dtypes `load_matrix` returns, without decoding the tensor."""
     rows, cols = info.shape
-    bits = MLX_BITS.get(info.type_name)
-    if bits is None or (cols * bits) % 32 or cols % GROUP:
+    bits, gs = MLX_BITS.get(info.type_name), group_size(info)
+    if bits is None or (cols * bits) % 32 or cols % gs:
         raise UnsupportedQuant(f"{info.name}: no MLX packed layout for {info.type_name}")
     return bits, ((rows, cols * bits // 32), np.dtype("<u4")), \
-        ((rows, cols // GROUP), np.dtype("<f2")), ((rows, cols // GROUP), np.dtype("<f2"))
+        ((rows, cols // gs), np.dtype("<f2")), ((rows, cols // gs), np.dtype("<f2"))
 
 
 def load_dense(gf, info):

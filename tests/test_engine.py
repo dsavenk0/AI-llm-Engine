@@ -1185,6 +1185,107 @@ class TestJangPackedModel(TestPTQ1Model):
         self.assertEqual(eng.model.args["ternary_scheme"], "ptq1")   # the default; no ternary module exists
 
 
+class TestSingleFileVisionTower(unittest.TestCase):
+    """A checkpoint in one model.safetensors has no index (prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit): its vision
+    tower used to go unseen — vision silently off — because only the index was searched."""
+
+    def test_the_tower_is_found_from_the_header_and_reads_the_image_the_same(self):
+        import tempfile
+        from engine.generate import Engine
+        from engine.loader import has_vision
+        from tests.synth import make_vision_bundle, png_data_uri
+        indexed, single = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_vision_bundle(indexed, seed=21)
+        make_vision_bundle(single, seed=21)
+        os.remove(os.path.join(single, "model.safetensors.index.json"))
+        self.assertTrue(has_vision(single))
+        out = []
+        for d in (indexed, single):
+            eng = Engine(d, vision=True, max_context=1024, max_tokens=4, disk_cache_gb=0, thinking=False,
+                         log=lambda *_: None)
+            self.assertTrue(eng.vision_allowed)
+            msgs = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": png_data_uri()}},
+                                                 {"type": "text", "text": "what is this?"}]}]
+            text, images, _ = eng.build_prompt(msgs, thinking=False)
+            ids, media = eng.encode(text, images)
+            st = None
+            for it in eng.generate(ids, media=media, sampling={"temperature": 0}, max_tokens=3):
+                if isinstance(it, dict):
+                    st = it
+            out.append((ids, st["completion_tokens"], eng.vision_bytes))
+        self.assertEqual(out[0], out[1])
+        self.assertGreater(out[1][2], 0)                    # the tower really was loaded
+
+
+class TestPrismSchema2Model(unittest.TestCase):
+    """A Prism MLX pack, schema 2 (prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit): ordinary MLX 2-bit weights whose
+    Hadamard contract lives in hadamard.json, listing every rotated weight. It runs on the native engine without
+    any option, gives its float twin's logits, and a contract that differs from what the engine applies is
+    refused instead of answering nonsense."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from tests.synth import make_ptq1_bundle
+        cls.q, cls.f = tempfile.mkdtemp(), tempfile.mkdtemp()
+        make_ptq1_bundle(cls.q, seed=9, fmt="prism2")
+        make_ptq1_bundle(cls.f, seed=9, twin=True, fmt="prism2")
+
+    engine = TestPTQ1Model.engine
+    last_logits = TestPTQ1Model.last_logits
+
+    def copy(self):
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp()
+        shutil.copytree(self.q, d, dirs_exist_ok=True)
+        return d
+
+    def edit_contract(self, d, fn):
+        p = os.path.join(d, "hadamard.json")
+        with open(p) as f:
+            c = json.load(f)
+        fn(c)
+        with open(p, "w") as f:
+            json.dump(c, f)
+
+    def test_it_runs_natively_with_no_option_and_matches_the_float_twin(self):
+        eng = self.engine(self.q)
+        self.assertFalse(eng.model.ptq1)
+        lq, lf = self.last_logits(eng), self.last_logits(self.engine(self.f))
+        self.assertLess(float(np.abs(lq - lf).max()) / float(np.abs(lf).max()), 0.01)
+        self.assertEqual(int(lq.argmax()), int(lf.argmax()))
+
+    def test_decoding_token_by_token_matches_the_prompt_pass(self):
+        eng = self.engine(self.q)
+        lp, ld = self.last_logits(eng), self.last_logits(eng, one_by_one=True)
+        self.assertLess(float(np.abs(lp - ld).max()) / float(np.abs(lp).max()), 0.01)
+
+    def test_a_contract_that_leaves_out_a_rotated_weight_is_refused(self):
+        d = self.copy()
+        self.edit_contract(d, lambda c: c["prism.hadamard.weight_names"].pop())
+        with self.assertRaises(ValueError) as ctx:
+            self.engine(d)
+        self.assertIn("Hadamard", str(ctx.exception))
+
+    def test_signs_that_disagree_with_the_tensors_are_refused(self):
+        d = self.copy()
+
+        def flip(c):
+            c["prism.hadamard.sign_values"][0] *= -1
+        self.edit_contract(d, flip)
+        with self.assertRaises(ValueError) as ctx:
+            self.engine(d)
+        self.assertIn("signs", str(ctx.exception))
+
+    def test_an_unknown_transform_is_refused(self):
+        d = self.copy()
+        self.edit_contract(d, lambda c: c.update({"prism.hadamard.transform": "randomized-hadamard"}))
+        with self.assertRaises(ValueError) as ctx:
+            self.engine(d)
+        self.assertIn("transform", str(ctx.exception))
+
+
 class TestPrefixDivergence(unittest.TestCase):
     """An agent that puts a changing value (a time, a file list) in the middle of its system prompt used to
     be prefilled whole every session: the stored prompt was no prefix of the new one. The engine now also
